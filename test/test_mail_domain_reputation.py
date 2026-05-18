@@ -147,8 +147,13 @@ class MailDomainReputationTests(unittest.TestCase):
 
         with (
             mock.patch.object(openai_register.domain_reputation, "store", store),
-            mock.patch.object(openai_register.account_service, "add_accounts"),
-            mock.patch.object(openai_register.account_service, "refresh_accounts"),
+            mock.patch.object(openai_register.account_service, "add_accounts") as add_accounts,
+            mock.patch.object(
+                openai_register.account_service,
+                "refresh_accounts",
+                return_value={"refreshed": 1, "errors": []},
+            ) as refresh_accounts,
+            mock.patch.object(openai_register, "log_registration_ip", return_value={"ok": True, "ip": "52.68.61.169", "country_code": "JP"}),
             mock.patch.object(openai_register.PlatformRegistrar, "close"),
         ):
             with mock.patch.object(openai_register.PlatformRegistrar, "register", return_value={
@@ -170,6 +175,9 @@ class MailDomainReputationTests(unittest.TestCase):
                 bad = openai_register.worker(2)
 
         self.assertTrue(ok["ok"])
+        self.assertEqual(ok["refresh"]["refreshed"], 1)
+        add_accounts.assert_any_call(["token"])
+        refresh_accounts.assert_any_call(["token"])
         self.assertFalse(bad["ok"])
         self.assertEqual(store.good_domains("yyds_mail"), ["good.example"])
         self.assertTrue(store.is_disabled("yyds_mail", "bad.example"))

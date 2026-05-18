@@ -11,6 +11,7 @@ from typing import Any
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.protocol.conversation import no_image_result_message
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
 TASK_STATUS_QUEUED = "queued"
@@ -230,7 +231,7 @@ class ImageTaskService:
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
             if not isinstance(data, list) or not data:
-                message = _clean(result.get("message")) or "image task returned no image data"
+                message = _clean(result.get("message")) or no_image_result_message()
                 raise RuntimeError(message)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
             self._log_call(

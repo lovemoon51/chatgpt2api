@@ -19,13 +19,18 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
   Call: "call",
+  Text: "text",
   Account: "account",
 } as const;
 
 const typeLabels: Record<string, string> = {
-  [LogType.Call]: "调用日志",
+  [LogType.Call]: "图片调用日志",
+  [LogType.Text]: "文本生成日志",
   [LogType.Account]: "账号管理日志",
 };
+
+const textLogEndpoints = new Set(["/v1/chat/completions", "/v1/responses", "/v1/messages"]);
+const textLogSummaryPrefixes = ["文本生成", "Responses", "Messages"];
 
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
@@ -49,6 +54,30 @@ function getStatus(item: SystemLog) {
   return "-";
 }
 
+function getLogType(item: SystemLog) {
+  if (item.type === LogType.Text) return LogType.Text;
+  if (item.type !== LogType.Call) return item.type;
+  const endpoint = typeof item.detail?.endpoint === "string" ? item.detail.endpoint : "";
+  const summary = item.summary || "";
+  return textLogEndpoints.has(endpoint) || textLogSummaryPrefixes.some((prefix) => summary.startsWith(prefix))
+    ? LogType.Text
+    : LogType.Call;
+}
+
+function normalizeLogItem(item: SystemLog): SystemLog {
+  const normalizedType = getLogType(item);
+  return normalizedType === item.type ? item : { ...item, type: normalizedType };
+}
+
+function mergeLogs(...groups: SystemLog[][]) {
+  const seen = new Set<string>();
+  return groups.flat().filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(LogType.Call);
@@ -66,6 +95,9 @@ function LogsContent() {
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
+  const isTextLog = type === LogType.Text;
+  const hasCallMeta = isCallLog || isTextLog;
+  const showImages = isCallLog;
   const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
@@ -77,9 +109,16 @@ function LogsContent() {
   const loadLogs = async () => {
     setIsLoading(true);
     try {
-      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
-      setItems(data.items);
-      setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
+      const filters = { start_date: startDate, end_date: endDate };
+      const data = type === LogType.Text
+        ? await Promise.all([
+          fetchSystemLogs({ ...filters, type: LogType.Text }),
+          fetchSystemLogs({ ...filters, type: LogType.Call }),
+        ]).then(([textLogs, callLogs]) => ({ items: mergeLogs(textLogs.items, callLogs.items) }))
+        : await fetchSystemLogs({ ...filters, type });
+      const normalizedItems = data.items.map(normalizeLogItem).filter((item) => item.type === type);
+      setItems(normalizedItems);
+      setSelectedIds((current) => current.filter((id) => normalizedItems.some((item) => item.id === id)));
       setPage(1);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载日志失败");
@@ -144,7 +183,8 @@ function LogsContent() {
           <Select value={type} onValueChange={setType}>
             <SelectTrigger className="h-10 w-[150px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value={LogType.Call}>调用日志</SelectItem>
+              <SelectItem value={LogType.Call}>图片调用日志</SelectItem>
+              <SelectItem value={LogType.Text}>文本生成日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
             </SelectContent>
           </Select>
@@ -195,10 +235,11 @@ function LogsContent() {
                   <TableHead className="w-12"></TableHead>
                   <TableHead>时间</TableHead>
                   <TableHead>类型</TableHead>
-                  {isCallLog ? <TableHead>令牌名称</TableHead> : null}
-                  {isCallLog ? <TableHead>调用耗时</TableHead> : null}
-                  {isCallLog ? <TableHead>状态</TableHead> : null}
-                  {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
+                  {hasCallMeta ? <TableHead>令牌名称</TableHead> : null}
+                  {hasCallMeta ? <TableHead>调用耗时</TableHead> : null}
+                  {hasCallMeta ? <TableHead>状态</TableHead> : null}
+                  {hasCallMeta ? <TableHead>模型</TableHead> : null}
+                  {showImages ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
                 </TableRow>
@@ -213,16 +254,17 @@ function LogsContent() {
                       </TableCell>
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
-                      {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
-                      {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
-                      {isCallLog ? (
+                      {hasCallMeta ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
+                      {hasCallMeta ? <TableCell>{formatDuration(item)}</TableCell> : null}
+                      {hasCallMeta ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
                         </TableCell>
                       ) : null}
-                      {isCallLog ? (
+                      {hasCallMeta ? <TableCell>{getDetailText(item, "model")}</TableCell> : null}
+                      {showImages ? (
                         <TableCell>
                           {urls.length ? (
                             <div className="flex items-center gap-1.5">

@@ -20,6 +20,8 @@ from curl_cffi import requests as curl_requests
 from requests.adapters import HTTPAdapter
 
 from services.account_service import account_service
+from services.clash_party_service import detect_outbound_ip
+from services.cpa_service import upload_account_to_configured_pools
 from services.register import domain_reputation, mail_provider
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -221,6 +223,94 @@ def _record_mail_failure(error: Exception) -> dict:
     if not provider or not domain:
         return {}
     return domain_reputation.store.record_failure(provider, domain, error.reason)
+
+
+def _normalize_refresh_result(raw: Any) -> dict:
+    result = raw if isinstance(raw, dict) else {}
+    raw_errors = result.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    try:
+        refreshed = int(result.get("refreshed") or 0)
+    except (TypeError, ValueError):
+        refreshed = 0
+    return {"refreshed": refreshed, "errors": errors}
+
+
+def refresh_registered_account(access_token: str, index: int) -> dict:
+    step(index, "开始刷新新账号信息和额度")
+    refresh_result = _normalize_refresh_result(account_service.refresh_accounts([access_token]))
+    errors = refresh_result["errors"]
+    if errors:
+        first_error = errors[0].get("error") if isinstance(errors[0], dict) else str(errors[0])
+        step(
+            index,
+            f"新账号刷新完成：成功 {refresh_result['refreshed']} 个，失败 {len(errors)} 个"
+            f"{f'，首个错误：{first_error}' if first_error else ''}",
+            "yellow",
+        )
+    else:
+        account = account_service.get_account(access_token) or {}
+        account_type = "可开通 Plus" if account.get("can_activate_plus") else "普通号"
+        step(index, f"新账号刷新成功：成功 {refresh_result['refreshed']} 个，账号类型：{account_type}", "green")
+    return refresh_result
+
+
+def log_registration_ip(index: int, proxy: str) -> dict[str, object]:
+    result = detect_outbound_ip(proxy)
+    if not result.get("ok"):
+        step(index, f"注册出口 IP 检测失败：{result.get('error') or 'unknown'}", "yellow")
+        return result
+    country_code = str(result.get("country_code") or "").upper()
+    country = str(result.get("country") or "").strip()
+    location = " / ".join(str(item).strip() for item in (result.get("region"), result.get("city")) if str(item or "").strip())
+    proxy_label = proxy.strip() or "直连"
+    step(
+        index,
+        f"注册出口 IP：{result.get('ip')}，位置={country_code or country}{f' {location}' if location else ''}，代理={proxy_label}",
+        "green" if country_code == "JP" else "yellow",
+    )
+    return result
+
+
+def upload_registered_account_to_cpa(access_token: str, register_result: dict, refresh_result: dict, index: int) -> dict:
+    if int(refresh_result.get("refreshed") or 0) <= 0:
+        step(index, "新账号未刷新成功，跳过 CPA 上传", "yellow")
+        return {"configured": 0, "uploaded": 0, "items": [], "errors": [], "skipped": True}
+
+    account = account_service.get_account(access_token) or {}
+    cpa_source = {
+        **account,
+        "access_token": access_token,
+        "email": register_result.get("email") or account.get("email"),
+        "oauth_id_token": register_result.get("id_token") or account.get("id_token"),
+        "refresh_token": register_result.get("refresh_token") or account.get("refresh_token"),
+        "created_at": register_result.get("created_at") or account.get("created_at"),
+    }
+
+    step(index, "开始上传新账号到 CPA")
+    result = upload_account_to_configured_pools(cpa_source)
+    configured = int(result.get("configured") or 0)
+    uploaded = int(result.get("uploaded") or 0)
+    errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+    if configured == 0:
+        step(index, "未配置 CPA 连接，已跳过 CPA 上传", "yellow")
+    elif errors:
+        first = errors[0] if isinstance(errors[0], dict) else {}
+        first_error = str(first.get("error") or "").strip()
+        first_pool = str(first.get("pool_name") or "").strip()
+        step(
+            index,
+            f"CPA 上传完成：成功 {uploaded}/{configured}，失败 {len(errors)}"
+            f"{f'，首个错误：{first_pool} {first_error}'.rstrip() if first_error or first_pool else ''}",
+            "yellow",
+        )
+    else:
+        filename = ""
+        items = result.get("items") if isinstance(result.get("items"), list) else []
+        if items and isinstance(items[0], dict):
+            filename = str(items[0].get("filename") or "").strip()
+        step(index, f"同步到 CPA 成功：{uploaded}/{configured}{f'，文件 {filename}' if filename else ''}", "green")
+    return result
 
 
 class SentinelTokenGenerator:
@@ -793,21 +883,40 @@ class PlatformRegistrar:
 
 def worker(index: int) -> dict:
     start = time.time()
-    registrar = PlatformRegistrar(config["proxy"])
+    proxy = str(config["proxy"] or "").strip()
+    registrar = PlatformRegistrar(proxy)
+    registration_ip: dict[str, object] = {}
     try:
         step(index, "任务启动")
+        registration_ip = log_registration_ip(index, proxy)
         result = registrar.register(index)
+        if registration_ip.get("ok"):
+            result["registration_ip"] = {
+                key: registration_ip.get(key)
+                for key in ("ip", "country_code", "country", "region", "city", "org", "proxy_url")
+                if registration_ip.get(key) not in (None, "")
+            }
         _record_mail_success(result)
-        cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_accounts([access_token])
-        account_service.refresh_accounts([access_token])
+        refresh_result = refresh_registered_account(access_token, index)
+        if int(refresh_result.get("refreshed") or 0) <= 0:
+            account_service.delete_accounts([access_token])
+            errors = refresh_result.get("errors") if isinstance(refresh_result.get("errors"), list) else []
+            first_error = ""
+            if errors:
+                first = errors[0] if isinstance(errors[0], dict) else {"error": str(errors[0])}
+                first_error = str(first.get("error") or "").strip()
+            step(index, f"新账号刷新失败，已从号池移除{f'，原因：{first_error}' if first_error else ''}", "red")
+            raise RuntimeError(f"新账号刷新失败，未写入号池{f'：{first_error}' if first_error else ''}")
+        cpa_result = upload_registered_account_to_cpa(access_token, result, refresh_result, index)
+        cost = time.time() - start
         with stats_lock:
             stats["done"] += 1
             stats["success"] += 1
             avg = (time.time() - stats["start_time"]) / stats["success"]
         log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
-        return {"ok": True, "index": index, "result": result}
+        return {"ok": True, "index": index, "result": result, "refresh": refresh_result, "cpa": cpa_result, "registration_ip": registration_ip}
     except Exception as e:
         cost = time.time() - start
         reputation = _record_mail_failure(e)

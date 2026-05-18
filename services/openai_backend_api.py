@@ -24,6 +24,10 @@ class InvalidAccessTokenError(RuntimeError):
     pass
 
 
+class ChatGPTCheckoutRequiredError(RuntimeError):
+    pass
+
+
 @dataclass
 class ChatRequirements:
     """保存一次对话请求所需的 sentinel token。"""
@@ -38,6 +42,46 @@ DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+PLUS_PROMO_PHRASES = (
+    "你已获得 1 个月的 Plus 套餐优惠促销代码",
+    "plus 套餐优惠促销代码",
+    "1 个月的 Plus",
+    "plus promo",
+    "plus promotion",
+)
+CHECKOUT_URL_PATTERNS = (
+    "/checkout/openai_llc/",
+    "chatgpt.com/checkout/",
+    "cs_live_",
+)
+
+
+def _walk_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_strings(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _walk_strings(item)
+
+
+def _find_plus_promo_text(*payloads: Any) -> str:
+    for payload in payloads:
+        for text in _walk_strings(payload):
+            cleaned = " ".join(str(text).split())
+            lowered = cleaned.lower()
+            if any(phrase.lower() in lowered for phrase in PLUS_PROMO_PHRASES):
+                return cleaned
+    return ""
+
+
+def _is_checkout_url(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and any(pattern in text for pattern in CHECKOUT_URL_PATTERNS)
 
 
 class OpenAIBackendAPI:
@@ -140,6 +184,22 @@ class OpenAIBackendAPI:
             headers.update(extra)
         return headers
 
+    def _raise_if_checkout_response(self, response: requests.Response, context: str) -> None:
+        urls = [
+            str(getattr(response, "url", "") or ""),
+            str(getattr(response, "redirect_url", "") or ""),
+            str((getattr(response, "headers", {}) or {}).get("location") or ""),
+        ]
+        history = getattr(response, "history", []) or []
+        for item in history:
+            urls.append(str(getattr(item, "url", "") or ""))
+            urls.append(str((getattr(item, "headers", {}) or {}).get("location") or ""))
+        checkout_url = next((url for url in urls if _is_checkout_url(url)), "")
+        if checkout_url:
+            raise ChatGPTCheckoutRequiredError(
+                f"{context} redirected to ChatGPT checkout, current account cannot generate images: {checkout_url}"
+            )
+
     @staticmethod
     def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None, bool]:
         for item in limits_progress:
@@ -203,7 +263,9 @@ class OpenAIBackendAPI:
         limits_progress = init_payload.get("limits_progress")
         limits_progress = limits_progress if isinstance(limits_progress, list) else []
         quota, restore_at, image_quota_unknown = self._extract_quota_and_restore_at(limits_progress)
+        plus_promo_text = _find_plus_promo_text(me_payload, init_payload, default_account)
         result = {
+            "account_id": default_account.get("id") or default_account.get("account_id"),
             "email": me_payload.get("email"),
             "user_id": me_payload.get("id"),
             "type": plan_type,
@@ -212,6 +274,8 @@ class OpenAIBackendAPI:
             "limits_progress": limits_progress,
             "default_model_slug": init_payload.get("default_model_slug"),
             "restore_at": restore_at,
+            "can_activate_plus": bool(plus_promo_text),
+            "plus_promo_text": plus_promo_text or None,
             "status": "正常" if image_quota_unknown and plan_type.lower() != "free" else ("限流" if quota == 0 else "正常"),
         }
         logger.debug({
@@ -223,6 +287,7 @@ class OpenAIBackendAPI:
             "image_quota_unknown": result.get("image_quota_unknown"),
             "default_model_slug": result.get("default_model_slug"),
             "restore_at": result.get("restore_at"),
+            "can_activate_plus": result.get("can_activate_plus"),
             "status": result.get("status"),
         })
         return result
@@ -447,6 +512,7 @@ class OpenAIBackendAPI:
             json=payload,
             timeout=60,
         )
+        self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
         return response.json().get("conduit_token", "")
 
@@ -595,6 +661,7 @@ class OpenAIBackendAPI:
             timeout=300,
             stream=True,
         )
+        self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
         return response
 
@@ -603,6 +670,7 @@ class OpenAIBackendAPI:
         path = f"/backend-api/conversation/{conversation_id}"
         response = self.session.get(self.base_url + path, headers=self._headers(path, {"Accept": "application/json"}),
                                     timeout=60)
+        self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
         return response.json()
 
@@ -666,7 +734,7 @@ class OpenAIBackendAPI:
                 return [], sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
-            time.sleep(4)
+            time.sleep(min(1.5, max(0.1, timeout_secs - (time.time() - start))))
         logger.info({"event": "image_poll_timeout", "conversation_id": conversation_id, "timeout_secs": timeout_secs})
         return [], []
 
@@ -675,6 +743,7 @@ class OpenAIBackendAPI:
         path = f"/backend-api/files/{file_id}/download"
         response = self.session.get(self.base_url + path, headers=self._headers(path, {"Accept": "application/json"}),
                                     timeout=60)
+        self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
@@ -684,6 +753,7 @@ class OpenAIBackendAPI:
         path = f"/backend-api/conversation/{conversation_id}/attachment/{attachment_id}/download"
         response = self.session.get(self.base_url + path, headers=self._headers(path, {"Accept": "application/json"}),
                                     timeout=60)
+        self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
         data = response.json()
         return data.get("download_url") or data.get("url") or ""

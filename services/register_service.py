@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from services.account_service import account_service
+from services.clash_party_service import ClashPartyError, detect_outbound_ip, get_current_selection, normalize_clash_settings, select_proxy
 from services.config import DATA_DIR
 from services.register import openai_register
 
@@ -28,6 +29,7 @@ def _default_config() -> dict:
         "target_available": 10,
         "check_interval": 5,
         "enabled": False,
+        "clash": normalize_clash_settings({}),
         "stats": {
             "success": 0,
             "fail": 0,
@@ -53,6 +55,9 @@ def _normalize(raw: dict) -> dict:
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
+    cfg["clash"] = normalize_clash_settings(cfg.get("clash"))
+    if cfg["clash"]["enabled"]:
+        cfg["proxy"] = str(cfg["clash"].get("proxy") or cfg["proxy"] or "").strip()
     cfg["enabled"] = bool(cfg.get("enabled"))
     cfg.pop("cpa_auto_import", None)
     stats = {**_default_config()["stats"], **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
@@ -103,6 +108,13 @@ class RegisterService:
             self._logs = []
             metrics = self._pool_metrics()
             self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
+            self._outbound_ip_logged = False
+            if not self._prepare_clash_route():
+                self._config["enabled"] = False
+                self._save()
+                return self.get()
+            if not self._outbound_ip_logged:
+                self._log_outbound_ip()
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
@@ -111,6 +123,52 @@ class RegisterService:
             self._runner.start()
             self._append_log(f"注册任务启动，模式={self._config['mode']}，线程数={self._config['threads']}", "yellow")
             return self.get()
+
+    def _prepare_clash_route(self) -> bool:
+        clash = normalize_clash_settings(self._config.get("clash"))
+        self._config["clash"] = clash
+        if not clash["enabled"]:
+            return True
+        proxy_url = str(clash.get("proxy") or self._config.get("proxy") or "").strip()
+        if proxy_url:
+            self._config["proxy"] = proxy_url
+        try:
+            selected_proxy = str(clash.get("selected_proxy") or "").strip()
+            selected_group = str(clash.get("group") or "").strip()
+            if selected_group and selected_proxy:
+                selection = select_proxy(clash, selected_group, selected_proxy)
+                action = "Clash 已切换到页面选择"
+            else:
+                selection = get_current_selection(clash)
+                action = "Clash 当前选择"
+        except ClashPartyError as exc:
+            self._append_log(f"Clash 节点准备失败：{exc}，将使用本地代理={self._config['proxy']}", "yellow")
+            return True
+        active_proxy = str(selection.get("active_proxy") or selection.get("proxy") or "").strip()
+        self._config["clash"]["group"] = str(selection.get("group") or clash.get("group") or "").strip()
+        self._config["clash"]["selected_proxy"] = active_proxy
+        self._append_log(
+            f"{action}：节点组={selection.get('group')}，当前={active_proxy}，注册代理={self._config['proxy']}",
+            "green",
+        )
+        return True
+
+    def _log_outbound_ip(self) -> dict[str, object]:
+        self._outbound_ip_logged = True
+        proxy = str(self._config.get("proxy") or "").strip()
+        result = detect_outbound_ip(proxy)
+        if not result.get("ok"):
+            self._append_log(f"注册出口 IP 检测失败：{result.get('error') or 'unknown'}", "yellow")
+            return result
+        country_code = str(result.get("country_code") or "").upper()
+        country = str(result.get("country") or "").strip()
+        location = " / ".join(str(item).strip() for item in (result.get("region"), result.get("city")) if str(item or "").strip())
+        suffix = f"，位置={country_code or country}{f' {location}' if location else ''}"
+        if country_code == "JP":
+            self._append_log(f"当前注册出口已是日本 IP：{result.get('ip')}{suffix}", "green")
+            return result
+        self._append_log(f"当前注册出口不是日本 IP：{result.get('ip')}{suffix}", "yellow")
+        return result
 
     def stop(self) -> dict:
         with self._lock:

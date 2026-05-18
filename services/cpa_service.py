@@ -10,10 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
+from curl_cffi import CurlMime
 from curl_cffi.requests import Session
 
 from services.account_service import account_service
 from services.config import DATA_DIR
+from services.cpa_export_service import account_to_cpa_item, build_cpa_auth_filename
 from services.proxy_service import proxy_settings
 
 
@@ -207,6 +209,92 @@ def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, s
     if not access_token:
         return None, "missing access_token"
     return access_token, None
+
+
+def _response_error_detail(response) -> str:
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            message = data.get("detail") or data.get("error") or data.get("message")
+            if message:
+                return str(message)
+            return json.dumps(data, ensure_ascii=False)[:500]
+    except Exception:
+        pass
+    text = str(getattr(response, "text", "") or "").strip()
+    return text[:500]
+
+
+def _pool_label(pool: dict) -> str:
+    return str(pool.get("name") or pool.get("base_url") or pool.get("id") or "CPA").strip()
+
+
+def upload_auth_file(pool: dict, account: dict) -> dict:
+    base_url = str(pool.get("base_url") or "").strip()
+    secret_key = str(pool.get("secret_key") or "").strip()
+    if not base_url or not secret_key:
+        raise ValueError("CPA 连接缺少地址或 Secret Key")
+
+    cpa_item = account_to_cpa_item(account)
+    filename = build_cpa_auth_filename(cpa_item)
+    content = json.dumps(cpa_item, ensure_ascii=False, indent=4).encode("utf-8")
+    url = f"{base_url.rstrip('/')}/v0/management/auth-files"
+    multipart = CurlMime.from_list([
+        {
+            "name": "file",
+            "filename": filename,
+            "content_type": "application/json",
+            "data": content,
+        }
+    ])
+    session = Session(**proxy_settings.build_session_kwargs(verify=True))
+    try:
+        response = session.post(
+            url,
+            headers=_management_headers(secret_key),
+            multipart=multipart,
+            timeout=30,
+        )
+        if not response.ok:
+            detail = _response_error_detail(response)
+            raise RuntimeError(f"HTTP {response.status_code}{f': {detail}' if detail else ''}")
+    finally:
+        multipart.close()
+        session.close()
+
+    return {
+        "pool_id": str(pool.get("id") or ""),
+        "pool_name": _pool_label(pool),
+        "filename": filename,
+        "status": int(getattr(response, "status_code", 0) or 0),
+    }
+
+
+def upload_account_to_configured_pools(account: dict) -> dict:
+    pools = [
+        pool
+        for pool in cpa_config.list_pools()
+        if str(pool.get("base_url") or "").strip() and str(pool.get("secret_key") or "").strip()
+    ]
+    results: list[dict] = []
+    errors: list[dict] = []
+
+    for pool in pools:
+        try:
+            results.append(upload_auth_file(pool, account))
+        except Exception as exc:
+            errors.append({
+                "pool_id": str(pool.get("id") or ""),
+                "pool_name": _pool_label(pool),
+                "error": str(exc) or exc.__class__.__name__,
+            })
+
+    return {
+        "configured": len(pools),
+        "uploaded": len(results),
+        "items": results,
+        "errors": errors,
+    }
 
 
 class CPAImportService:

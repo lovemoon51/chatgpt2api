@@ -50,17 +50,25 @@ type TouchGesture =
 const minScale = 1;
 const maxScale = 4;
 
+type TouchListLike = {
+  readonly length: number;
+  readonly [index: number]: {
+    readonly clientX: number;
+    readonly clientY: number;
+  };
+};
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function getTouchDistance(touches: TouchList) {
+function getTouchDistance(touches: TouchListLike) {
   const first = touches[0];
   const second = touches[1];
   return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
 }
 
-function getTouchCenter(touches: TouchList) {
+function getTouchCenter(touches: TouchListLike) {
   const first = touches[0];
   const second = touches[1];
   return {

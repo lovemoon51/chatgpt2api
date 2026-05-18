@@ -125,6 +125,35 @@ function normalizeFiles(items: CPARemoteFile[]) {
   return files;
 }
 
+function normalizeRegisterClash(clash: RegisterConfig["clash"] | undefined): RegisterConfig["clash"] {
+  return {
+    enabled: Boolean(clash?.enabled),
+    controller_url: String(clash?.controller_url || "http://127.0.0.1:9090"),
+    secret: String(clash?.secret || ""),
+    group: String(clash?.group || ""),
+    selected_proxy: String(clash?.selected_proxy || ""),
+    proxy: String(clash?.proxy || "http://127.0.0.1:7890"),
+    keywords: Array.isArray(clash?.keywords) && clash.keywords.length > 0
+      ? clash.keywords.map((item) => String(item).trim()).filter(Boolean)
+      : ["日本", "东京", "大阪", "JP", "JPN", "Japan", "Tokyo", "Osaka", "🇯🇵"],
+    timeout: Number(clash?.timeout || 5),
+  };
+}
+
+function hasOwnField(value: object, key: string) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeRegisterConfig(config: RegisterConfig, previous?: RegisterConfig | null): RegisterConfig {
+  const source = config as Partial<RegisterConfig>;
+  const clash = hasOwnField(source, "clash") ? source.clash : previous?.clash;
+  return {
+    ...config,
+    proxy: String(config.proxy || ""),
+    clash: normalizeRegisterClash(clash),
+  };
+}
+
 type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
@@ -193,6 +222,7 @@ type SettingsStore = {
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
+  setRegisterClashField: (key: keyof RegisterConfig["clash"], value: string | boolean | string[]) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
@@ -534,7 +564,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     if (!silent) set({ isLoadingRegister: true });
     try {
       const data = await fetchRegisterConfig();
-      set({ registerConfig: data.register });
+      set((state) => ({ registerConfig: normalizeRegisterConfig(data.register, state.registerConfig) }));
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : "加载注册配置失败");
     } finally {
@@ -543,7 +573,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setRegisterConfig: (config) => {
-    set({ registerConfig: config, isLoadingRegister: false });
+    set((state) => ({ registerConfig: normalizeRegisterConfig(config, state.registerConfig), isLoadingRegister: false }));
   },
 
   setRegisterProxy: (value) => {
@@ -572,6 +602,24 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setRegisterCheckInterval: (value) => {
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, check_interval: Number(value) || 0 } } : {});
+  },
+
+  setRegisterClashField: (key, value) => {
+    set((state) => {
+      if (!state.registerConfig) return {};
+      const nextClash = {
+        ...normalizeRegisterClash(state.registerConfig.clash),
+        [key]: value,
+      };
+      const clashEnabled = key === "enabled" ? Boolean(value) : Boolean(nextClash.enabled);
+      return {
+        registerConfig: {
+          ...state.registerConfig,
+          proxy: clashEnabled ? String(nextClash.proxy || "") : state.registerConfig.proxy,
+          clash: nextClash,
+        },
+      };
+    });
   },
 
   setRegisterMailField: (key, value) => {
@@ -627,6 +675,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const data = await updateRegisterConfig({
         mail: registerConfig.mail,
         proxy: registerConfig.proxy.trim(),
+        clash: normalizeRegisterClash(registerConfig.clash),
         total: Math.max(1, Number(registerConfig.total) || 1),
         threads: Math.max(1, Number(registerConfig.threads) || 1),
         mode: registerConfig.mode,
@@ -634,8 +683,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
       });
-      set({ registerConfig: data.register });
-      toast.success("注册配置已保存");
+      const backendReturnedClash = hasOwnField(data.register as unknown as object, "clash");
+      set({ registerConfig: normalizeRegisterConfig(data.register, registerConfig) });
+      if (!backendReturnedClash && registerConfig.clash?.enabled) {
+        toast.warning("后端尚未返回 Clash 配置，请重启后端服务后再保存");
+      } else {
+        toast.success("注册配置已保存");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存注册配置失败");
     } finally {
@@ -652,6 +706,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         await updateRegisterConfig({
           mail: registerConfig.mail,
           proxy: registerConfig.proxy.trim(),
+          clash: normalizeRegisterClash(registerConfig.clash),
           total: Math.max(1, Number(registerConfig.total) || 1),
           threads: Math.max(1, Number(registerConfig.threads) || 1),
           mode: registerConfig.mode,
@@ -661,7 +716,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         });
       }
       const data = registerConfig.enabled ? await stopRegister() : await startRegister();
-      set({ registerConfig: data.register });
+      set({ registerConfig: normalizeRegisterConfig(data.register, registerConfig) });
       toast.success(registerConfig.enabled ? "注册任务已停止" : "注册任务已启动");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "切换注册状态失败");
@@ -674,7 +729,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ isSavingRegister: true });
     try {
       const data = await resetRegisterApi();
-      set({ registerConfig: data.register });
+      set((state) => ({ registerConfig: normalizeRegisterConfig(data.register, state.registerConfig) }));
       toast.success("注册统计已重置");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "重置注册统计失败");

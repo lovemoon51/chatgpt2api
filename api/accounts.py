@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
@@ -15,6 +16,7 @@ from api.support import (
 )
 from services.account_service import account_service
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
+from services.cpa_export_service import build_cpa_export_zip
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
@@ -43,6 +45,11 @@ class AccountDeleteRequest(BaseModel):
 
 
 class AccountRefreshRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+    scope: str = ""
+
+
+class AccountCpaExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
 
@@ -153,11 +160,12 @@ def create_router() -> APIRouter:
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         result = account_service.add_accounts(tokens)
-        refresh_result = account_service.refresh_accounts(tokens)
+        refresh_result = await run_in_threadpool(account_service.refresh_accounts, tokens)
         return {
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
+            "removed_failed": refresh_result.get("removed_failed", 0),
             "items": refresh_result.get("items", result.get("items", [])),
         }
 
@@ -173,11 +181,44 @@ def create_router() -> APIRouter:
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
+        requested_all = str(body.scope or "").strip().lower() == "all"
         if not access_tokens:
             access_tokens = account_service.list_tokens()
+            requested_all = True
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-        return account_service.refresh_accounts(access_tokens)
+        log_title = "一键刷新所有账号信息和额度" if requested_all else "批量刷新账号"
+        return await run_in_threadpool(account_service.refresh_accounts, access_tokens, log_title)
+
+    @router.get("/api/accounts/export/cpa")
+    async def export_all_accounts_cpa(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        items = account_service.list_accounts()
+        if not items:
+            raise HTTPException(status_code=404, detail={"error": "没有可导出的账号"})
+        buf = await run_in_threadpool(build_cpa_export_zip, items)
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="cpa-accounts.zip"'},
+        )
+
+    @router.post("/api/accounts/export/cpa")
+    async def export_accounts_cpa(body: AccountCpaExportRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
+        items = account_service.list_accounts()
+        if access_tokens:
+            token_set = set(access_tokens)
+            items = [item for item in items if str(item.get("access_token") or "") in token_set]
+        if not items:
+            raise HTTPException(status_code=404, detail={"error": "没有可导出的账号"})
+        buf = await run_in_threadpool(build_cpa_export_zip, items)
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="cpa-accounts.zip"'},
+        )
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):

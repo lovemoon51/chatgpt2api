@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from threading import Condition, Lock
 from typing import Any
-from datetime import datetime
 
 from services.config import config
 from services.log_service import (
@@ -12,6 +13,84 @@ from services.log_service import (
 )
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
+
+
+PLUS_PROMO_ACCOUNT_TAG = "可开通 Plus"
+DEFAULT_REFRESH_WORKERS = 4
+MAX_REFRESH_WORKERS = 4
+DEFAULT_LIMITED_REFRESH_BATCH_SIZE = 3
+
+
+def _is_upstream_timeout_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "curl: (28)" in message
+        or "connection timed out" in message
+        or "operation timed out" in message
+        or "timed out after" in message
+    )
+
+
+def _format_refresh_error(exc: Exception) -> str:
+    if _is_upstream_timeout_error(exc):
+        if config.get_proxy_settings():
+            return "连接 chatgpt.com 超时。已配置全局代理，但代理链路仍不可达；请在设置页测试代理，或减少单次刷新账号数量后重试。"
+        return "连接 chatgpt.com 超时。当前未配置全局代理，请在设置页填写并测试可用代理后再刷新账号信息和额度。"
+    return str(exc) or exc.__class__.__name__
+
+
+def _normalize_account_tags(value: object) -> list[str]:
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        candidates = []
+    tags: list[str] = []
+    for item in candidates:
+        tag = str(item or "").strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _parse_restore_at_timestamp(value: object) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        timestamp = float(text)
+        return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:26], fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _format_restore_at_from_usage_limit(resets_at: object = None, resets_in_seconds: object = None) -> str | None:
+    timestamp = _parse_restore_at_timestamp(resets_at)
+    if timestamp <= 0:
+        try:
+            seconds = max(0, int(resets_in_seconds or 0))
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds > 0:
+            timestamp = time.time() + seconds
+    if timestamp <= 0:
+        return None
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class AccountService:
@@ -40,11 +119,49 @@ class AccountService:
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
+        if str(account.get("image_blocked_reason") or "").strip():
+            return False
         if account.get("status") in {"禁用", "限流", "异常"}:
             return False
         if bool(account.get("image_quota_unknown")):
             return True
         return int(account.get("quota") or 0) > 0
+
+    @staticmethod
+    def _normalize_account_type(value: object) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("_", "").replace("-", "").replace(" ", "").lower()
+        if normalized == "prolite":
+            return "ProLite"
+        if normalized == "plus":
+            return "Plus"
+        if normalized == "pro":
+            return "Pro"
+        if normalized == "free":
+            return "free"
+        return text
+
+    def _search_account_type(self, value: object) -> str | None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key or "").lower()
+                if any(marker in key_text for marker in ("plan", "account_type", "subscription")):
+                    normalized = self._normalize_account_type(item)
+                    if normalized and normalized.lower() not in {"no_constraint", "none", "null"}:
+                        return normalized
+                found = self._search_account_type(item)
+                if found:
+                    return found
+            return None
+        if isinstance(value, list):
+            for item in value:
+                found = self._search_account_type(item)
+                if found:
+                    return found
+            return None
+        return None
 
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
@@ -54,16 +171,27 @@ class AccountService:
             return None
         normalized = dict(item)
         normalized["access_token"] = access_token
-        normalized["type"] = normalized.get("type") or "free"
+        normalized["type"] = self._normalize_account_type(normalized.get("type")) or "free"
         normalized["status"] = normalized.get("status") or "正常"
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = normalized.get("email") or None
+        normalized["account_id"] = normalized.get("account_id") or None
         normalized["user_id"] = normalized.get("user_id") or None
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
+        normalized["can_activate_plus"] = bool(normalized.get("can_activate_plus"))
+        normalized["plus_promo_text"] = str(normalized.get("plus_promo_text") or "").strip() or None
+        normalized["image_blocked_reason"] = str(normalized.get("image_blocked_reason") or "").strip()
+        tags = _normalize_account_tags(normalized.get("tags"))
+        if normalized["can_activate_plus"]:
+            if PLUS_PROMO_ACCOUNT_TAG not in tags:
+                tags.append(PLUS_PROMO_ACCOUNT_TAG)
+        else:
+            tags = [tag for tag in tags if tag != PLUS_PROMO_ACCOUNT_TAG]
+        normalized["tags"] = tags
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
@@ -125,8 +253,10 @@ class AccountService:
                 self._image_inflight[access_token] = current_inflight - 1
             self._image_slot_condition.notify_all()
 
-    def get_available_access_token(self) -> str:
-        attempted_tokens: set[str] = set()
+    def get_available_access_token(self, excluded_tokens: set[str] | None = None, verify_remote: bool = False) -> str:
+        if not verify_remote:
+            return self._acquire_next_candidate_token(excluded_tokens=excluded_tokens)
+        attempted_tokens: set[str] = set(excluded_tokens or set())
         while True:
             access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
             attempted_tokens.add(access_token)
@@ -182,6 +312,16 @@ class AccountService:
             self.update_account(access_token, {"status": "异常", "quota": 0})
         return removed
 
+    def remove_unusable_image_token(self, access_token: str, event: str, reason: str = "") -> bool:
+        if not access_token:
+            return False
+        self.release_image_slot(access_token)
+        removed = bool(self.delete_accounts([access_token])["removed"])
+        if removed:
+            log_service.add(LOG_TYPE_ACCOUNT, "自动移除不可生图账号",
+                            {"source": event, "token": anonymize_token(access_token), "reason": str(reason)[:500]})
+        return removed
+
     def get_account(self, access_token: str) -> dict | None:
         if not access_token:
             return None
@@ -193,14 +333,26 @@ class AccountService:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]
 
-    def list_limited_tokens(self) -> list[str]:
+    def list_limited_tokens(self, *, due_only: bool = True, limit: int | None = None) -> list[str]:
+        now = time.time()
+        tokens: list[str] = []
         with self._lock:
-            return [
-                token
-                for item in self._accounts.values()
-                if item.get("status") == "限流"
-                   and (token := item.get("access_token") or "")
-            ]
+            for item in self._accounts.values():
+                if item.get("status") != "限流":
+                    continue
+                if str(item.get("image_blocked_reason") or "").strip():
+                    continue
+                if due_only:
+                    restore_at = _parse_restore_at_timestamp(item.get("restore_at"))
+                    if restore_at > now:
+                        continue
+                token = item.get("access_token") or ""
+                if not token:
+                    continue
+                tokens.append(token)
+                if limit is not None and len(tokens) >= max(1, limit):
+                    break
+        return tokens
 
     def add_accounts(self, tokens: list[str]) -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
@@ -307,45 +459,201 @@ class AccountService:
             return dict(account)
         return None
 
+    def mark_image_usage_limit(
+            self,
+            access_token: str,
+            reason: str = "",
+            *,
+            resets_at: object = None,
+            resets_in_seconds: object = None,
+    ) -> dict | None:
+        if not access_token:
+            return None
+        self.release_image_slot(access_token)
+        with self._lock:
+            current = self._accounts.get(access_token)
+            if current is None:
+                return None
+            restore_at = _format_restore_at_from_usage_limit(resets_at, resets_in_seconds)
+            next_item = dict(current)
+            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["fail"] = int(next_item.get("fail") or 0) + 1
+            next_item["status"] = "限流"
+            next_item["quota"] = 0
+            next_item["image_quota_unknown"] = False
+            next_item["image_blocked_reason"] = ""
+            next_item["last_image_error"] = str(reason or "usage_limit_reached")[:500]
+            if restore_at:
+                next_item["restore_at"] = restore_at
+            account = self._normalize_account(next_item)
+            if account is None:
+                return None
+            self._accounts[access_token] = account
+            self._save_accounts()
+            self._image_slot_condition.notify_all()
+        log_service.add(LOG_TYPE_ACCOUNT, "账号图片额度已用尽",
+                        {"token": anonymize_token(access_token), "restore_at": restore_at})
+        return dict(account)
+
+    def mark_image_checkout_required(self, access_token: str, reason: str = "") -> dict | None:
+        self.remove_unusable_image_token(access_token, "checkout_required", reason)
+        return self.get_account(access_token)
+
+    @staticmethod
+    def _refresh_worker_count(total: int) -> int:
+        try:
+            configured = int(config.data.get("refresh_account_workers") or DEFAULT_REFRESH_WORKERS)
+        except (TypeError, ValueError):
+            configured = DEFAULT_REFRESH_WORKERS
+        return min(MAX_REFRESH_WORKERS, max(1, configured), max(1, total))
+
+    @staticmethod
+    def limited_refresh_batch_size() -> int:
+        try:
+            configured = int(config.data.get("limited_account_refresh_batch_size") or DEFAULT_LIMITED_REFRESH_BATCH_SIZE)
+        except (TypeError, ValueError):
+            configured = DEFAULT_LIMITED_REFRESH_BATCH_SIZE
+        return max(1, configured)
+
+    @staticmethod
+    def _refresh_log_summary(
+            title: str,
+            refreshed: int,
+            errors: list[dict[str, Any]],
+            removed_failed: int,
+            removed_rate_limited: int,
+            duration_ms: int,
+    ) -> str:
+        duration_text = f"，耗时 {duration_ms / 1000:.2f} s"
+        if errors:
+            first_error = str(errors[0].get("error") or "") if isinstance(errors[0], dict) else str(errors[0])
+            summary = f"{title}：刷新完成：成功 {refreshed} 个，失败 {len(errors)} 个"
+            if removed_failed:
+                summary += f"，已删除 {removed_failed} 个失败账号"
+            if removed_rate_limited:
+                summary += f"，已删除 {removed_rate_limited} 个限流账号"
+            if first_error:
+                summary += f"，首个错误：{first_error}"
+            return f"{summary}{duration_text}"
+        return f"{title}：刷新成功 {refreshed} 个账号{duration_text}"
+
+    @staticmethod
+    def _fetch_remote_user_info(access_token: str) -> dict[str, Any]:
+        from services.openai_backend_api import OpenAIBackendAPI
+        return OpenAIBackendAPI(access_token).get_user_info()
+
     def fetch_remote_info(self, access_token: str, event: str = "fetch_remote_info") -> dict[str, Any] | None:
         if not access_token:
             raise ValueError("access_token is required")
 
         try:
-            from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
-            result = OpenAIBackendAPI(access_token).get_user_info()
+            from services.openai_backend_api import InvalidAccessTokenError
+            result = self._fetch_remote_user_info(access_token)
         except InvalidAccessTokenError:
             self.remove_invalid_token(access_token, event)
             raise
         return self.update_account(access_token, result)
 
-    def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
+    def refresh_accounts(self, access_tokens: list[str], log_title: str = "批量刷新账号") -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
             return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
+        started = time.time()
+        from services.openai_backend_api import InvalidAccessTokenError
 
-        refreshed = 0
+        fetched: dict[str, dict[str, Any]] = {}
         errors = []
-        max_workers = min(10, len(access_tokens))
+        failed_invalid_tokens: set[str] = set()
+        max_workers = self._refresh_worker_count(len(access_tokens))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self.fetch_remote_info, token, "refresh_accounts"): token
+                executor.submit(self._fetch_remote_user_info, token): token
                 for token in access_tokens
             }
             for future in as_completed(futures):
+                token = futures[future]
                 try:
-                    account = future.result()
+                    fetched[token] = future.result()
                 except Exception as exc:
-                    errors.append({"token": anonymize_token(futures[future]), "error": str(exc)})
+                    if isinstance(exc, InvalidAccessTokenError):
+                        failed_invalid_tokens.add(token)
+                    errors.append({"token": anonymize_token(token), "error": _format_refresh_error(exc)})
                     continue
-                if account is not None:
-                    refreshed += 1
+
+        refreshed = 0
+        removed_failed = 0
+        removed_rate_limited = 0
+        changed = False
+
+        with self._lock:
+            for token in failed_invalid_tokens:
+                removed = self._accounts.pop(token, None) is not None
+                self._image_inflight.pop(token, None)
+                if removed:
+                    removed_failed += 1
+                    changed = True
+
+            for token, result in fetched.items():
+                current = self._accounts.get(token)
+                if current is None:
+                    continue
+                account = self._normalize_account({**current, **result, "access_token": token})
+                if account is None:
+                    continue
+                if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
+                    self._accounts.pop(token, None)
+                    self._image_inflight.pop(token, None)
+                    removed_rate_limited += 1
+                    changed = True
+                    continue
+                self._accounts[token] = account
+                refreshed += 1
+                changed = True
+
+            if changed:
+                if self._accounts:
+                    self._index %= len(self._accounts)
+                else:
+                    self._index = 0
+                self._save_accounts()
+                self._image_slot_condition.notify_all()
+            items = [dict(item) for item in self._accounts.values()]
+
+        if fetched or errors:
+            ended = time.time()
+            duration_ms = int((ended - started) * 1000)
+            first_error = errors[0].get("error") if errors and isinstance(errors[0], dict) else ""
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                self._refresh_log_summary(
+                    log_title or "批量刷新账号",
+                    refreshed,
+                    errors,
+                    removed_failed,
+                    removed_rate_limited,
+                    duration_ms,
+                ),
+                {
+                    "title": log_title or "批量刷新账号",
+                    "requested": len(access_tokens),
+                    "refreshed": refreshed,
+                    "failed": len(errors),
+                    "workers": max_workers,
+                    "removed_failed": removed_failed,
+                    "removed_rate_limited": removed_rate_limited,
+                    "first_error": first_error,
+                    "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+                    "ended_at": datetime.fromtimestamp(ended).strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_ms": duration_ms,
+                },
+            )
 
         return {
             "refreshed": refreshed,
             "errors": errors,
-            "items": self.list_accounts(),
+            "removed_failed": removed_failed,
+            "items": items,
         }
 
 

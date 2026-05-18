@@ -211,6 +211,113 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
         self.assertIn("sentinel-token", token)
         self.assertEqual(session.calls, 2)
 
+    def test_registered_account_uploads_to_cpa_after_refresh_success(self):
+        with (
+            mock.patch.object(
+                openai_register.account_service,
+                "get_account",
+                return_value={"access_token": "access", "email": "stored@example.com", "type": "free"},
+            ),
+            mock.patch.object(
+                openai_register,
+                "upload_account_to_configured_pools",
+                return_value={"configured": 1, "uploaded": 1, "items": [], "errors": []},
+            ) as upload,
+            mock.patch.object(openai_register, "step"),
+        ):
+            result = openai_register.upload_registered_account_to_cpa(
+                "access",
+                {"email": "new@example.com", "id_token": "id", "refresh_token": "refresh"},
+                {"refreshed": 1, "errors": []},
+                1,
+            )
+
+        self.assertEqual(result["uploaded"], 1)
+        upload.assert_called_once()
+        payload = upload.call_args.args[0]
+        self.assertEqual(payload["access_token"], "access")
+        self.assertEqual(payload["email"], "new@example.com")
+        self.assertEqual(payload["oauth_id_token"], "id")
+
+    def test_registered_account_does_not_upload_to_cpa_when_refresh_failed(self):
+        with (
+            mock.patch.object(openai_register, "upload_account_to_configured_pools") as upload,
+            mock.patch.object(openai_register, "step"),
+        ):
+            result = openai_register.upload_registered_account_to_cpa(
+                "access",
+                {"email": "new@example.com"},
+                {"refreshed": 0, "errors": [{"error": "timeout"}]},
+                1,
+            )
+
+        self.assertTrue(result["skipped"])
+        upload.assert_not_called()
+
+    def test_refresh_registered_account_logs_plain_account_type(self):
+        with (
+            mock.patch.object(openai_register.account_service, "refresh_accounts", return_value={"refreshed": 1, "errors": []}),
+            mock.patch.object(openai_register.account_service, "get_account", return_value={"can_activate_plus": False}),
+            mock.patch.object(openai_register, "step") as step,
+        ):
+            openai_register.refresh_registered_account("access", 1)
+
+        self.assertTrue(any("账号类型：普通号" in call.args[1] for call in step.call_args_list))
+
+    def test_refresh_registered_account_logs_plus_eligible_account_type(self):
+        with (
+            mock.patch.object(openai_register.account_service, "refresh_accounts", return_value={"refreshed": 1, "errors": []}),
+            mock.patch.object(openai_register.account_service, "get_account", return_value={"can_activate_plus": True}),
+            mock.patch.object(openai_register, "step") as step,
+        ):
+            openai_register.refresh_registered_account("access", 1)
+
+        self.assertTrue(any("账号类型：可开通 Plus" in call.args[1] for call in step.call_args_list))
+
+    def test_log_registration_ip_outputs_ip_and_country(self):
+        with (
+            mock.patch.object(
+                openai_register,
+                "detect_outbound_ip",
+                return_value={"ok": True, "ip": "52.68.61.169", "country_code": "JP", "region": "Tokyo", "city": "Tokyo"},
+            ),
+            mock.patch.object(openai_register, "step") as step,
+        ):
+            result = openai_register.log_registration_ip(1, "http://127.0.0.1:7890")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(any("注册出口 IP：52.68.61.169" in call.args[1] for call in step.call_args_list))
+        self.assertEqual(step.call_args.args[2], "green")
+
+    def test_worker_removes_registered_account_when_refresh_failed(self):
+        registrar = mock.Mock()
+        registrar.register.return_value = {
+            "email": "new@example.com",
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "id_token": "id-token",
+        }
+        registrar.close.return_value = None
+
+        with (
+            mock.patch.object(openai_register, "PlatformRegistrar", return_value=registrar),
+            mock.patch.object(openai_register, "_record_mail_success"),
+            mock.patch.object(openai_register, "_record_mail_failure", return_value={}),
+            mock.patch.object(openai_register.account_service, "add_accounts") as add_accounts,
+            mock.patch.object(openai_register.account_service, "delete_accounts") as delete_accounts,
+            mock.patch.object(openai_register, "refresh_registered_account", return_value={"refreshed": 0, "errors": [{"error": "timeout"}]}),
+            mock.patch.object(openai_register, "upload_registered_account_to_cpa") as upload,
+            mock.patch.object(openai_register, "log_registration_ip", return_value={"ok": True, "ip": "52.68.61.169", "country_code": "JP"}),
+            mock.patch.object(openai_register, "step"),
+        ):
+            result = openai_register.worker(1)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("刷新失败", result["error"])
+        add_accounts.assert_called_once_with(["access-token"])
+        delete_accounts.assert_called_once_with(["access-token"])
+        upload.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

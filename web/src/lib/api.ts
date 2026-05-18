@@ -5,6 +5,16 @@ export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
 export type AuthRole = "admin" | "user";
 
+export type OpenAIModel = {
+  id: string;
+  object?: string;
+  created?: number;
+  owned_by?: string;
+  root?: string;
+  parent?: string | null;
+  [key: string]: unknown;
+};
+
 export type Account = {
   access_token: string;
   type: AccountType;
@@ -20,6 +30,9 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restore_at?: string | null;
+  can_activate_plus?: boolean;
+  plus_promo_text?: string | null;
+  tags?: string[];
   success: number;
   fail: number;
   last_used_at?: string | null;
@@ -35,13 +48,19 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  removed_failed?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  removed_failed?: number;
   errors: Array<{ access_token: string; error: string }>;
+};
+
+type AccountRefreshOptions = {
+  scope?: "all" | "selected";
 };
 
 type AccountUpdateResponse = {
@@ -209,6 +228,16 @@ export type RegisterConfig = {
     providers: Array<Record<string, unknown>>;
   };
   proxy: string;
+  clash: {
+    enabled: boolean;
+    controller_url: string;
+    secret: string;
+    group: string;
+    selected_proxy?: string;
+    proxy: string;
+    keywords: string[];
+    timeout: number;
+  };
   total: number;
   threads: number;
   mode: "total" | "quota" | "available";
@@ -238,6 +267,43 @@ export type RegisterConfig = {
   }>;
 };
 
+export type ClashNode = {
+  name: string;
+  type?: string;
+  now?: string;
+  alive?: boolean;
+  delay?: number;
+};
+
+export type ClashGroup = {
+  name: string;
+  type?: string;
+  now?: string;
+  all: string[];
+  nodes: ClashNode[];
+};
+
+export type RegisterClashOptions = {
+  controller_url: string;
+  proxy_url: string;
+  group: string;
+  proxy: string;
+  active_proxy: string;
+  groups: ClashGroup[];
+  latency_ms: number;
+  config_path?: string;
+};
+
+export type RegisterClashSelection = {
+  controller_url: string;
+  group: string;
+  proxy: string;
+  active_proxy: string;
+  proxy_url: string;
+  latency_ms: number;
+  config_path?: string;
+};
+
 export type OpenAIKeyStatus = "unchecked" | "ok" | "invalid" | "rate_limited" | "forbidden" | "error" | string;
 
 export type OpenAIKeyItem = {
@@ -263,6 +329,11 @@ type OpenAIKeyMutationResponse = {
   items: OpenAIKeyItem[];
 };
 
+type ModelListResponse = {
+  object: string;
+  data: OpenAIModel[];
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<LoginResponse>("/auth/login", {
@@ -273,6 +344,10 @@ export async function login(authKey: string) {
     },
     redirectOnUnauthorized: false,
   });
+}
+
+export async function fetchModels() {
+  return httpRequest<ModelListResponse>("/v1/models");
 }
 
 export async function fetchAccounts() {
@@ -293,10 +368,10 @@ export async function deleteAccounts(tokens: string[]) {
   });
 }
 
-export async function refreshAccounts(accessTokens: string[]) {
+export async function refreshAccounts(accessTokens: string[], options: AccountRefreshOptions = {}) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { access_tokens: accessTokens },
+    body: { access_tokens: accessTokens, ...(options.scope ? { scope: options.scope } : {}) },
   });
 }
 
@@ -315,6 +390,19 @@ export async function updateAccount(
       ...updates,
     },
   });
+}
+
+export async function downloadCpaAccounts(accessTokens: string[] = []) {
+  const response = await request.post("/api/accounts/export/cpa", { access_tokens: accessTokens }, { responseType: "blob" });
+  const blob = response.data as Blob;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `cpa-accounts-${Date.now()}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 export async function generateImage(prompt: string, model?: ImageModel, size?: string) {
@@ -557,6 +645,20 @@ export async function updateRegisterConfig(updates: Partial<RegisterConfig>) {
   return httpRequest<{ register: RegisterConfig }>("/api/register", {
     method: "POST",
     body: updates,
+  });
+}
+
+export async function fetchRegisterClashOptions(clash: RegisterConfig["clash"]) {
+  return httpRequest<{ clash: RegisterClashOptions }>("/api/register/clash/options", {
+    method: "POST",
+    body: { clash },
+  });
+}
+
+export async function selectRegisterClashProxy(clash: RegisterConfig["clash"], group: string, proxy: string) {
+  return httpRequest<{ clash: RegisterClashSelection; register: RegisterConfig }>("/api/register/clash/select", {
+    method: "POST",
+    body: { clash, group, proxy },
   });
 }
 

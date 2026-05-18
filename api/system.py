@@ -73,7 +73,7 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/images")
     async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
-        require_admin(authorization)
+        require_identity(authorization)
         return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
@@ -97,7 +97,7 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/images/download/{image_path:path}")
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
+        require_identity(authorization)
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")

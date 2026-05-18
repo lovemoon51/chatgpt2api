@@ -18,7 +18,11 @@ from services.config import DATA_DIR
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
+LOG_TYPE_TEXT = "text"
 LOG_TYPE_ACCOUNT = "account"
+
+TEXT_LOG_ENDPOINTS = {"/v1/chat/completions", "/v1/responses", "/v1/messages"}
+TEXT_LOG_SUMMARIES = ("文本生成", "Responses", "Messages")
 
 
 class LogService:
@@ -58,6 +62,25 @@ class LogService:
             return False
         return True
 
+    @staticmethod
+    def _is_text_call(item: dict[str, Any]) -> bool:
+        if item.get("type") == LOG_TYPE_TEXT:
+            return True
+        if item.get("type") != LOG_TYPE_CALL:
+            return False
+        detail = item.get("detail")
+        endpoint = str(detail.get("endpoint") or "") if isinstance(detail, dict) else ""
+        summary = str(item.get("summary") or "")
+        return endpoint in TEXT_LOG_ENDPOINTS or summary.startswith(TEXT_LOG_SUMMARIES)
+
+    @classmethod
+    def _normalized_item(cls, item: dict[str, Any]) -> dict[str, Any]:
+        if cls._is_text_call(item) and item.get("type") != LOG_TYPE_TEXT:
+            normalized = dict(item)
+            normalized["type"] = LOG_TYPE_TEXT
+            return normalized
+        return item
+
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
@@ -78,9 +101,10 @@ class LogService:
             item = self._parse_line(lines[line_number], line_number)
             if item is None:
                 continue
-            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+            normalized = self._normalized_item(item)
+            if not self._matches_filters(normalized, type=type, start_date=start_date, end_date=end_date):
                 continue
-            items.append(item)
+            items.append(normalized)
             if len(items) >= limit:
                 break
         return items
@@ -182,6 +206,11 @@ class LoggedCall:
     started: float = field(default_factory=time.time)
     request_text: str = ""
 
+    def _log_type(self) -> str:
+        if self.endpoint in TEXT_LOG_ENDPOINTS or self.summary.startswith(TEXT_LOG_SUMMARIES):
+            return LOG_TYPE_TEXT
+        return LOG_TYPE_CALL
+
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
 
@@ -254,4 +283,4 @@ class LoggedCall:
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls:
             detail["urls"] = list(dict.fromkeys(collected_urls))
-        log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)
+        log_service.add(self._log_type(), f"{self.summary}{suffix}", detail)

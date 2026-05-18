@@ -11,6 +11,7 @@ import {
   CircleOff,
   Copy,
   Download,
+  Gift,
   LoaderCircle,
   Pencil,
   RefreshCw,
@@ -42,6 +43,7 @@ import {
 } from "@/components/ui/select";
 import {
   deleteAccounts,
+  downloadCpaAccounts,
   fetchAccounts,
   refreshAccounts,
   updateAccount,
@@ -164,6 +166,14 @@ function displayAccountType(account: Account) {
   return account.type || "Free";
 }
 
+function accountTags(account: Account) {
+  const tags = Array.isArray(account.tags) ? account.tags.filter(Boolean) : [];
+  if (account.can_activate_plus && !tags.includes("可开通 Plus")) {
+    return [...tags, "可开通 Plus"];
+  }
+  return tags;
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -171,6 +181,7 @@ function AccountsPageContent() {
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
+  const [plusPromoOnly, setPlusPromoOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
@@ -179,6 +190,7 @@ function AccountsPageContent() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isExportingCpa, setIsExportingCpa] = useState(false);
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
@@ -213,9 +225,10 @@ function AccountsPageContent() {
         normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
       const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
       const statusMatched = statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && typeMatched && statusMatched;
+      const plusMatched = !plusPromoOnly || Boolean(account.can_activate_plus);
+      return searchMatched && typeMatched && statusMatched && plusMatched;
     });
-  }, [accounts, query, statusFilter, typeFilter]);
+  }, [accounts, plusPromoOnly, query, statusFilter, typeFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
@@ -231,8 +244,9 @@ function AccountsPageContent() {
     const abnormal = accounts.filter((item) => item.status === "异常").length;
     const disabled = accounts.filter((item) => item.status === "禁用").length;
     const quota = formatQuotaSummary(accounts);
+    const plusPromo = accounts.filter((item) => item.can_activate_plus).length;
 
-    return { total, active, limited, abnormal, disabled, quota };
+    return { total, active, limited, abnormal, disabled, quota, plusPromo };
   }, [accounts]);
 
   const accountTypeOptions = useMemo(
@@ -299,8 +313,13 @@ function AccountsPageContent() {
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
+        const removedText = data.removed_failed ? `，已删除 ${data.removed_failed} 个失败账号` : "";
+        const summary =
+          data.refreshed > 0
+            ? `刷新完成：成功 ${data.refreshed} 个，失败 ${data.errors.length} 个`
+            : `刷新失败 ${data.errors.length} 个`;
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `${summary}${removedText}${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
         toast.success(`刷新成功 ${data.refreshed} 个账户`);
@@ -310,6 +329,53 @@ function AccountsPageContent() {
       toast.error(message);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleRefreshAllAccounts = async () => {
+    const tokens = accounts.map((item) => item.access_token).filter(Boolean);
+    if (tokens.length === 0) {
+      toast.error("没有需要刷新的账户");
+      return;
+    }
+
+    setIsRefreshing(true);
+    try {
+      const data = await refreshAccounts(tokens, { scope: "all" });
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      if (data.errors.length > 0) {
+        const firstError = data.errors[0]?.error;
+        const removedText = data.removed_failed ? `，已删除 ${data.removed_failed} 个失败账号` : "";
+        toast.error(
+          `刷新完成：成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${removedText}${firstError ? `，首个错误：${firstError}` : ""}`,
+        );
+      } else {
+        toast.success(`刷新成功 ${data.refreshed} 个账户`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "刷新账户失败";
+      toast.error(message);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleDownloadCpaAccounts = async (accessTokens: string[]) => {
+    if (accessTokens.length === 0) {
+      toast.error("没有可导出的账户");
+      return;
+    }
+
+    setIsExportingCpa(true);
+    try {
+      await downloadCpaAccounts(accessTokens);
+      toast.success(`已导出 ${accessTokens.length} 个 CPA JSON`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "导出 CPA 失败";
+      toast.error(message);
+    } finally {
+      setIsExportingCpa(false);
     }
   };
 
@@ -371,7 +437,7 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
+            onClick={() => void handleRefreshAllAccounts()}
             disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -393,6 +459,15 @@ function AccountsPageContent() {
           >
             <Download className="size-4" />
             导出全部 Token
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => void handleDownloadCpaAccounts(accounts.map((item) => item.access_token))}
+            disabled={accounts.length === 0 || isExportingCpa}
+          >
+            {isExportingCpa ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+            导出 CPA ZIP
           </Button>
         </div>
       </section>
@@ -527,6 +602,33 @@ function AccountsPageContent() {
                 ))}
               </SelectContent>
             </Select>
+            <Button
+              type="button"
+              variant={plusPromoOnly ? "default" : "outline"}
+              className={cn(
+                "h-10 rounded-xl px-3",
+                plusPromoOnly
+                  ? "bg-stone-950 text-white hover:bg-stone-800"
+                  : "border-stone-200 bg-white/85 text-stone-700 hover:bg-white",
+              )}
+              onClick={() => {
+                setPlusPromoOnly((value) => !value);
+                setPage(1);
+              }}
+            >
+              <Gift className="size-4" />
+              可开通 Plus
+              {summary.plusPromo > 0 ? (
+                <span
+                  className={cn(
+                    "ml-1 rounded-md px-1.5 py-0.5 text-xs",
+                    plusPromoOnly ? "bg-white/15 text-white" : "bg-stone-100 text-stone-500",
+                  )}
+                >
+                  {summary.plusPromo}
+                </span>
+              ) : null}
+            </Button>
           </div>
         </div>
 
@@ -613,6 +715,7 @@ function AccountsPageContent() {
                   {currentRows.map((account) => {
                     const status = statusMeta[account.status];
                     const StatusIcon = status.icon;
+                    const tags = accountTags(account);
 
                     return (
                       <tr
@@ -663,7 +766,24 @@ function AccountsPageContent() {
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                          <div className="space-y-1.5">
+                            <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                            {tags.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {tags.map((tag) => (
+                                  <Badge
+                                    key={tag}
+                                    variant={tag === "可开通 Plus" ? "warning" : "secondary"}
+                                    className="rounded-md px-1.5 py-0.5 text-[11px]"
+                                    title={tag === "可开通 Plus" ? account.plus_promo_text ?? undefined : undefined}
+                                  >
+                                    {tag === "可开通 Plus" ? <Gift className="size-3" /> : null}
+                                    {tag}
+                                  </Badge>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">

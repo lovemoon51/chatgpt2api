@@ -4,10 +4,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 from services.account_service import AccountService
+from services import account_service as account_module
 from services.auth_service import AuthService
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token
@@ -23,6 +25,18 @@ class AccountCapabilityTests(unittest.TestCase):
         self.assertTrue(
             AccountService._is_image_account_available(
                 {"status": "正常", "image_quota_unknown": True, "quota": 0}
+            )
+        )
+
+    def test_checkout_blocked_accounts_are_not_available_for_images(self) -> None:
+        self.assertFalse(
+            AccountService._is_image_account_available(
+                {
+                    "status": "正常",
+                    "image_quota_unknown": True,
+                    "quota": 25,
+                    "image_blocked_reason": "checkout_required",
+                }
             )
         )
 
@@ -65,6 +79,80 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_mark_image_checkout_required_blocks_future_image_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "正常", "quota": 25})
+
+            updated = service.mark_image_checkout_required("token-1", "checkout")
+
+            self.assertIsNone(updated)
+            self.assertEqual(service.list_tokens(), [])
+
+    def test_mark_image_usage_limit_preserves_account_even_when_rate_limited_removal_enabled(self) -> None:
+        old_value = account_module.config.data.get("auto_remove_rate_limited_accounts")
+        account_module.config.data["auto_remove_rate_limited_accounts"] = True
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_accounts(["token-1"])
+                service.update_account(
+                    "token-1",
+                    {
+                        "status": "正常",
+                        "quota": 25,
+                        "image_quota_unknown": True,
+                    },
+                )
+
+                updated = service.mark_image_usage_limit(
+                    "token-1",
+                    "usage_limit_reached",
+                    resets_in_seconds=3600,
+                )
+
+                self.assertIsNotNone(updated)
+                self.assertEqual(service.list_tokens(), ["token-1"])
+                self.assertEqual(updated["status"], "限流")
+                self.assertEqual(updated["quota"], 0)
+                self.assertFalse(updated["image_quota_unknown"])
+                self.assertTrue(updated["restore_at"])
+            finally:
+                if old_value is None:
+                    account_module.config.data.pop("auto_remove_rate_limited_accounts", None)
+                else:
+                    account_module.config.data["auto_remove_rate_limited_accounts"] = old_value
+
+    def test_get_available_access_token_uses_cached_pool_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "正常", "quota": 25})
+
+            with mock.patch.object(service, "fetch_remote_info", side_effect=AssertionError("should not refresh")):
+                token = service.get_available_access_token()
+
+            self.assertEqual(token, "token-1")
+            service.release_image_slot(token)
+
+    def test_get_available_access_token_can_still_verify_remote_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "正常", "quota": 25})
+
+            with mock.patch.object(
+                service,
+                "fetch_remote_info",
+                return_value={"status": "正常", "quota": 25},
+            ) as fetch:
+                token = service.get_available_access_token(verify_remote=True)
+
+            self.assertEqual(token, "token-1")
+            fetch.assert_called_once()
+            service.release_image_slot(token)
 
     def test_peek_text_access_token_uses_available_text_pool_without_advancing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -85,7 +85,10 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
             try:
-                limited_tokens = account_service.list_limited_tokens()
+                limited_tokens = account_service.list_limited_tokens(
+                    due_only=True,
+                    limit=account_service.limited_refresh_batch_size(),
+                )
                 if limited_tokens:
                     print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
                     account_service.refresh_accounts(limited_tokens)

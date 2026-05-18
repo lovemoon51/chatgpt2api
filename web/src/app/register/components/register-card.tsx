@@ -1,6 +1,8 @@
 "use client";
 
-import { AlertTriangle, LoaderCircle, Plus, Play, RotateCcw, Save, Square, Trash2, UserPlus } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, LoaderCircle, Network, Plus, Play, RotateCcw, Save, Square, Trash2, UserPlus } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,8 +10,20 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { fetchRegisterClashOptions, selectRegisterClashProxy, type ClashGroup, type RegisterConfig } from "@/lib/api";
 
 import { useSettingsStore } from "../../settings/store";
+
+const DEFAULT_CLASH: RegisterConfig["clash"] = {
+  enabled: false,
+  controller_url: "http://127.0.0.1:9090",
+  secret: "",
+  group: "",
+  selected_proxy: "",
+  proxy: "http://127.0.0.1:7890",
+  keywords: ["日本", "东京", "大阪", "JP", "JPN", "Japan", "Tokyo", "Osaka", "🇯🇵"],
+  timeout: 5,
+};
 
 export function RegisterCard() {
   const config = useSettingsStore((state) => state.registerConfig);
@@ -22,6 +36,8 @@ export function RegisterCard() {
   const setTargetQuota = useSettingsStore((state) => state.setRegisterTargetQuota);
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
+  const setRegisterConfig = useSettingsStore((state) => state.setRegisterConfig);
+  const setClashField = useSettingsStore((state) => state.setRegisterClashField);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
   const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
@@ -29,6 +45,117 @@ export function RegisterCard() {
   const save = useSettingsStore((state) => state.saveRegister);
   const toggle = useSettingsStore((state) => state.toggleRegister);
   const reset = useSettingsStore((state) => state.resetRegister);
+  const clash = config?.clash || DEFAULT_CLASH;
+  const [clashGroups, setClashGroups] = useState<ClashGroup[]>([]);
+  const [selectedClashGroup, setSelectedClashGroup] = useState("");
+  const [selectedClashProxy, setSelectedClashProxy] = useState("");
+  const [isLoadingClashOptions, setIsLoadingClashOptions] = useState(false);
+  const [isSwitchingClash, setIsSwitchingClash] = useState(false);
+  const [clashStatus, setClashStatus] = useState("");
+  const clashGroupOptions = useMemo(() => {
+    if (!selectedClashGroup || clashGroups.some((group) => group.name === selectedClashGroup)) {
+      return clashGroups;
+    }
+    return [
+      {
+        name: selectedClashGroup,
+        type: "",
+        now: selectedClashProxy,
+        all: selectedClashProxy ? [selectedClashProxy] : [],
+        nodes: selectedClashProxy ? [{ name: selectedClashProxy }] : [],
+      },
+      ...clashGroups,
+    ];
+  }, [clashGroups, selectedClashGroup, selectedClashProxy]);
+  const selectedGroup = useMemo(
+    () => clashGroupOptions.find((group) => group.name === selectedClashGroup),
+    [clashGroupOptions, selectedClashGroup],
+  );
+  const clashNodes = useMemo(() => {
+    const nodes = selectedGroup?.nodes || [];
+    if (!selectedClashProxy || nodes.some((node) => node.name === selectedClashProxy)) {
+      return nodes;
+    }
+    return [{ name: selectedClashProxy }, ...nodes];
+  }, [selectedGroup, selectedClashProxy]);
+
+  useEffect(() => {
+    setSelectedClashGroup(String(clash.group || ""));
+    setSelectedClashProxy(String(clash.selected_proxy || ""));
+  }, [clash.group, clash.selected_proxy]);
+
+  const updateSelectedClashGroup = (groupName: string) => {
+    const group = clashGroups.find((item) => item.name === groupName);
+    const nextProxy = String(group?.now || group?.nodes?.[0]?.name || "");
+    setSelectedClashGroup(groupName);
+    setSelectedClashProxy(nextProxy);
+    setClashField("group", groupName);
+    setClashField("selected_proxy", nextProxy);
+  };
+
+  const updateSelectedClashProxy = (proxyName: string) => {
+    setSelectedClashProxy(proxyName);
+    setClashField("selected_proxy", proxyName);
+  };
+
+  const loadClashOptions = async () => {
+    setIsLoadingClashOptions(true);
+    setClashStatus("");
+    try {
+      const data = await fetchRegisterClashOptions(clash);
+      const groups = data.clash.groups || [];
+      const nextGroup = data.clash.group || groups[0]?.name || "";
+      const group = groups.find((item) => item.name === nextGroup);
+      const nextProxy = data.clash.active_proxy || group?.now || group?.nodes?.[0]?.name || "";
+      setClashGroups(groups);
+      setSelectedClashGroup(nextGroup);
+      setSelectedClashProxy(nextProxy);
+      if (data.clash.proxy_url) {
+        setClashField("proxy", data.clash.proxy_url);
+      }
+      if (nextGroup) {
+        setClashField("group", nextGroup);
+      }
+      if (nextProxy) {
+        setClashField("selected_proxy", nextProxy);
+      }
+      setClashStatus(nextProxy ? `当前：${nextGroup} / ${nextProxy}` : `已读取 ${groups.length} 个节点组`);
+      toast.success(`已读取 ${groups.length} 个 Clash 节点组`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "读取 Clash 节点失败";
+      setClashStatus(message);
+      toast.error(message);
+    } finally {
+      setIsLoadingClashOptions(false);
+    }
+  };
+
+  const switchClashProxy = async () => {
+    if (!selectedClashGroup || !selectedClashProxy) {
+      toast.error("请先选择 Clash 节点组和节点");
+      return;
+    }
+    setIsSwitchingClash(true);
+    setClashStatus("");
+    try {
+      const data = await selectRegisterClashProxy(
+        { ...clash, group: selectedClashGroup, selected_proxy: selectedClashProxy },
+        selectedClashGroup,
+        selectedClashProxy,
+      );
+      setRegisterConfig(data.register);
+      setSelectedClashGroup(String(data.clash.group || selectedClashGroup));
+      setSelectedClashProxy(String(data.clash.active_proxy || data.clash.proxy || selectedClashProxy));
+      setClashStatus(`已切换：${data.clash.group} / ${data.clash.active_proxy || data.clash.proxy}`);
+      toast.success("Clash 节点已切换");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "切换 Clash 节点失败";
+      setClashStatus(message);
+      toast.error(message);
+    } finally {
+      setIsSwitchingClash(false);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -99,7 +226,7 @@ export function RegisterCard() {
             </div>
             <div className="space-y-2">
               <label className="text-sm text-stone-700">注册代理</label>
-              <Input value={config.proxy} onChange={(event) => setProxy(event.target.value)} placeholder="http://127.0.0.1:7890" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+              <Input value={config.proxy} onChange={(event) => setProxy(event.target.value)} placeholder="http://127.0.0.1:7890" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || clash.enabled} />
             </div>
             <div className="space-y-2">
               <label className="text-sm text-stone-700">目标剩余额度</label>
@@ -112,6 +239,76 @@ export function RegisterCard() {
             <div className="space-y-2">
               <label className="text-sm text-stone-700">检查间隔（秒）</label>
               <Input value={String(config.check_interval || "")} onChange={(event) => setCheckInterval(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode === "total"} />
+            </div>
+          </div>
+
+          <div className="space-y-3 border-t border-stone-200 pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="flex items-start gap-3 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
+                <Checkbox checked={Boolean(clash.enabled)} onCheckedChange={(checked) => setClashField("enabled", Boolean(checked))} disabled={config.enabled} />
+                <span className="space-y-0.5">
+                  <span className="flex items-center gap-1.5 font-medium text-stone-800">
+                    <Network className="size-3.5" />
+                    Clash Verge 节点
+                  </span>
+                  {clashStatus ? <span className="block max-w-[520px] truncate text-xs text-stone-500">{clashStatus}</span> : null}
+                </span>
+              </label>
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void loadClashOptions()} disabled={config.enabled || !clash.enabled || isLoadingClashOptions}>
+                  {isLoadingClashOptions ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+                  读取节点
+                </Button>
+                <Button type="button" className="h-9 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void switchClashProxy()} disabled={config.enabled || !clash.enabled || isSwitchingClash || !selectedClashGroup || !selectedClashProxy}>
+                  {isSwitchingClash ? <LoaderCircle className="size-4 animate-spin" /> : <Network className="size-4" />}
+                  切换节点
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-4">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">控制器地址</label>
+                <Input value={clash.controller_url} onChange={(event) => setClashField("controller_url", event.target.value)} placeholder="http://127.0.0.1:9090" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !clash.enabled} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">本地代理</label>
+                <Input value={clash.proxy} onChange={(event) => setClashField("proxy", event.target.value)} placeholder="http://127.0.0.1:7890" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !clash.enabled} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">节点组</label>
+                <Select value={selectedClashGroup} onValueChange={updateSelectedClashGroup} disabled={config.enabled || !clash.enabled || clashGroupOptions.length === 0}>
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                    <SelectValue placeholder="读取后选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {clashGroupOptions.map((group) => (
+                      <SelectItem key={group.name} value={group.name}>
+                        {group.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">节点</label>
+                <Select value={selectedClashProxy} onValueChange={updateSelectedClashProxy} disabled={config.enabled || !clash.enabled || clashNodes.length === 0}>
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                    <SelectValue placeholder="读取后选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {clashNodes.map((node) => (
+                      <SelectItem key={node.name} value={node.name}>
+                        {node.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">Secret</label>
+                <Input type="password" value={clash.secret} onChange={(event) => setClashField("secret", event.target.value)} placeholder="external-controller-secret" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !clash.enabled} />
+              </div>
             </div>
           </div>
 

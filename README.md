@@ -92,6 +92,17 @@ environment:
 - 支持移动端侧栏历史记录，点击外部可自动隐藏
 - 普通用户可以查看图片库和任务队列；管理员仍可进入完整后台
 
+### 后台管理界面
+
+- 管理员后台保留账号池、注册机、图片管理、日志管理和设置等完整管理入口
+- 账号池支持一键刷新全部账号、刷新选中账号、导出全部 Token、导出 CPA ZIP、手动修改状态和移除异常账号
+- 导入账号支持 `access_token`、Session JSON、本地 CPA JSON 文件、远程 CPA 服务器和 Sub2API 服务器
+- 注册机支持保存注册配置、启动 / 停止注册任务、查看 SSE 实时日志和运行结果统计
+- 设置页支持 CPA 连接管理：添加 CLIProxyAPI 连接后，点击「同步」读取远程账号列表，勾选后由后端后台下载 `access_token` 并导入本地号池
+- 设置页支持 Sub2API 连接管理：可通过管理员账号或 Admin API Key 保存连接，点击「同步」读取 OpenAI OAuth 账号并批量导入本地号池
+- 日志管理按图片调用、文本生成、账号管理分组展示，支持日期筛选、查询、批量选择和删除
+- 用户 Key 管理可为普通用户创建独立密钥，普通用户默认只能进入 `/studio/` 创作台
+
 ### API 兼容能力
 
 - 兼容 `POST /v1/images/generations` 图片生成接口
@@ -151,6 +162,22 @@ environment:
 任务队列：
 
 ![Studio task queue](assets/studio_task_queue.png)
+
+后台账号池：
+
+![Admin accounts](assets/admin_accounts.png)
+
+注册任务管理：
+
+![Admin register](assets/admin_register.png)
+
+日志管理：
+
+![Admin logs](assets/admin_logs.png)
+
+设置与后台配置（CPA / Sub2API 同步入口在设置页下方）：
+
+![Admin settings](assets/admin_settings_top.png)
 
 文生图界面：
 

@@ -1,7 +1,7 @@
 <h1 align="center">ChatGPT2API</h1>
 
 
-<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 文本对话、图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容 API / 代理，并集成新版普通用户创作台、在线画图、图片库、任务队列、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
 
 > [!WARNING]
 > 免责声明：
@@ -27,7 +27,7 @@
 ### Docker 运行
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone https://github.com/lovemoon51/chatgpt2api.git
 cd chatgpt2api
 docker compose up -d
 ```
@@ -43,7 +43,7 @@ docker compose up -d
 启动后端：
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone https://github.com/lovemoon51/chatgpt2api.git
 cd chatgpt2api
 uv sync
 uv run main.py
@@ -56,6 +56,12 @@ cd chatgpt2api/web
 bun install
 bun run dev
 ```
+
+本地开发时：
+
+- 后端：`http://127.0.0.1:8000`
+- 前端：`http://127.0.0.1:3000`
+- 前端开发环境会把接口请求指向 `http://127.0.0.1:8000`
 
 ### 存储后端配置
 
@@ -76,6 +82,16 @@ environment:
 
 ## 功能
 
+### 新版普通用户创作台
+
+- 新增 `/studio/` 普通用户创作台，面向普通用户提供更接近聊天产品的创作入口
+- 支持「对话 / 作画」双模式切换：文本模型从 `/v1/models` 动态读取，图片模型保留 `auto`、`gpt-image-2`、`codex-gpt-image-2`
+- 支持上传图片和粘贴图片作为参考图，作画模式下可继续编辑生成结果
+- 支持模型下拉、图片参数面板、任务队列、图片库等轻量弹层，点击外部自动收起
+- 支持亮色 / 深色模式切换，并在浏览器本地保存偏好
+- 支持移动端侧栏历史记录，点击外部可自动隐藏
+- 普通用户可以查看图片库和任务队列；管理员仍可进入完整后台
+
 ### API 兼容能力
 
 - 兼容 `POST /v1/images/generations` 图片生成接口
@@ -92,12 +108,14 @@ environment:
 
 ### 在线画图功能
 
-- 内置在线画图工作台，支持生成、图片编辑与多图组图编辑
+- 内置在线画图工作台与新版 `/studio/` 创作台，支持生成、图片编辑与多图组图编辑
 - 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` 模型选择
 - 编辑模式支持参考图上传
 - 前端支持多图生成交互
 - 本地保存图片会话历史，支持回看、删除和清空
 - 支持服务端缓存图片URL
+- 支持图片库浏览、复制地址、下载和灯箱预览
+- 支持任务队列查看、任务进度、失败重试和跳转到对应会话
 
 ### 号池管理功能
 
@@ -117,6 +135,22 @@ environment:
 - 详细状态说明见：[功能清单](./docs/feature-status.en.md)
 
 ## Screenshots
+
+新版普通用户创作台：
+
+![Studio workspace](assets/studio_clean_workspace.png)
+
+模型选择：
+
+![Studio model selector](assets/studio_model_selector.png)
+
+图片参数面板：
+
+![Studio params panel](assets/studio_params_panel.png)
+
+任务队列：
+
+![Studio task queue](assets/studio_task_queue.png)
 
 文生图界面：
 
@@ -324,10 +358,10 @@ curl http://localhost:8000/v1/responses \
 
 感谢所有为本项目做出贡献的开发者：
 
-<a href="https://github.com/basketikun/chatgpt2api/graphs/contributors">
-  <img alt="Contributors" src="https://contrib.rocks/image?repo=basketikun/chatgpt2api" />
+<a href="https://github.com/lovemoon51/chatgpt2api/graphs/contributors">
+  <img alt="Contributors" src="https://contrib.rocks/image?repo=lovemoon51/chatgpt2api" />
 </a>
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=basketikun/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=basketikun%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=lovemoon51/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=lovemoon51%2Fchatgpt2api&type=date&legend=top-left)

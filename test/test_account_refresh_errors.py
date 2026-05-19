@@ -88,6 +88,106 @@ class AccountRefreshErrorTests(unittest.TestCase):
             self.assertEqual(service.list_tokens(), ["good-token"])
             self.assertEqual([item["access_token"] for item in result["items"]], ["good-token"])
 
+    def test_refresh_accounts_syncs_cpa_delete_for_invalid_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["good-token", "bad-token"])
+            service.update_account("bad-token", {"email": "bad@example.com", "type": "free"})
+
+            def fake_fetch(token: str) -> dict:
+                if token == "bad-token":
+                    raise InvalidAccessTokenError("token invalid")
+                return {"email": f"{token}@example.com", "quota": 25, "status": "正常"}
+
+            service._fetch_remote_user_info = staticmethod(fake_fetch)
+
+            with mock.patch.object(service, "_sync_cpa_delete") as sync_delete:
+                result = service.refresh_accounts(["good-token", "bad-token"])
+
+            self.assertEqual(result["removed_failed"], 1)
+            sync_delete.assert_called_once()
+            account, event = sync_delete.call_args.args
+            self.assertEqual(account["access_token"], "bad-token")
+            self.assertEqual(account["email"], "bad@example.com")
+            self.assertEqual(event, "refresh_accounts_invalid")
+
+    def test_remove_invalid_token_marks_only_when_auto_remove_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["bad-token"])
+            old_value = account_module.config.data.get("auto_remove_invalid_accounts")
+            account_module.config.data["auto_remove_invalid_accounts"] = False
+            try:
+                with mock.patch.object(service, "_sync_cpa_delete") as sync_delete:
+                    removed = service.remove_invalid_token("bad-token", "test")
+            finally:
+                if old_value is None:
+                    account_module.config.data.pop("auto_remove_invalid_accounts", None)
+                else:
+                    account_module.config.data["auto_remove_invalid_accounts"] = old_value
+
+            self.assertFalse(removed)
+            sync_delete.assert_not_called()
+            account = service.get_account("bad-token")
+            self.assertIsNotNone(account)
+            assert account is not None
+            self.assertEqual(account["status"], "异常")
+
+    def test_remove_unusable_image_token_syncs_cpa_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["bad-token"])
+            service.update_account("bad-token", {"email": "bad@example.com", "type": "free"})
+
+            with mock.patch.object(service, "_sync_cpa_delete") as sync_delete:
+                removed = service.remove_unusable_image_token("bad-token", "image_stream_invalid_token", "invalidated")
+
+            self.assertTrue(removed)
+            sync_delete.assert_called_once()
+            account, event = sync_delete.call_args.args
+            self.assertEqual(account["access_token"], "bad-token")
+            self.assertEqual(account["email"], "bad@example.com")
+            self.assertEqual(event, "image_stream_invalid_token")
+
+    def test_refresh_accounts_batches_large_refresh_but_keeps_small_fast_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            tokens = [f"token-{index}" for index in range(5)]
+            service.add_accounts(tokens)
+            old_values = {
+                key: account_module.config.data.get(key)
+                for key in (
+                    "refresh_account_fast_path_threshold",
+                    "refresh_account_batch_size",
+                    "refresh_account_batch_interval_seconds",
+                )
+            }
+            account_module.config.data["refresh_account_fast_path_threshold"] = 3
+            account_module.config.data["refresh_account_batch_size"] = 2
+            account_module.config.data["refresh_account_batch_interval_seconds"] = 0.25
+
+            def fake_fetch(token: str) -> dict:
+                return {"email": f"{token}@example.com", "quota": 25, "status": "正常"}
+
+            service._fetch_remote_user_info = staticmethod(fake_fetch)
+            try:
+                with mock.patch.object(account_module.time, "sleep") as sleep:
+                    large_result = service.refresh_accounts(tokens)
+                with mock.patch.object(account_module.time, "sleep") as small_sleep:
+                    small_result = service.refresh_accounts(tokens[:3])
+            finally:
+                for key, value in old_values.items():
+                    if value is None:
+                        account_module.config.data.pop(key, None)
+                    else:
+                        account_module.config.data[key] = value
+
+            self.assertEqual(large_result["refreshed"], 5)
+            self.assertEqual(sleep.call_count, 2)
+            sleep.assert_any_call(0.25)
+            self.assertEqual(small_result["refreshed"], 3)
+            small_sleep.assert_not_called()
+
     def test_refresh_accounts_keeps_transient_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))

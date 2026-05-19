@@ -21,7 +21,8 @@ ARG TARGETARCH
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/tmp/uv-cache
 
 WORKDIR /app
 
@@ -50,6 +51,16 @@ COPY utils ./utils
 COPY scripts ./scripts
 COPY --from=web-build /app/web/out ./web_dist
 
-EXPOSE 80
+RUN mkdir -p /app/data /tmp/uv-cache \
+    && groupadd --system --gid 1000 app \
+    && useradd --system --uid 1000 --gid app --home-dir /app --shell /usr/sbin/nologin app \
+    && chown -R app:app /app /tmp/uv-cache
 
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--access-log"]
+EXPOSE 8000
+
+USER app
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"
+
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--access-log"]

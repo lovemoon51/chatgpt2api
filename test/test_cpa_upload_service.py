@@ -18,10 +18,15 @@ class FakeResponse:
 class FakeSession:
     def __init__(self) -> None:
         self.post_call: dict | None = None
+        self.delete_call: dict | None = None
         self.closed = False
 
     def post(self, url: str, **kwargs):
         self.post_call = {"url": url, **kwargs}
+        return FakeResponse()
+
+    def delete(self, url: str, **kwargs):
+        self.delete_call = {"url": url, **kwargs}
         return FakeResponse()
 
     def close(self) -> None:
@@ -102,6 +107,53 @@ class CPAUploadServiceTests(unittest.TestCase):
         self.assertEqual(len(result["errors"]), 1)
         self.assertEqual(result["errors"][0]["pool_id"], "bad")
         self.assertIn("upload failed", result["errors"][0]["error"])
+
+    def test_delete_remote_auth_file_deletes_by_name(self) -> None:
+        session = FakeSession()
+        pool = {
+            "id": "pool-1",
+            "name": "主池",
+            "base_url": "https://cpa.example.test/",
+            "secret_key": "secret",
+        }
+
+        with mock.patch("services.cpa_service.Session", side_effect=lambda **_: session):
+            result = cpa_service.delete_remote_auth_file(pool, "codex-user@example.com-free.json")
+
+        self.assertTrue(session.closed)
+        self.assertIsNotNone(session.delete_call)
+        assert session.delete_call is not None
+        self.assertEqual(session.delete_call["url"], "https://cpa.example.test/v0/management/auth-files")
+        self.assertEqual(session.delete_call["headers"]["Authorization"], "Bearer secret")
+        self.assertEqual(session.delete_call["params"], {"name": "codex-user@example.com-free.json"})
+        self.assertEqual(result["filename"], "codex-user@example.com-free.json")
+
+    def test_delete_account_from_configured_pools_collects_errors(self) -> None:
+        pools = [
+            {"id": "ok", "name": "ok", "base_url": "https://ok.example", "secret_key": "secret"},
+            {"id": "bad", "name": "bad", "base_url": "https://bad.example", "secret_key": "secret"},
+            {"id": "ignored", "name": "ignored", "base_url": "", "secret_key": "secret"},
+        ]
+
+        with (
+            mock.patch.object(cpa_service.cpa_config, "list_pools", return_value=pools),
+            mock.patch(
+                "services.cpa_service.delete_remote_auth_file",
+                side_effect=[{"pool_id": "ok", "filename": "a.json"}, RuntimeError("delete failed")],
+            ),
+        ):
+            result = cpa_service.delete_account_from_configured_pools({
+                "access_token": "access",
+                "email": "user@example.com",
+                "type": "free",
+            })
+
+        self.assertEqual(result["configured"], 2)
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["filename"], "codex-user@example.com-free.json")
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["errors"][0]["pool_id"], "bad")
+        self.assertIn("delete failed", result["errors"][0]["error"])
 
 
 if __name__ == "__main__":

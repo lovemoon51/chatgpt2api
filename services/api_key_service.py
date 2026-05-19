@@ -160,6 +160,12 @@ class OpenAIKeyService:
         with self._lock:
             return [self._sanitize(dict(item)) for item in self._items]
 
+    def get_available_secret(self) -> str:
+        with self._lock:
+            ok_item = next((item for item in self._items if item.get("status") == "ok"), None)
+            item = ok_item or (self._items[0] if self._items else None)
+            return str(item.get("key") or "") if item else ""
+
     def add_key(self, name: str, secret: str, *, check: bool = False) -> dict[str, Any]:
         secret = _clean(secret)
         if not secret:

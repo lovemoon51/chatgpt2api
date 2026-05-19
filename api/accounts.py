@@ -26,14 +26,23 @@ from services.sub2api_service import (
 
 
 
+class UserKeyLimitsRequest(BaseModel):
+    requests_per_day: int | None = Field(default=None, ge=0)
+    images_per_day: int | None = Field(default=None, ge=0)
+    concurrency: int | None = Field(default=None, ge=0)
+    models: list[str] = Field(default_factory=list)
+
+
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    limits: UserKeyLimitsRequest | None = None
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     key: str | None = None
+    limits: UserKeyLimitsRequest | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -110,7 +119,11 @@ def create_router() -> APIRouter:
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            item, raw_key = auth_service.create_key(role="user", name=body.name)
+            item, raw_key = auth_service.create_key(
+                role="user",
+                name=body.name,
+                limits=body.limits.model_dump(mode="python") if body.limits is not None else None,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
@@ -128,6 +141,7 @@ def create_router() -> APIRouter:
                 "name": body.name,
                 "enabled": body.enabled,
                 "key": body.key,
+                "limits": body.limits.model_dump(mode="python") if body.limits is not None else None,
             }.items()
             if value is not None
         }

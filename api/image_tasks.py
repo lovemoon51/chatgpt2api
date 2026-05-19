@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from api.support import require_identity, resolve_image_base_url
+from api.support import enforce_usage_limits, require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
@@ -47,7 +47,8 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
+        with enforce_usage_limits(identity, "/api/image-tasks/generations", body.model, "image"):
+            await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
         try:
             return await run_in_threadpool(
                 image_task_service.submit_generation,
@@ -73,7 +74,8 @@ def create_router() -> APIRouter:
         size: str | None = Form(default=None),
     ):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
+        with enforce_usage_limits(identity, "/api/image-tasks/edits", model, "image"):
+            await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
         uploads = [*(image or []), *(image_list or [])]
         if not uploads:
             raise HTTPException(status_code=400, detail={"error": "image file is required"})

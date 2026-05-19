@@ -114,6 +114,7 @@ class ModelListPoolTests(unittest.TestCase):
         model_ids = {item["id"] for item in result["data"]}
         self.assertIn("gpt-image-2", model_ids)
         self.assertIn("codex-gpt-image-2", model_ids)
+        self.assertIn("text-embedding-3-small", model_ids)
 
 
 if __name__ == "__main__":

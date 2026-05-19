@@ -197,7 +197,7 @@ class RegisterService:
         normal = [item for item in items if item.get("status") == "正常"]
         return {
             "current_quota": sum(int(item.get("quota") or 0) for item in normal if not item.get("image_quota_unknown")),
-            "current_available": len(normal),
+            "current_available": account_service.available_account_count(),
         }
 
     def _target_reached(self, cfg: dict, submitted: int) -> bool:

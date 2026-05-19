@@ -157,6 +157,51 @@ export type BackupDetail = {
   }>;
 };
 
+export type BackupVerificationIssue = {
+  level: "error" | "warning" | string;
+  code: string;
+  message: string;
+  path?: string;
+};
+
+export type BackupVerificationReport = {
+  key: string;
+  name: string;
+  encrypted: boolean;
+  ok: boolean;
+  readable: boolean;
+  restorable: boolean;
+  summary: {
+    errors: number;
+    warnings: number;
+    files: number;
+    snapshots: number;
+    size: number;
+  };
+  errors: BackupVerificationIssue[];
+  warnings: BackupVerificationIssue[];
+  metadata: {
+    version?: number | null;
+    created_at?: string | null;
+    trigger?: string | null;
+    app_version?: string | null;
+    storage_backend?: Record<string, unknown> | null;
+  };
+  files: Array<{
+    name: string;
+    size: number;
+    content_type?: string;
+    sha256?: string;
+    valid: boolean;
+    records?: number;
+  }>;
+  snapshots: Array<{
+    name: string;
+    count: number;
+    valid: boolean;
+  }>;
+};
+
 export type ManagedImage = {
   rel: string;
   path?: string;
@@ -208,6 +253,7 @@ export type LoginResponse = {
   role: AuthRole;
   subject_id: string;
   name: string;
+  access_token?: string;
 };
 
 export type UserKey = {
@@ -217,6 +263,61 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
+  limits?: UserKeyLimits | null;
+};
+
+export type UserKeyLimits = {
+  requests_per_day?: number | null;
+  images_per_day?: number | null;
+  concurrency?: number | null;
+  models?: string[];
+};
+
+export type DashboardMetricGroup = {
+  total?: number;
+  active?: number;
+  normal?: number;
+  available?: number;
+  success?: number;
+  failed?: number;
+  fail?: number;
+  error?: number;
+  avg_duration_ms?: number;
+  avg_latency_ms?: number;
+  average_duration_ms?: number;
+  [key: string]: unknown;
+};
+
+export type DashboardResponse = {
+  accounts?: DashboardMetricGroup;
+  calls?: DashboardMetricGroup & {
+    today?: DashboardMetricGroup;
+    recent?: DashboardMetricGroup;
+  };
+  backup?: DashboardMetricGroup & {
+    enabled?: boolean;
+    running?: boolean;
+    last_status?: string;
+    last_error?: string | null;
+    last_started_at?: string | null;
+    last_finished_at?: string | null;
+    last_object_key?: string | null;
+  };
+  storage?: DashboardMetricGroup & {
+    ok?: boolean;
+    backend?: Record<string, unknown>;
+    health?: Record<string, unknown>;
+    used_bytes?: number;
+    total_bytes?: number;
+    free_bytes?: number;
+    images_bytes?: number;
+    backups_bytes?: number;
+    logs_bytes?: number;
+    provider?: string;
+    bucket?: string;
+    status?: string;
+  };
+  [key: string]: unknown;
 };
 
 export type RegisterConfig = {
@@ -334,14 +435,11 @@ type ModelListResponse = {
   data: OpenAIModel[];
 };
 
-export async function login(authKey: string) {
-  const normalizedAuthKey = String(authKey || "").trim();
+export async function login(loginValue: string) {
+  const normalizedLoginValue = String(loginValue || "").trim();
   return httpRequest<LoginResponse>("/auth/login", {
     method: "POST",
-    body: {},
-    headers: {
-      Authorization: `Bearer ${normalizedAuthKey}`,
-    },
+    body: { login: normalizedLoginValue },
     redirectOnUnauthorized: false,
   });
 }
@@ -536,6 +634,13 @@ export async function fetchBackupDetail(key: string) {
   return httpRequest<{ item: BackupDetail }>(`/api/backups/detail?${params.toString()}`);
 }
 
+export async function verifyBackup(key: string) {
+  return httpRequest<{ report: BackupVerificationReport }>("/api/backups/verify", {
+    method: "POST",
+    body: { key },
+  });
+}
+
 export function getBackupDownloadUrl(key: string) {
   const params = new URLSearchParams();
   params.set("key", key);
@@ -617,14 +722,17 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string) {
+export async function createUserKey(name: string, limits?: UserKeyLimits) {
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name },
+    body: { name, ...(limits ? { limits } : {}) },
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; key?: string }) {
+export async function updateUserKey(
+  keyId: string,
+  updates: { enabled?: boolean; name?: string; key?: string; limits?: UserKeyLimits },
+) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,
@@ -635,6 +743,10 @@ export async function deleteUserKey(keyId: string) {
   return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "DELETE",
   });
+}
+
+export async function fetchDashboard() {
+  return httpRequest<DashboardResponse>("/api/dashboard");
 }
 
 export async function fetchRegisterConfig() {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 from fastapi import FastAPI
@@ -10,6 +11,15 @@ import api.image_tasks as image_tasks_module
 
 
 AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
+
+
+@contextmanager
+def _null_context():
+    yield
+
+
+async def _noop_filter(*_args, **_kwargs):
+    return None
 
 
 class FakeImageTaskService:
@@ -62,6 +72,19 @@ class ImageTasksApiTests(unittest.TestCase):
         self.service_patcher = mock.patch.object(image_tasks_module, "image_task_service", self.fake_service)
         self.service_patcher.start()
         self.addCleanup(self.service_patcher.stop)
+        self.identity_patcher = mock.patch.object(
+            image_tasks_module,
+            "require_identity",
+            return_value={"id": "admin", "name": "管理员", "role": "admin"},
+        )
+        self.identity_patcher.start()
+        self.addCleanup(self.identity_patcher.stop)
+        self.limits_patcher = mock.patch.object(image_tasks_module, "enforce_usage_limits", lambda *_args, **_kwargs: _null_context())
+        self.limits_patcher.start()
+        self.addCleanup(self.limits_patcher.stop)
+        self.filter_patcher = mock.patch.object(image_tasks_module, "filter_or_log", _noop_filter)
+        self.filter_patcher.start()
+        self.addCleanup(self.filter_patcher.stop)
         app = FastAPI()
         app.include_router(image_tasks_module.create_router())
         self.client = TestClient(app)

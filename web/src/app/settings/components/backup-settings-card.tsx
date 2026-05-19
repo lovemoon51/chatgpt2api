@@ -1,6 +1,6 @@
 "use client";
 
-import { CloudUpload, Download, Eye, LoaderCircle, Play, RefreshCcw, Shield, Trash2 } from "lucide-react";
+import { CloudUpload, Download, Eye, LoaderCircle, Play, RefreshCcw, Shield, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -11,7 +11,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
-import { fetchBackupDetail, getBackupDownloadUrl, type BackupDetail, type BackupInclude } from "@/lib/api";
+import { fetchBackupDetail, getBackupDownloadUrl, verifyBackup, type BackupDetail, type BackupInclude, type BackupVerificationReport } from "@/lib/api";
 import { getStoredAuthKey } from "@/store/auth";
 import { useSettingsStore } from "../store";
 
@@ -79,6 +79,10 @@ export function BackupSettingsCard() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<BackupDetail | null>(null);
+  const [verificationOpen, setVerificationOpen] = useState(false);
+  const [verificationLoading, setVerificationLoading] = useState(false);
+  const [verifyingKey, setVerifyingKey] = useState<string | null>(null);
+  const [verification, setVerification] = useState<BackupVerificationReport | null>(null);
   const config = useSettingsStore((state) => state.config);
   const backups = useSettingsStore((state) => state.backups);
   const backupState = useSettingsStore((state) => state.backupState);
@@ -122,6 +126,27 @@ export function BackupSettingsCard() {
       toast.error(error instanceof Error ? error.message : "读取备份详情失败");
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const handleVerify = async (key: string) => {
+    setVerificationLoading(true);
+    setVerifyingKey(key);
+    setVerificationOpen(true);
+    try {
+      const data = await verifyBackup(key);
+      setVerification(data.report);
+      if (data.report.ok) {
+        toast.success(data.report.summary.warnings > 0 ? "备份可读取，但存在警告" : "备份校验通过");
+      } else {
+        toast.error("备份校验未通过，请查看报告");
+      }
+    } catch (error) {
+      setVerification(null);
+      toast.error(error instanceof Error ? error.message : "校验备份失败");
+    } finally {
+      setVerificationLoading(false);
+      setVerifyingKey(null);
     }
   };
 
@@ -354,6 +379,16 @@ export function BackupSettingsCard() {
                       <Button
                         type="button"
                         variant="outline"
+                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                        onClick={() => void handleVerify(item.key)}
+                        disabled={verifyingKey === item.key}
+                      >
+                        {verifyingKey === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+                        校验
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
                         className="h-9 rounded-xl border-rose-200 bg-white px-4 text-rose-700"
                         onClick={() => void removeBackup(item.key)}
                         disabled={isDeleting}
@@ -434,6 +469,97 @@ export function BackupSettingsCard() {
                       <div key={item.name} className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm">
                         <div className="font-medium text-stone-800">{item.name}</div>
                         <div className="mt-2 text-xs text-stone-500">记录数 {item.count}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={verificationOpen} onOpenChange={setVerificationOpen}>
+        <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col overflow-hidden rounded-2xl border-white/80 bg-white">
+          <DialogHeader className="shrink-0 border-b border-stone-200 pb-3">
+            <DialogTitle>备份校验报告</DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            {verificationLoading ? (
+              <div className="flex items-center justify-center py-16">
+                <LoaderCircle className="size-5 animate-spin text-stone-400" />
+              </div>
+            ) : !verification ? (
+              <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
+                暂时无法生成校验报告；如果这是加密备份，请确认当前已填写正确的加密口令并先保存配置。
+              </div>
+            ) : (
+              <>
+                <div className={`rounded-xl border px-4 py-4 text-sm ${verification.ok ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}`}>
+                  <div className="font-medium">{verification.ok ? "备份可用于恢复前检查" : "备份存在阻断性问题"}</div>
+                  <div className="mt-1 break-all text-xs">
+                    {verification.name} · {formatBytes(verification.summary.size)} · {verification.readable ? "可读取" : "不可读取"} · {verification.restorable ? "可恢复" : "不可恢复"}
+                  </div>
+                </div>
+
+                <div className="grid gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-4 text-sm text-stone-600 md:grid-cols-4">
+                  <div>
+                    <div className="text-xs text-stone-500">错误</div>
+                    <div className="mt-1 font-medium text-stone-800">{verification.summary.errors}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-stone-500">警告</div>
+                    <div className="mt-1 font-medium text-stone-800">{verification.summary.warnings}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-stone-500">文件</div>
+                    <div className="mt-1 font-medium text-stone-800">{verification.summary.files}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-stone-500">快照</div>
+                    <div className="mt-1 font-medium text-stone-800">{verification.summary.snapshots}</div>
+                  </div>
+                </div>
+
+                {verification.errors.length > 0 ? (
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium text-stone-800">错误</h4>
+                    {verification.errors.map((item, index) => (
+                      <div key={`${item.code}-${index}`} className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                        <div className="font-medium">{item.message}</div>
+                        {item.path ? <div className="mt-1 break-all text-xs text-rose-700">{item.path}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {verification.warnings.length > 0 ? (
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium text-stone-800">警告</h4>
+                    {verification.warnings.map((item, index) => (
+                      <div key={`${item.code}-${index}`} className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        <div className="font-medium">{item.message}</div>
+                        {item.path ? <div className="mt-1 break-all text-xs text-amber-800">{item.path}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-stone-800">文件校验</h4>
+                  <div className="space-y-2">
+                    {verification.files.map((item) => (
+                      <div key={item.name} className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="break-all font-medium text-stone-800">{item.name}</div>
+                          <Badge variant={item.valid ? "success" : "danger"} className="rounded-md">{item.valid ? "有效" : "异常"}</Badge>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
+                          <span>大小 {formatBytes(item.size)}</span>
+                          <span>{item.content_type || "application/octet-stream"}</span>
+                          {typeof item.records === "number" ? <span>记录 {item.records}</span> : null}
+                          <span className="break-all">SHA256 {item.sha256 || "—"}</span>
+                        </div>
                       </div>
                     ))}
                   </div>

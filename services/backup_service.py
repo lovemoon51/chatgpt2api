@@ -9,6 +9,7 @@ import random
 import subprocess
 import tarfile
 import threading
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -109,6 +110,8 @@ def _guess_content_type(name: str) -> str:
         return "application/json"
     if name.endswith(".jsonl"):
         return "application/x-ndjson"
+    if name.endswith(".zip"):
+        return "application/zip"
     if name.endswith(".tar.gz"):
         return "application/gzip"
     if name.endswith(".gz"):
@@ -126,6 +129,21 @@ def _count_items(value: object) -> int:
     if isinstance(value, dict):
         return len(value)
     return 0
+
+
+def _report_item(level: str, code: str, message: str, *, path: str | None = None) -> dict[str, object]:
+    item: dict[str, object] = {
+        "level": level,
+        "code": code,
+        "message": message,
+    }
+    if path:
+        item["path"] = path
+    return item
+
+
+def _is_json_object_or_list(value: object) -> bool:
+    return isinstance(value, (dict, list))
 
 
 class BackupError(RuntimeError):
@@ -464,6 +482,21 @@ class BackupService:
         detail["encrypted"] = candidate.endswith(".enc")
         return detail
 
+    def verify_backup(self, key: str) -> dict[str, object]:
+        candidate = _clean(key)
+        if not candidate:
+            raise BackupError("备份对象 key 不能为空")
+        client = CloudflareR2Client(config.get_backup_settings())
+        try:
+            payload = client.download_bytes(candidate)
+        finally:
+            client.close()
+        report = self._verify_backup_payload(candidate, payload)
+        report["key"] = candidate
+        report["name"] = candidate.rsplit("/", 1)[-1]
+        report["encrypted"] = candidate.endswith(".enc")
+        return report
+
     def run_backup(self, *, trigger: str = "manual") -> dict[str, object]:
         with self._lock:
             current = self.get_status()
@@ -543,6 +576,20 @@ class BackupService:
             decoded = _openssl_decrypt(decoded, passphrase)
         return self._decode_archive_detail(decoded)
 
+    def _verify_backup_payload(self, key: str, payload: bytes) -> dict[str, object]:
+        decoded = payload
+        if key.endswith(".enc"):
+            passphrase = _clean(config.get_backup_settings().get("passphrase"))
+            if not passphrase:
+                raise BackupError("当前未配置加密口令，无法校验已加密备份")
+            decoded = _openssl_decrypt(decoded, passphrase)
+            key = key[:-4]
+        if key.endswith(".json"):
+            return self._verify_json_backup_payload(decoded)
+        if key.endswith(".zip") or zipfile.is_zipfile(io.BytesIO(decoded)):
+            return self._verify_zip_payload(decoded)
+        return self._verify_archive_payload(decoded)
+
     def _apply_rotation(self, client: CloudflareR2Client, keep: int) -> None:
         if keep <= 0:
             return
@@ -603,6 +650,307 @@ class BackupService:
             "trigger": metadata.get("trigger"),
             "app_version": metadata.get("app_version"),
             "storage_backend": metadata.get("storage_backend"),
+            "files": files,
+            "snapshots": snapshots,
+        }
+
+    def _verify_archive_payload(self, payload: bytes) -> dict[str, object]:
+        errors: list[dict[str, object]] = []
+        warnings: list[dict[str, object]] = []
+        files: list[dict[str, object]] = []
+        snapshots: list[dict[str, object]] = []
+        metadata: dict[str, object] = {}
+        member_names: set[str] = set()
+
+        try:
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                members = [member for member in archive.getmembers() if member.isfile()]
+                for member in members:
+                    name = member.name
+                    member_names.add(name)
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        warnings.append(_report_item("warning", "file_unreadable", "备份包内文件无法读取", path=name))
+                        continue
+                    raw = extracted.read()
+                    file_report = {
+                        "name": name,
+                        "size": len(raw),
+                        "content_type": _guess_content_type(name),
+                        "sha256": _sha256_hex(raw),
+                        "valid": True,
+                    }
+
+                    if name == "backup-metadata.json":
+                        try:
+                            parsed = json.loads(raw.decode("utf-8"))
+                        except UnicodeDecodeError:
+                            errors.append(_report_item("error", "metadata_encoding_invalid", "备份元数据不是有效 UTF-8", path=name))
+                            file_report["valid"] = False
+                        except json.JSONDecodeError as exc:
+                            errors.append(_report_item("error", "metadata_json_invalid", f"备份元数据 JSON 解析失败：{exc.msg}", path=name))
+                            file_report["valid"] = False
+                        else:
+                            if isinstance(parsed, dict):
+                                metadata = parsed
+                                self._verify_metadata(metadata, errors, warnings)
+                            else:
+                                errors.append(_report_item("error", "metadata_shape_invalid", "备份元数据必须是 JSON 对象", path=name))
+                                file_report["valid"] = False
+                        files.append(file_report)
+                        continue
+
+                    if name.startswith("snapshots/") and name.endswith(".json"):
+                        snapshot_report = self._verify_json_payload(raw, name, errors, warnings)
+                        snapshots.append({
+                            "name": name.removeprefix("snapshots/").removesuffix(".json"),
+                            "count": _count_items(snapshot_report.get("parsed")),
+                            "valid": bool(snapshot_report.get("valid")),
+                        })
+                        file_report["valid"] = bool(snapshot_report.get("valid"))
+                        files.append(file_report)
+                        continue
+
+                    if name.endswith(".json"):
+                        result = self._verify_json_payload(raw, name, errors, warnings)
+                        file_report["valid"] = bool(result.get("valid"))
+                    elif name.endswith(".jsonl"):
+                        result = self._verify_jsonl_payload(raw, name, errors, warnings)
+                        file_report["valid"] = bool(result.get("valid"))
+                        file_report["records"] = result.get("records")
+
+                    files.append(file_report)
+        except tarfile.TarError as exc:
+            errors.append(_report_item("error", "archive_invalid", "解析备份压缩包失败，备份可能已损坏"))
+            return self._verification_report(errors, warnings, files, snapshots, metadata, size=len(payload), readable=False)
+
+        if "backup-metadata.json" not in member_names:
+            errors.append(_report_item("error", "metadata_missing", "备份缺少 backup-metadata.json，无法确认备份版本与来源"))
+
+        self._verify_required_content(member_names, snapshots, errors, warnings)
+        files.sort(key=lambda item: str(item.get("name") or ""))
+        snapshots.sort(key=lambda item: str(item.get("name") or ""))
+        return self._verification_report(errors, warnings, files, snapshots, metadata, size=len(payload), readable=True)
+
+    def _verify_zip_payload(self, payload: bytes) -> dict[str, object]:
+        errors: list[dict[str, object]] = []
+        warnings: list[dict[str, object]] = []
+        files: list[dict[str, object]] = []
+        snapshots: list[dict[str, object]] = []
+        metadata: dict[str, object] = {}
+        member_names: set[str] = set()
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    name = info.filename
+                    member_names.add(name)
+                    try:
+                        raw = archive.read(info)
+                    except (RuntimeError, zipfile.BadZipFile):
+                        errors.append(_report_item("error", "zip_file_unreadable", "ZIP 内文件无法读取", path=name))
+                        files.append({
+                            "name": name,
+                            "size": int(info.file_size or 0),
+                            "content_type": _guess_content_type(name),
+                            "sha256": "",
+                            "valid": False,
+                        })
+                        continue
+
+                    file_report = {
+                        "name": name,
+                        "size": len(raw),
+                        "content_type": _guess_content_type(name),
+                        "sha256": _sha256_hex(raw),
+                        "valid": True,
+                    }
+                    if name == "backup-metadata.json":
+                        result = self._verify_json_payload(raw, name, errors, warnings)
+                        if isinstance(result.get("parsed"), dict):
+                            metadata = result["parsed"]
+                            self._verify_metadata(metadata, errors, warnings)
+                        else:
+                            errors.append(_report_item("error", "metadata_shape_invalid", "备份元数据必须是 JSON 对象", path=name))
+                            file_report["valid"] = False
+                    elif name.startswith("snapshots/") and name.endswith(".json"):
+                        result = self._verify_json_payload(raw, name, errors, warnings)
+                        snapshots.append({
+                            "name": name.removeprefix("snapshots/").removesuffix(".json"),
+                            "count": _count_items(result.get("parsed")),
+                            "valid": bool(result.get("valid")),
+                        })
+                        file_report["valid"] = bool(result.get("valid"))
+                    elif name.endswith(".json"):
+                        result = self._verify_json_payload(raw, name, errors, warnings)
+                        file_report["valid"] = bool(result.get("valid"))
+                    elif name.endswith(".jsonl"):
+                        result = self._verify_jsonl_payload(raw, name, errors, warnings)
+                        file_report["valid"] = bool(result.get("valid"))
+                        file_report["records"] = result.get("records")
+                    files.append(file_report)
+        except zipfile.BadZipFile:
+            errors.append(_report_item("error", "zip_invalid", "解析 ZIP 备份失败，备份可能已损坏"))
+            return self._verification_report(errors, warnings, files, snapshots, metadata, size=len(payload), readable=False)
+
+        if "backup-metadata.json" not in member_names:
+            warnings.append(_report_item("warning", "metadata_missing", "ZIP 备份缺少 backup-metadata.json，无法确认备份版本与来源"))
+        self._verify_required_content(member_names, snapshots, errors, warnings)
+        files.sort(key=lambda item: str(item.get("name") or ""))
+        snapshots.sort(key=lambda item: str(item.get("name") or ""))
+        return self._verification_report(errors, warnings, files, snapshots, metadata, size=len(payload), readable=True)
+
+    def _verify_json_backup_payload(self, payload: bytes) -> dict[str, object]:
+        errors: list[dict[str, object]] = []
+        warnings: list[dict[str, object]] = []
+        result = self._verify_json_payload(payload, "backup.json", errors, warnings)
+        parsed = result.get("parsed")
+        metadata: dict[str, object] = {}
+        if isinstance(parsed, dict):
+            metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else parsed
+            if "items" not in parsed and "accounts" not in parsed and "auth_keys" not in parsed:
+                warnings.append(_report_item("warning", "json_backup_content_unknown", "JSON 备份未发现 items、accounts 或 auth_keys 字段", path="backup.json"))
+        files = [{
+            "name": "backup.json",
+            "size": len(payload),
+            "content_type": "application/json",
+            "sha256": _sha256_hex(payload),
+            "valid": bool(result.get("valid")),
+        }]
+        if not result.get("valid"):
+            errors.append(_report_item("error", "json_backup_invalid", "JSON 备份无法解析", path="backup.json"))
+        return self._verification_report(errors, warnings, files, [], metadata, size=len(payload), readable=bool(result.get("valid")))
+
+    def _verify_metadata(
+        self,
+        metadata: dict[str, object],
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+    ) -> None:
+        version = metadata.get("version")
+        if not isinstance(version, int):
+            errors.append(_report_item("error", "metadata_version_missing", "备份元数据缺少数值型 version", path="backup-metadata.json"))
+        elif version > 2:
+            warnings.append(_report_item("warning", "metadata_version_newer", f"备份版本 {version} 高于当前服务已知版本 2", path="backup-metadata.json"))
+        for field in ("created_at", "trigger", "app_version", "storage_backend"):
+            if field not in metadata:
+                warnings.append(_report_item("warning", f"metadata_{field}_missing", f"备份元数据缺少 {field}", path="backup-metadata.json"))
+        if "storage_backend" in metadata and not isinstance(metadata.get("storage_backend"), dict):
+            warnings.append(_report_item("warning", "metadata_storage_backend_invalid", "备份元数据 storage_backend 应为 JSON 对象", path="backup-metadata.json"))
+
+    def _verify_json_payload(
+        self,
+        raw: bytes,
+        path: str,
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+    ) -> dict[str, object]:
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            errors.append(_report_item("error", "json_encoding_invalid", "JSON 文件不是有效 UTF-8", path=path))
+            return {"valid": False, "parsed": None}
+        except json.JSONDecodeError as exc:
+            errors.append(_report_item("error", "json_invalid", f"JSON 解析失败：{exc.msg}", path=path))
+            return {"valid": False, "parsed": None}
+        if not _is_json_object_or_list(parsed):
+            warnings.append(_report_item("warning", "json_shape_unexpected", "JSON 文件顶层建议为对象或数组", path=path))
+        self._verify_known_json_shape(path, parsed, errors, warnings)
+        return {"valid": True, "parsed": parsed}
+
+    def _verify_jsonl_payload(
+        self,
+        raw: bytes,
+        path: str,
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+    ) -> dict[str, object]:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            errors.append(_report_item("error", "jsonl_encoding_invalid", "JSONL 文件不是有效 UTF-8", path=path))
+            return {"valid": False, "records": 0}
+        records = 0
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                errors.append(_report_item("error", "jsonl_line_invalid", f"JSONL 第 {line_number} 行解析失败：{exc.msg}", path=path))
+                return {"valid": False, "records": records}
+            records += 1
+            if not isinstance(parsed, dict):
+                warnings.append(_report_item("warning", "jsonl_line_shape_unexpected", f"JSONL 第 {line_number} 行顶层建议为对象", path=path))
+        return {"valid": True, "records": records}
+
+    def _verify_known_json_shape(
+        self,
+        path: str,
+        parsed: object,
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+    ) -> None:
+        if path in {"data/register.json", "data/cpa_config.json", "data/sub2api_config.json", "data/image_tasks.json"} and not isinstance(parsed, dict):
+            errors.append(_report_item("error", "json_shape_invalid", "该配置文件顶层必须是 JSON 对象", path=path))
+        if path in {"snapshots/accounts.json", "snapshots/auth_keys.json"} and not isinstance(parsed, list):
+            errors.append(_report_item("error", "snapshot_shape_invalid", "逻辑快照顶层必须是 JSON 数组", path=path))
+        if path == "config.json" and not isinstance(parsed, dict):
+            errors.append(_report_item("error", "config_shape_invalid", "config.json 顶层必须是 JSON 对象", path=path))
+        if path == "data/image_tags.json" and not isinstance(parsed, dict):
+            warnings.append(_report_item("warning", "image_tags_shape_unexpected", "图片标签文件顶层通常应为 JSON 对象", path=path))
+
+    def _verify_required_content(
+        self,
+        member_names: set[str],
+        snapshots: list[dict[str, object]],
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+    ) -> None:
+        data_files = {name for name in member_names if name.startswith("data/")}
+        has_snapshots = bool(snapshots)
+        has_images = any(name.startswith("data/images/") for name in member_names)
+        if not data_files and not has_snapshots and not has_images and "config.json" not in member_names:
+            errors.append(_report_item("error", "content_missing", "备份缺少可恢复的数据文件、逻辑快照或图片内容"))
+        if "snapshots/accounts.json" not in member_names:
+            warnings.append(_report_item("warning", "accounts_snapshot_missing", "备份不含账号逻辑快照，跨存储后端恢复能力会受限"))
+        if "snapshots/auth_keys.json" not in member_names:
+            warnings.append(_report_item("warning", "auth_keys_snapshot_missing", "备份不含用户密钥逻辑快照，恢复后可能需要重新配置用户密钥"))
+
+    def _verification_report(
+        self,
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+        files: list[dict[str, object]],
+        snapshots: list[dict[str, object]],
+        metadata: dict[str, object],
+        *,
+        size: int,
+        readable: bool,
+    ) -> dict[str, object]:
+        return {
+            "ok": not errors,
+            "readable": readable,
+            "restorable": not errors,
+            "summary": {
+                "errors": len(errors),
+                "warnings": len(warnings),
+                "files": len(files),
+                "snapshots": len(snapshots),
+                "size": size,
+            },
+            "errors": errors,
+            "warnings": warnings,
+            "metadata": {
+                "version": metadata.get("version"),
+                "created_at": metadata.get("created_at"),
+                "trigger": metadata.get("trigger"),
+                "app_version": metadata.get("app_version"),
+                "storage_backend": metadata.get("storage_backend"),
+            },
             "files": files,
             "snapshots": snapshots,
         }

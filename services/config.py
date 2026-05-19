@@ -27,6 +27,14 @@ DEFAULT_BACKUP_INCLUDE = {
     "images": False,
 }
 
+DEFAULT_AUTO_REGISTER_SETTINGS = {
+    "enabled": True,
+    "min_available": 100,
+    "target_available": 100,
+    "check_interval_seconds": 30,
+    "cooldown_seconds": 300,
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -71,6 +79,33 @@ def _normalize_backup_settings(value: object) -> dict[str, object]:
         "encrypt": _normalize_bool(source.get("encrypt"), False),
         "passphrase": str(source.get("passphrase") or "").strip(),
         "include": _normalize_backup_include(source.get("include")),
+    }
+
+
+def _normalize_auto_register_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), bool(DEFAULT_AUTO_REGISTER_SETTINGS["enabled"])),
+        "min_available": _normalize_positive_int(
+            source.get("min_available"),
+            int(DEFAULT_AUTO_REGISTER_SETTINGS["min_available"]),
+            1,
+        ),
+        "target_available": _normalize_positive_int(
+            source.get("target_available"),
+            int(DEFAULT_AUTO_REGISTER_SETTINGS["target_available"]),
+            1,
+        ),
+        "check_interval_seconds": _normalize_positive_int(
+            source.get("check_interval_seconds"),
+            int(DEFAULT_AUTO_REGISTER_SETTINGS["check_interval_seconds"]),
+            5,
+        ),
+        "cooldown_seconds": _normalize_positive_int(
+            source.get("cooldown_seconds"),
+            int(DEFAULT_AUTO_REGISTER_SETTINGS["cooldown_seconds"]),
+            30,
+        ),
     }
 
 
@@ -196,7 +231,7 @@ class ConfigStore:
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
-        value = self.data.get("auto_remove_invalid_accounts", False)
+        value = self.data.get("auto_remove_invalid_accounts", True)
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
@@ -285,6 +320,7 @@ class ConfigStore:
         data["ai_review"] = self.ai_review
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
+        data["auto_register"] = self.get_auto_register_settings()
         data.pop("auth-key", None)
         return data
 
@@ -296,6 +332,8 @@ class ConfigStore:
         next_data.update(dict(data or {}))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
+        if "auto_register" in next_data:
+            next_data["auto_register"] = _normalize_auto_register_settings(next_data.get("auto_register"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -303,6 +341,9 @@ class ConfigStore:
 
     def get_backup_settings(self) -> dict[str, object]:
         return _normalize_backup_settings(self.data.get("backup"))
+
+    def get_auto_register_settings(self) -> dict[str, object]:
+        return _normalize_auto_register_settings(self.data.get("auto_register"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

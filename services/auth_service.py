@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import base64
+import json
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -13,6 +15,16 @@ from services.storage.base import StorageBackend
 
 AuthRole = Literal["admin", "user"]
 
+DEFAULT_LIMITS: dict[str, object] = {
+    "requests_per_day": None,
+    "images_per_day": None,
+    "concurrency": None,
+    "models": [],
+}
+
+SESSION_TOKEN_PREFIX = "sess-"
+SESSION_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -20,6 +32,15 @@ def _now_iso() -> str:
 
 def _hash_key(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
 
 
 class AuthService:
@@ -37,6 +58,34 @@ class AuthService:
     def _default_name(role: object) -> str:
         return "管理员密钥" if str(role or "").strip().lower() == "admin" else "普通用户"
 
+    @classmethod
+    def normalize_limits(cls, raw: object) -> dict[str, object]:
+        limits = dict(DEFAULT_LIMITS)
+        if not isinstance(raw, dict):
+            return limits
+        for key in ("requests_per_day", "images_per_day", "concurrency"):
+            value = raw.get(key)
+            if value is None:
+                limits[key] = None
+                continue
+            if isinstance(value, bool):
+                raise ValueError(f"{key} must be a non-negative number or null")
+            try:
+                number = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be a non-negative number or null") from exc
+            if number < 0:
+                raise ValueError(f"{key} must be a non-negative number or null")
+            limits[key] = number
+        models = raw.get("models", [])
+        if models is None:
+            limits["models"] = []
+        elif isinstance(models, list):
+            limits["models"] = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
+        else:
+            raise ValueError("models must be a list")
+        return limits
+
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
         if not isinstance(raw, dict):
             return None
@@ -50,6 +99,10 @@ class AuthService:
         name = self._clean(raw.get("name")) or self._default_name(role)
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
+        try:
+            limits = self.normalize_limits(raw.get("limits"))
+        except ValueError:
+            limits = dict(DEFAULT_LIMITS)
         return {
             "id": item_id,
             "name": name,
@@ -58,6 +111,7 @@ class AuthService:
             "enabled": bool(raw.get("enabled", True)),
             "created_at": created_at,
             "last_used_at": last_used_at,
+            "limits": limits,
         }
 
     def _load(self) -> list[dict[str, object]]:
@@ -84,6 +138,7 @@ class AuthService:
             "enabled": bool(item.get("enabled", True)),
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
+            "limits": AuthService.normalize_limits(item.get("limits")),
         }
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
@@ -147,10 +202,11 @@ class AuthService:
             raise ValueError("这个名称已经在使用中了，换一个更容易区分的名称吧")
         return candidate
 
-    def create_key(self, *, role: AuthRole, name: str = "") -> tuple[dict[str, object], str]:
+    def create_key(self, *, role: AuthRole, name: str = "", limits: dict[str, object] | None = None) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
             normalized_name = self._build_name_locked(name, role=role)
+            normalized_limits = self.normalize_limits(limits)
             while True:
                 raw_key = f"sk-{secrets.token_urlsafe(24)}"
                 try:
@@ -166,6 +222,7 @@ class AuthService:
                 "enabled": True,
                 "created_at": _now_iso(),
                 "last_used_at": None,
+                "limits": normalized_limits,
             }
             self._items.append(item)
             self._save()
@@ -200,6 +257,8 @@ class AuthService:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "key" in updates and updates.get("key") is not None:
                     next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
+                if "limits" in updates and updates.get("limits") is not None:
+                    next_item["limits"] = self.normalize_limits(updates.get("limits"))
                 self._items[index] = next_item
                 self._save()
                 return self._public_item(next_item)
@@ -222,6 +281,21 @@ class AuthService:
             self._save()
             return True
 
+    def _mark_used_locked(self, item: dict[str, object], index: int) -> dict[str, object]:
+        next_item = dict(item)
+        now = datetime.now(timezone.utc)
+        next_item["last_used_at"] = now.isoformat()
+        self._items[index] = next_item
+        item_id = self._clean(next_item.get("id"))
+        last_flush_at = self._last_used_flush_at.get(item_id)
+        if last_flush_at is None or (now - last_flush_at).total_seconds() >= 60:
+            try:
+                self._save()
+                self._last_used_flush_at[item_id] = now
+            except Exception:
+                pass
+        return self._public_item(next_item)
+
     def authenticate(self, raw_key: str) -> dict[str, object] | None:
         candidate = self._clean(raw_key)
         if not candidate:
@@ -234,19 +308,73 @@ class AuthService:
                 stored_hash = self._clean(item.get("key_hash"))
                 if not stored_hash or not hmac.compare_digest(stored_hash, candidate_hash):
                     continue
-                next_item = dict(item)
-                now = datetime.now(timezone.utc)
-                next_item["last_used_at"] = now.isoformat()
-                self._items[index] = next_item
-                item_id = self._clean(next_item.get("id"))
-                last_flush_at = self._last_used_flush_at.get(item_id)
-                if last_flush_at is None or (now - last_flush_at).total_seconds() >= 60:
-                    try:
-                        self._save()
-                        self._last_used_flush_at[item_id] = now
-                    except Exception:
-                        pass
-                return self._public_item(next_item)
+                return self._mark_used_locked(item, index)
+        return None
+
+    def authenticate_user_name(self, name: str) -> dict[str, object] | None:
+        candidate = self._clean(name)
+        if not candidate:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("role") != "user" or not bool(item.get("enabled", True)):
+                    continue
+                if self._clean(item.get("name")) != candidate:
+                    continue
+                return self._mark_used_locked(item, index)
+        return None
+
+    def create_session_token(self, identity: dict[str, object]) -> str:
+        role = self._clean(identity.get("role")).lower()
+        item_id = self._clean(identity.get("id"))
+        if role != "user" or not item_id:
+            raise ValueError("only user identities can create session tokens")
+        payload = {
+            "typ": "user_session",
+            "sub": item_id,
+            "role": role,
+            "iat": int(datetime.now(timezone.utc).timestamp()),
+        }
+        payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        signature = hmac.new(config.auth_key.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+        return f"{SESSION_TOKEN_PREFIX}{payload_b64}.{signature}"
+
+    def authenticate_session_token(self, raw_token: str) -> dict[str, object] | None:
+        candidate = self._clean(raw_token)
+        if not candidate.startswith(SESSION_TOKEN_PREFIX):
+            return None
+        token_body = candidate[len(SESSION_TOKEN_PREFIX):]
+        payload_b64, sep, signature = token_body.partition(".")
+        if not sep or not payload_b64 or not signature:
+            return None
+        expected = hmac.new(config.auth_key.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        try:
+            payload = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict) or payload.get("typ") != "user_session":
+            return None
+        if self._clean(payload.get("role")).lower() != "user":
+            return None
+        item_id = self._clean(payload.get("sub"))
+        try:
+            issued_at = int(payload.get("iat"))
+        except (TypeError, ValueError):
+            return None
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if issued_at <= 0 or issued_at > now_ts + 60 or now_ts - issued_at > SESSION_TOKEN_TTL_SECONDS:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("role") != "user" or not bool(item.get("enabled", True)):
+                    continue
+                if self._clean(item.get("id")) != item_id:
+                    continue
+                return self._mark_used_locked(item, index)
         return None
 
 

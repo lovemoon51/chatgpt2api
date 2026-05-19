@@ -3,8 +3,12 @@ services:
     image: ghcr.io/basketikun/chatgpt2api:latest
     container_name: chatgpt2api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "3000:80"
+      - "3000:8000"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json

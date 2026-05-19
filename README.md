@@ -36,7 +36,10 @@ docker compose up -d
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
+- 健康检查：`http://localhost:3000/healthz`
 - 数据目录：`./data`
+
+容器内服务监听 `8000` 端口，默认 Compose 会映射到宿主机 `3000`；镜像内置 `HEALTHCHECK` 会通过 `/healthz` 检查存储后端是否可用。
 
 ### 本地开发
 
@@ -216,6 +219,57 @@ Authorization: Bearer <auth-key>
 | Model | 文本建议先填 `auto`，实际可用模型以 `/v1/models` 和 `/chat/` 测试页结果为准 |
 
 也可以直接打开 `/chat/` 页面做 SSE 流式对话测试。
+
+Anthropic Messages 兼容接口可按 Anthropic-compatible 方式接入：
+
+| 字段 | 填法 |
+|:--|:--|
+| Base URL | 项目地址，例如 `http://127.0.0.1:3000`，接口路径为 `POST /v1/messages` |
+| API Key | 本项目登录密钥，或「设置 → 用户 Key」里创建的用户密钥 |
+| Header | 使用 `x-api-key: <auth-key>`，也兼容 `Authorization: Bearer <auth-key>` |
+| Version | 可传 `anthropic-version`，当前主要兼容 Anthropic Messages 消息格式，不做完整版本语义实现 |
+
+<details>
+<summary><code>POST /v1/messages</code></summary>
+<br>
+
+Anthropic Messages 基础兼容接口，用于按 Anthropic 消息格式调用文本对话能力。
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <auth-key>" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "auto",
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "role": "user",
+        "content": "你好，简单介绍一下你自己"
+      }
+    ]
+  }'
+```
+
+<details>
+<summary>字段说明</summary>
+<br>
+
+| 字段 | 说明 |
+|:--|:--|
+| `model` | 文本模型，建议先填 `auto`，实际可用模型以 `/v1/models` 和 `/chat/` 测试页结果为准 |
+| `messages` | Anthropic Messages 消息数组，当前主要兼容文本消息格式 |
+| `max_tokens` | 可传入，按当前后端文本链路能力处理 |
+| `tools` | 已做基础适配，工具调用会转换为当前文本链路可处理的 XML 形式 |
+| `stream` | 支持按当前文本链路进行流式返回 |
+| `anthropic-version` | 可作为请求头传入，但当前主要兼容消息格式，不保证完整 Anthropic 版本语义 |
+
+图片输入、复杂多模态内容块和完整 Anthropic API 语义仍以当前实现为准，请先用 `/v1/messages` 和 `/chat/` 实测目标客户端工作流。
+
+<br>
+</details>
+</details>
 
 <details>
 <summary><code>GET /v1/models</code></summary>

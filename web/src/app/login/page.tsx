@@ -19,17 +19,17 @@ export default function LoginPage() {
   const { isCheckingAuth } = useRedirectIfAuthenticated();
 
   const handleLogin = async () => {
-    const normalizedAuthKey = authKey.trim();
-    if (!normalizedAuthKey) {
-      toast.error("请输入 密钥");
+    const normalizedLoginValue = authKey.trim();
+    if (!normalizedLoginValue) {
+      toast.error("请输入密钥或用户名称");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const data = await login(normalizedAuthKey);
+      const data = await login(normalizedLoginValue);
       await setStoredAuthSession({
-        key: normalizedAuthKey,
+        key: data.access_token || normalizedLoginValue,
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
@@ -61,13 +61,13 @@ export default function LoginPage() {
             </div>
             <div className="space-y-2">
               <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">输入密钥后继续使用账号管理和图片生成功能。</p>
+              <p className="text-sm leading-6 text-stone-500">管理员输入密钥；普通用户也可以输入管理员创建的用户名称进入创作台。</p>
             </div>
           </div>
 
           <div className="space-y-3">
             <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
-              密钥
+              密钥或用户名称
             </label>
             <Input
               id="auth-key"
@@ -79,7 +79,7 @@ export default function LoginPage() {
                   void handleLogin();
                 }
               }}
-              placeholder="请输入密钥"
+              placeholder="管理员密钥或用户名称"
               className="h-13 rounded-2xl border-stone-200 bg-white px-4"
             />
           </div>

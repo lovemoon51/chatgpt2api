@@ -16,7 +16,72 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
+import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey, type UserKeyLimits } from "@/lib/api";
+
+type LimitsForm = {
+  requestsPerDay: string;
+  imagesPerDay: string;
+  concurrency: string;
+  models: string;
+};
+
+const emptyLimitsForm: LimitsForm = {
+  requestsPerDay: "",
+  imagesPerDay: "",
+  concurrency: "",
+  models: "",
+};
+
+function limitsToForm(limits?: UserKeyLimits | null): LimitsForm {
+  return {
+    requestsPerDay: limits?.requests_per_day == null ? "" : String(limits.requests_per_day),
+    imagesPerDay: limits?.images_per_day == null ? "" : String(limits.images_per_day),
+    concurrency: limits?.concurrency == null ? "" : String(limits.concurrency),
+    models: Array.isArray(limits?.models) ? limits.models.join(", ") : "",
+  };
+}
+
+function parseOptionalNumber(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+function formToLimits(form: LimitsForm): UserKeyLimits {
+  return {
+    requests_per_day: parseOptionalNumber(form.requestsPerDay),
+    images_per_day: parseOptionalNumber(form.imagesPerDay),
+    concurrency: parseOptionalNumber(form.concurrency),
+    models: form.models
+      .split(",")
+      .map((model) => model.trim())
+      .filter(Boolean),
+  };
+}
+
+function sameLimits(a?: UserKeyLimits | null, b?: UserKeyLimits | null) {
+  const left = {
+    ...formToLimits(limitsToForm(a)),
+    models: [...(a?.models || [])].filter(Boolean).sort(),
+  };
+  const right = {
+    ...formToLimits(limitsToForm(b)),
+    models: [...(b?.models || [])].filter(Boolean).sort(),
+  };
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function formatLimitValue(value?: number | null) {
+  return value == null ? "不限" : String(value);
+}
+
+function formatModels(models?: string[]) {
+  const normalized = Array.isArray(models) ? models.filter(Boolean) : [];
+  return normalized.length > 0 ? normalized.join(", ") : "不限";
+}
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -42,12 +107,14 @@ export function UserKeysCard() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [isCreating, setIsCreating] = useState(false);
+  const [limitsForm, setLimitsForm] = useState<LimitsForm>(emptyLimitsForm);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [revealedKey, setRevealedKey] = useState("");
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
   const [editingItem, setEditingItem] = useState<UserKey | null>(null);
   const [editName, setEditName] = useState("");
   const [editKey, setEditKey] = useState("");
+  const [editLimitsForm, setEditLimitsForm] = useState<LimitsForm>(emptyLimitsForm);
 
   const load = async () => {
     setIsLoading(true);
@@ -72,10 +139,11 @@ export function UserKeysCard() {
   const handleCreate = async () => {
     setIsCreating(true);
     try {
-      const data = await createUserKey(name.trim());
+      const data = await createUserKey(name.trim(), formToLimits(limitsForm));
       setItems(data.items);
       setRevealedKey(data.key);
       setName("");
+      setLimitsForm(emptyLimitsForm);
       setIsDialogOpen(false);
       toast.success("用户密钥已创建");
     } catch (error) {
@@ -132,6 +200,7 @@ export function UserKeysCard() {
     setEditingItem(item);
     setEditName(item.name);
     setEditKey("");
+    setEditLimitsForm(limitsToForm(item.limits));
   };
 
   const handleEdit = async () => {
@@ -141,7 +210,9 @@ export function UserKeysCard() {
     const item = editingItem;
     const trimmedName = editName.trim();
     const trimmedKey = editKey.trim();
-    if (trimmedName === item.name && !trimmedKey) {
+    const nextLimits = formToLimits(editLimitsForm);
+    const limitsChanged = !sameLimits(item.limits, nextLimits);
+    if (trimmedName === item.name && !trimmedKey && !limitsChanged) {
       setEditingItem(null);
       return;
     }
@@ -150,6 +221,7 @@ export function UserKeysCard() {
       const data = await updateUserKey(item.id, {
         ...(trimmedName !== item.name ? { name: trimmedName } : {}),
         ...(trimmedKey ? { key: trimmedKey } : {}),
+        ...(limitsChanged ? { limits: nextLimits } : {}),
       });
       setItems(data.items);
       setEditingItem(null);
@@ -160,6 +232,14 @@ export function UserKeysCard() {
     } finally {
       setItemPending(item.id, false);
     }
+  };
+
+  const updateLimitsForm = (key: keyof LimitsForm, value: string) => {
+    setLimitsForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const updateEditLimitsForm = (key: keyof LimitsForm, value: string) => {
+    setEditLimitsForm((current) => ({ ...current, [key]: value }));
   };
 
   const handleCopy = async (value: string) => {
@@ -234,6 +314,20 @@ export function UserKeysCard() {
                         <span>创建时间 {formatDateTime(item.created_at)}</span>
                         <span>最近使用 {formatDateTime(item.last_used_at)}</span>
                       </div>
+                      <div className="flex flex-wrap gap-1.5 text-xs text-stone-500">
+                        <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-600">
+                          请求/日 {formatLimitValue(item.limits?.requests_per_day)}
+                        </Badge>
+                        <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-600">
+                          图片/日 {formatLimitValue(item.limits?.images_per_day)}
+                        </Badge>
+                        <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-600">
+                          并发 {formatLimitValue(item.limits?.concurrency)}
+                        </Badge>
+                        <Badge variant="secondary" className="max-w-full rounded-md bg-stone-100 text-stone-600">
+                          模型 {formatModels(item.limits?.models)}
+                        </Badge>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -290,14 +384,57 @@ export function UserKeysCard() {
               可选填写一个备注名称，方便区分不同使用者；创建后会生成一条只能查看一次的原始密钥。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">名称（可选）</label>
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="例如：设计同学 A、运营临时账号"
-              className="h-11 rounded-xl border-stone-200 bg-white"
-            />
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">名称（可选）</label>
+              <Input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="例如：设计同学 A、运营临时账号"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">每日请求</label>
+                <Input
+                  value={limitsForm.requestsPerDay}
+                  onChange={(event) => updateLimitsForm("requestsPerDay", event.target.value)}
+                  placeholder="不限"
+                  inputMode="numeric"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">每日图片</label>
+                <Input
+                  value={limitsForm.imagesPerDay}
+                  onChange={(event) => updateLimitsForm("imagesPerDay", event.target.value)}
+                  placeholder="不限"
+                  inputMode="numeric"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">并发</label>
+                <Input
+                  value={limitsForm.concurrency}
+                  onChange={(event) => updateLimitsForm("concurrency", event.target.value)}
+                  placeholder="不限"
+                  inputMode="numeric"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">允许模型（逗号分隔）</label>
+              <Input
+                value={limitsForm.models}
+                onChange={(event) => updateLimitsForm("models", event.target.value)}
+                placeholder="例如：gpt-4o-mini, gpt-image-2；留空不限"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -359,6 +496,7 @@ export function UserKeysCard() {
           if (!open) {
             setEditingItem(null);
             setEditKey("");
+            setEditLimitsForm(emptyLimitsForm);
           }
         }}
       >
@@ -366,7 +504,7 @@ export function UserKeysCard() {
           <DialogHeader className="gap-2">
             <DialogTitle>编辑用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              可以修改备注名称；如需更换专用密钥，直接填写新的原始密钥即可。留空则保持当前密钥不变。
+              可以修改备注名称、专用密钥和配额。配额留空表示不限制。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -391,6 +529,47 @@ export function UserKeysCard() {
                 保存后旧密钥会立即失效，新密钥生效。系统仍只保存哈希，不会回显当前密钥。
               </p>
             </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">每日请求</label>
+                <Input
+                  value={editLimitsForm.requestsPerDay}
+                  onChange={(event) => updateEditLimitsForm("requestsPerDay", event.target.value)}
+                  placeholder="不限"
+                  inputMode="numeric"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">每日图片</label>
+                <Input
+                  value={editLimitsForm.imagesPerDay}
+                  onChange={(event) => updateEditLimitsForm("imagesPerDay", event.target.value)}
+                  placeholder="不限"
+                  inputMode="numeric"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">并发</label>
+                <Input
+                  value={editLimitsForm.concurrency}
+                  onChange={(event) => updateEditLimitsForm("concurrency", event.target.value)}
+                  placeholder="不限"
+                  inputMode="numeric"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">允许模型（逗号分隔）</label>
+              <Input
+                value={editLimitsForm.models}
+                onChange={(event) => updateEditLimitsForm("models", event.target.value)}
+                placeholder="例如：gpt-4o-mini, gpt-image-2；留空不限"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -400,6 +579,7 @@ export function UserKeysCard() {
               onClick={() => {
                 setEditingItem(null);
                 setEditKey("");
+                setEditLimitsForm(emptyLimitsForm);
               }}
               disabled={editingItem ? pendingIds.has(editingItem.id) : false}
             >

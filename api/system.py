@@ -4,16 +4,19 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from api.support import require_admin, require_identity, resolve_image_base_url
+from api.support import extract_bearer_token, require_admin, require_identity, resolve_image_base_url
+from services.account_service import account_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
+from services.auth_service import auth_service
+from services.system_status_service import dashboard_payload, healthz_payload
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -22,6 +25,10 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class LoginRequest(BaseModel):
+    login: str = ""
 
 
 class ImageDeleteRequest(BaseModel):
@@ -47,19 +54,57 @@ def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
     @router.post("/auth/login")
-    async def login(authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
+    async def login(body: LoginRequest | None = None, authorization: str | None = Header(default=None)):
+        login_value = str(body.login if body else "").strip()
+        bearer_token = extract_bearer_token(authorization)
+        if login_value:
+            identity = None
+            if login_value == str(config.auth_key or "").strip():
+                identity = {"id": "admin", "name": "管理员", "role": "admin"}
+            if identity is None:
+                identity = auth_service.authenticate(login_value)
+            if identity is None:
+                identity = auth_service.authenticate_session_token(login_value)
+            if identity is None:
+                identity = auth_service.authenticate_user_name(login_value)
+            if identity is None:
+                raise HTTPException(status_code=401, detail={"error": "密钥或用户名称无效，请重新输入"})
+        else:
+            identity = require_identity(authorization)
+        credential = bearer_token or login_value
+        access_token = credential
+        if identity.get("role") == "user":
+            access_token = auth_service.create_session_token(identity)
         return {
             "ok": True,
             "version": app_version,
             "role": identity.get("role"),
             "subject_id": identity.get("id"),
             "name": identity.get("name"),
+            "access_token": access_token,
         }
 
     @router.get("/version")
     async def get_version():
         return {"version": app_version}
+
+    @router.get("/healthz")
+    async def healthz():
+        payload = healthz_payload(app_version, config)
+        if not payload["storage"]["ok"]:
+            return JSONResponse(content=payload, status_code=503)
+        return payload
+
+    @router.get("/api/dashboard")
+    async def get_dashboard(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return dashboard_payload(
+            app_version=app_version,
+            account_service=account_service,
+            log_service=log_service,
+            backup_service=backup_service,
+            config=config,
+        )
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
@@ -169,6 +214,14 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         try:
             return {"item": await run_in_threadpool(backup_service.get_backup_detail, key)}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/backups/verify")
+    async def verify_backup_endpoint(body: BackupDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"report": await run_in_threadpool(backup_service.verify_backup, body.key)}
         except BackupError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

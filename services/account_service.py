@@ -16,9 +16,12 @@ from utils.helper import anonymize_token
 
 
 PLUS_PROMO_ACCOUNT_TAG = "可开通 Plus"
-DEFAULT_REFRESH_WORKERS = 4
+DEFAULT_REFRESH_WORKERS = 3
 MAX_REFRESH_WORKERS = 4
 DEFAULT_LIMITED_REFRESH_BATCH_SIZE = 3
+DEFAULT_REFRESH_FAST_PATH_THRESHOLD = 3
+DEFAULT_REFRESH_BATCH_SIZE = 3
+DEFAULT_REFRESH_BATCH_INTERVAL_SECONDS = 2.0
 
 
 def _is_upstream_timeout_error(exc: Exception) -> bool:
@@ -37,6 +40,22 @@ def _format_refresh_error(exc: Exception) -> str:
             return "连接 chatgpt.com 超时。已配置全局代理，但代理链路仍不可达；请在设置页测试代理，或减少单次刷新账号数量后重试。"
         return "连接 chatgpt.com 超时。当前未配置全局代理，请在设置页填写并测试可用代理后再刷新账号信息和额度。"
     return str(exc) or exc.__class__.__name__
+
+
+def _config_int(key: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(config.data.get(key) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _config_float(key: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        value = float(config.data.get(key) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
 
 
 def _normalize_account_tags(value: object) -> list[str]:
@@ -304,8 +323,10 @@ class AccountService:
         if not config.auto_remove_invalid_accounts:
             self.update_account(access_token, {"status": "异常", "quota": 0})
             return False
+        account = self.get_account(access_token)
         removed = bool(self.delete_accounts([access_token])["removed"])
         if removed:
+            self._sync_cpa_delete(account, event)
             log_service.add(LOG_TYPE_ACCOUNT, "自动移除异常账号",
                             {"source": event, "token": anonymize_token(access_token)})
         elif access_token:
@@ -316,8 +337,10 @@ class AccountService:
         if not access_token:
             return False
         self.release_image_slot(access_token)
+        account = self.get_account(access_token)
         removed = bool(self.delete_accounts([access_token])["removed"])
         if removed:
+            self._sync_cpa_delete(account, event)
             log_service.add(LOG_TYPE_ACCOUNT, "自动移除不可生图账号",
                             {"source": event, "token": anonymize_token(access_token), "reason": str(reason)[:500]})
         return removed
@@ -332,6 +355,10 @@ class AccountService:
     def list_accounts(self) -> list[dict]:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]
+
+    def available_account_count(self) -> int:
+        with self._lock:
+            return sum(1 for item in self._accounts.values() if self._is_image_account_available(item))
 
     def list_limited_tokens(self, *, due_only: bool = True, limit: int | None = None) -> list[str]:
         now = time.time()
@@ -401,6 +428,38 @@ class AccountService:
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = [dict(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
+
+    @staticmethod
+    def _sync_cpa_delete(account: dict | None, event: str) -> dict[str, Any] | None:
+        if not isinstance(account, dict) or not account.get("access_token"):
+            return None
+        try:
+            from services.cpa_service import delete_account_from_configured_pools
+
+            result = delete_account_from_configured_pools(account)
+        except Exception as exc:
+            result = {
+                "configured": 0,
+                "deleted": 0,
+                "items": [],
+                "errors": [{"error": str(exc) or exc.__class__.__name__}],
+            }
+        deleted = int(result.get("deleted") or 0)
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        if deleted or errors:
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "同步删除 CPA 账号文件",
+                {
+                    "source": event,
+                    "token": anonymize_token(str(account.get("access_token") or "")),
+                    "deleted": deleted,
+                    "failed": len(errors),
+                    "filename": result.get("filename"),
+                    "errors": errors[:3],
+                },
+            )
+        return result
 
     def update_account(self, access_token: str, updates: dict) -> dict | None:
         if not access_token:
@@ -509,11 +568,19 @@ class AccountService:
 
     @staticmethod
     def limited_refresh_batch_size() -> int:
-        try:
-            configured = int(config.data.get("limited_account_refresh_batch_size") or DEFAULT_LIMITED_REFRESH_BATCH_SIZE)
-        except (TypeError, ValueError):
-            configured = DEFAULT_LIMITED_REFRESH_BATCH_SIZE
-        return max(1, configured)
+        return _config_int("limited_account_refresh_batch_size", DEFAULT_LIMITED_REFRESH_BATCH_SIZE)
+
+    @staticmethod
+    def refresh_fast_path_threshold() -> int:
+        return _config_int("refresh_account_fast_path_threshold", DEFAULT_REFRESH_FAST_PATH_THRESHOLD)
+
+    @staticmethod
+    def refresh_batch_size() -> int:
+        return _config_int("refresh_account_batch_size", DEFAULT_REFRESH_BATCH_SIZE)
+
+    @staticmethod
+    def refresh_batch_interval_seconds() -> float:
+        return _config_float("refresh_account_batch_interval_seconds", DEFAULT_REFRESH_BATCH_INTERVAL_SECONDS)
 
     @staticmethod
     def _refresh_log_summary(
@@ -554,19 +621,23 @@ class AccountService:
             raise
         return self.update_account(access_token, result)
 
-    def refresh_accounts(self, access_tokens: list[str], log_title: str = "批量刷新账号") -> dict[str, Any]:
-        access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
-        if not access_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
-        started = time.time()
+    @staticmethod
+    def _chunks(items: list[str], size: int) -> list[list[str]]:
+        return [items[index:index + size] for index in range(0, len(items), size)]
+
+    def _refresh_remote_batch(
+            self,
+            access_tokens: list[str],
+            *,
+            max_workers: int,
+    ) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]], set[str]]:
         from services.openai_backend_api import InvalidAccessTokenError
 
         fetched: dict[str, dict[str, Any]] = {}
-        errors = []
+        errors: list[dict[str, str]] = []
         failed_invalid_tokens: set[str] = set()
-        max_workers = self._refresh_worker_count(len(access_tokens))
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        workers = min(max_workers, max(1, len(access_tokens)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(self._fetch_remote_user_info, token): token
                 for token in access_tokens
@@ -580,17 +651,50 @@ class AccountService:
                         failed_invalid_tokens.add(token)
                     errors.append({"token": anonymize_token(token), "error": _format_refresh_error(exc)})
                     continue
+        return fetched, errors, failed_invalid_tokens
+
+    def refresh_accounts(self, access_tokens: list[str], log_title: str = "批量刷新账号") -> dict[str, Any]:
+        access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        if not access_tokens:
+            return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
+        started = time.time()
+
+        fetched: dict[str, dict[str, Any]] = {}
+        errors: list[dict[str, str]] = []
+        failed_invalid_tokens: set[str] = set()
+        max_workers = self._refresh_worker_count(len(access_tokens))
+        fast_path_threshold = self.refresh_fast_path_threshold()
+        batch_size = self.refresh_batch_size()
+        batch_interval_seconds = self.refresh_batch_interval_seconds()
+
+        batches = [access_tokens] if len(access_tokens) <= fast_path_threshold else self._chunks(access_tokens, batch_size)
+        for index, batch in enumerate(batches):
+            active_batch = [token for token in batch if token not in failed_invalid_tokens]
+            if not active_batch:
+                continue
+            batch_fetched, batch_errors, batch_invalid_tokens = self._refresh_remote_batch(
+                active_batch,
+                max_workers=max_workers,
+            )
+            fetched.update(batch_fetched)
+            errors.extend(batch_errors)
+            failed_invalid_tokens.update(batch_invalid_tokens)
+            if len(access_tokens) > fast_path_threshold and index < len(batches) - 1 and batch_interval_seconds > 0:
+                time.sleep(batch_interval_seconds)
 
         refreshed = 0
         removed_failed = 0
         removed_rate_limited = 0
         changed = False
+        invalid_accounts: list[dict] = []
 
         with self._lock:
             for token in failed_invalid_tokens:
-                removed = self._accounts.pop(token, None) is not None
+                removed_account = self._accounts.pop(token, None)
+                removed = removed_account is not None
                 self._image_inflight.pop(token, None)
                 if removed:
+                    invalid_accounts.append(dict(removed_account))
                     removed_failed += 1
                     changed = True
 
@@ -619,6 +723,9 @@ class AccountService:
                 self._save_accounts()
                 self._image_slot_condition.notify_all()
             items = [dict(item) for item in self._accounts.values()]
+
+        for account in invalid_accounts:
+            self._sync_cpa_delete(account, "refresh_accounts_invalid")
 
         if fetched or errors:
             ended = time.time()

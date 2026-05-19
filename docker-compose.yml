@@ -3,14 +3,18 @@ services:
     image: ghcr.io/basketikun/chatgpt2api:latest
     container_name: chatgpt2api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "3000:80"
+      - "3000:8000"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:
       # 存储后端配置 (可选值: json, sqlite, postgres, git)
-       - STORAGE_BACKEND=json
+      - STORAGE_BACKEND=json
       
       # 数据库配置 (当 STORAGE_BACKEND=sqlite/postgres 时使用)
       # - DATABASE_URL=postgresql://user:password@host:5432/dbname

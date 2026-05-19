@@ -34,4 +34,4 @@
 | 服务端图片 URL 缓存 | ✅  | 已实现。 |
 | `rt_token` 刷新 | ❌  | 待实现。 |
 | 代理配置功能 | ✅  | 已支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理，并应用到出站请求。 |
-| Anthropic 协议支持 | ❌  | 待实现。 |
+| Anthropic 兼容 `POST /v1/messages` | ✅  | 已基础支持 Anthropic Messages 消息格式，可使用 `x-api-key` 或 `Authorization: Bearer` 鉴权；`anthropic-version` 可传但当前主要做消息格式兼容。工具调用会适配为 XML 形式进入现有文本链路；图片输入和复杂多模态 Anthropic 内容块尚未完整支持，需按实际客户端工作流测试。 |

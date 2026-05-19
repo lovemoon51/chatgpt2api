@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
+  { href: "/dashboard", label: "仪表盘" },
   { href: "/studio", label: "创作台" },
   { href: "/image", label: "画图" },
   { href: "/chat", label: "对话" },
@@ -74,7 +75,7 @@ export function TopNav() {
       <div className="flex min-h-12 flex-col gap-1 px-3 py-2 sm:h-12 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-6 sm:py-0">
         <div className="flex items-center justify-between gap-2 sm:justify-start sm:gap-3">
           <Link
-            href={session.role === "admin" ? "/accounts" : "/studio"}
+            href={session.role === "admin" ? "/dashboard" : "/studio"}
             className="shrink-0 py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700"
           >
             chatgpt2api

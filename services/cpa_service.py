@@ -270,6 +270,69 @@ def upload_auth_file(pool: dict, account: dict) -> dict:
     }
 
 
+def delete_remote_auth_file(pool: dict, file_name: str) -> dict:
+    base_url = str(pool.get("base_url") or "").strip()
+    secret_key = str(pool.get("secret_key") or "").strip()
+    file_name = str(file_name or "").strip()
+    if not base_url or not secret_key:
+        raise ValueError("CPA 连接缺少地址或 Secret Key")
+    if not file_name:
+        raise ValueError("CPA 文件名不能为空")
+
+    url = f"{base_url.rstrip('/')}/v0/management/auth-files"
+    session = Session(**proxy_settings.build_session_kwargs(verify=True))
+    try:
+        response = session.delete(
+            url,
+            headers=_management_headers(secret_key),
+            params={"name": file_name},
+            timeout=30,
+        )
+        if not response.ok and response.status_code != 404:
+            detail = _response_error_detail(response)
+            raise RuntimeError(f"HTTP {response.status_code}{f': {detail}' if detail else ''}")
+    finally:
+        session.close()
+
+    return {
+        "pool_id": str(pool.get("id") or ""),
+        "pool_name": _pool_label(pool),
+        "filename": file_name,
+        "status": int(getattr(response, "status_code", 0) or 0),
+    }
+
+
+def delete_account_from_configured_pools(account: dict) -> dict:
+    pools = [
+        pool
+        for pool in cpa_config.list_pools()
+        if str(pool.get("base_url") or "").strip() and str(pool.get("secret_key") or "").strip()
+    ]
+    cpa_item = account_to_cpa_item(account)
+    filename = build_cpa_auth_filename(cpa_item)
+    results: list[dict] = []
+    errors: list[dict] = []
+
+    for pool in pools:
+        try:
+            results.append(delete_remote_auth_file(pool, filename))
+        except Exception as exc:
+            errors.append({
+                "pool_id": str(pool.get("id") or ""),
+                "pool_name": _pool_label(pool),
+                "filename": filename,
+                "error": str(exc) or exc.__class__.__name__,
+            })
+
+    return {
+        "configured": len(pools),
+        "deleted": len(results),
+        "filename": filename,
+        "items": results,
+        "errors": errors,
+    }
+
+
 def upload_account_to_configured_pools(account: dict) -> dict:
     pools = [
         pool

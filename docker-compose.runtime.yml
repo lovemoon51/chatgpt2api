@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/basketikun/chatgpt2api:latest
+    image: ghcr.io/lovemoon51/chatgpt2api:latest
     container_name: chatgpt2api
     restart: unless-stopped
     security_opt:
@@ -12,11 +12,5 @@ services:
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json
-      - ./main.py:/app/main.py:ro
-      - ./api:/app/api:ro
-      - ./services:/app/services:ro
-      - ./utils:/app/utils:ro
-      - ./scripts:/app/scripts:ro
-      - ./web/out:/app/web_dist:ro
     environment:
       STORAGE_BACKEND: json

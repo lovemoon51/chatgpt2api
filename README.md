@@ -22,14 +22,14 @@
 
 ## 快速开始
 
-已发布镜像支持 `linux/amd64` 与 `linux/arm64`，在 x86 服务器和 Apple Silicon / ARM Linux 设备上都会自动拉取匹配架构的版本。
-
 ### Docker 运行
+
+默认 Compose 会从当前项目源码构建镜像，适合本地改过代码后运行当前版本：
 
 ```bash
 git clone https://github.com/lovemoon51/chatgpt2api.git
 cd chatgpt2api
-docker compose up -d
+docker compose up --build -d
 ```
 
 启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
@@ -40,6 +40,13 @@ docker compose up -d
 - 数据目录：`./data`
 
 容器内服务监听 `8000` 端口，默认 Compose 会映射到宿主机 `3000`；镜像内置 `HEALTHCHECK` 会通过 `/healthz` 检查存储后端是否可用。
+
+如果只想运行已发布镜像，不从当前源码构建，可以使用运行时 Compose 文件：
+
+```bash
+docker compose -f docker-compose.runtime.yml pull
+docker compose -f docker-compose.runtime.yml up -d
+```
 
 ### 本地开发
 

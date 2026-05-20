@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
-from services.account_service import AccountService
+from services.account_service import AccountService, IMAGE_POOL_REPLENISH_HIGH, IMAGE_POOL_REPLENISH_LOW
 from services import account_service as account_module
 from services.auth_service import AuthService
 from services.storage.json_storage import JSONStorageBackend
@@ -165,6 +166,82 @@ class AccountCapabilityTests(unittest.TestCase):
 
             self.assertEqual(first, "ready-token")
             self.assertEqual(second, "ready-token")
+
+    def test_ensure_image_capacity_uses_cached_ready_account_without_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "正常", "quota": 25})
+
+            with mock.patch.object(service, "schedule_image_pool_replenish", side_effect=AssertionError("should not replenish")):
+                self.assertTrue(service.ensure_image_capacity(timeout_seconds=0.01))
+
+    def test_ensure_image_capacity_replenishes_due_limited_account(self) -> None:
+        old_remove = account_module.config.data.get("auto_remove_rate_limited_accounts")
+        account_module.config.data["auto_remove_rate_limited_accounts"] = False
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_accounts(["token-1"])
+                service.update_account(
+                    "token-1",
+                    {"status": "限流", "quota": 0, "image_quota_unknown": False, "restore_at": "2000-01-01 00:00:00"},
+                )
+
+                with mock.patch.object(
+                    service,
+                    "_fetch_remote_user_info",
+                    return_value={"status": "正常", "quota": 25, "image_quota_unknown": False},
+                ) as fetch:
+                    self.assertTrue(service.ensure_image_capacity(timeout_seconds=1.0))
+
+                thread = service._image_pool_replenish_thread
+                if thread is not None:
+                    thread.join(timeout=2.0)
+                fetch.assert_called_once_with("token-1")
+                self.assertEqual(service.get_account("token-1")["status"], "正常")
+            finally:
+                if old_remove is None:
+                    account_module.config.data.pop("auto_remove_rate_limited_accounts", None)
+                else:
+                    account_module.config.data["auto_remove_rate_limited_accounts"] = old_remove
+
+    def test_ensure_image_capacity_times_out_when_replenish_has_no_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+
+            started = time.time()
+            self.assertFalse(service.ensure_image_capacity(timeout_seconds=0.01))
+
+            self.assertLess(time.time() - started, 0.5)
+
+    def test_low_priority_replenish_stops_when_image_request_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1", "token-2"])
+            service.update_account("token-1", {"status": "限流", "quota": 0, "restore_at": "2000-01-01 00:00:00"})
+            service.update_account("token-2", {"status": "限流", "quota": 0, "restore_at": "2000-01-01 00:00:00"})
+            with service._image_slot_condition:
+                service._active_image_requests = 1
+
+            with mock.patch.object(service, "_fetch_remote_user_info", side_effect=AssertionError("should yield to image request")):
+                service._run_image_pool_replenish(["token-1", "token-2"], "test", IMAGE_POOL_REPLENISH_LOW)
+
+            with service._image_slot_condition:
+                service._active_image_requests = 0
+
+    def test_schedule_image_pool_replenish_deduplicates_running_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "限流", "quota": 0, "restore_at": "2000-01-01 00:00:00"})
+            with service._image_slot_condition:
+                service._image_pool_replenish_running = True
+
+            self.assertFalse(service.schedule_image_pool_replenish("test", priority=IMAGE_POOL_REPLENISH_HIGH))
+
+            with service._image_slot_condition:
+                service._image_pool_replenish_running = False
 
 
 class TokenLogTests(unittest.TestCase):

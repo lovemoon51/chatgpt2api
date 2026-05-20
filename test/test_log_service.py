@@ -8,7 +8,7 @@ from pathlib import Path
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
-from services.log_service import LOG_TYPE_CALL, REDACTED_VALUE, LogService
+from services.log_service import LOG_TYPE_CALL, LOG_TYPE_TEXT, REDACTED_VALUE, LogService
 
 
 class LogServiceSecurityTests(unittest.TestCase):
@@ -102,6 +102,32 @@ class LogServiceSecurityTests(unittest.TestCase):
             stored = [json.loads(line) for line in raw_lines]
             self.assertEqual([item["detail"]["index"] for item in stored], [2, 3, 4])
             self.assertEqual([item["summary"] for item in service.list(limit=10)], ["entry-4", "entry-3", "entry-2"])
+
+    def test_legacy_embedding_calls_are_listed_as_text_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "id": "embedding-call",
+                        "time": "2026-05-20 10:00:00",
+                        "type": LOG_TYPE_CALL,
+                        "summary": "Embeddings调用完成",
+                        "detail": {"endpoint": "/v1/embeddings", "model": "text-embedding-3-small"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            service = self._service(path)
+
+            self.assertEqual(service.list(type=LOG_TYPE_CALL), [])
+            text_items = service.list(type=LOG_TYPE_TEXT)
+            self.assertEqual(len(text_items), 1)
+            self.assertEqual(text_items[0]["type"], LOG_TYPE_TEXT)
+            self.assertEqual(text_items[0]["detail"]["model"], "text-embedding-3-small")
 
 
 if __name__ == "__main__":

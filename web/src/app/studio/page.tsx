@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import {
+  ArrowLeft,
   ArrowUp,
   Bell,
   Bot,
@@ -31,6 +33,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -47,6 +50,7 @@ import {
   type ImageTask,
   type OpenAIModel,
 } from "@/lib/api";
+import { downloadImageUrl, fetchImageFile } from "@/lib/image-fetch";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 import {
@@ -300,12 +304,7 @@ function getStoredImageSrc(image: StoredImage) {
 }
 
 async function fetchImageAsFile(url: string, fileName: string) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("读取结果图失败");
-  }
-  const blob = await response.blob();
-  return new File([blob], fileName, { type: blob.type || "image/png" });
+  return fetchImageFile(url, fileName);
 }
 
 async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
@@ -471,8 +470,8 @@ async function downloadStoredImage(image: StoredImage, index: number) {
     }
     blob = new Blob([bytes], { type: "image/png" });
   } else if (image.url) {
-    const response = await fetch(image.url);
-    blob = await response.blob();
+    await downloadImageUrl(image.url, `studio-image-${index + 1}.png`);
+    return;
   } else {
     return;
   }
@@ -1498,6 +1497,16 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
               <div className="hidden rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm dark:bg-slate-800 dark:text-slate-100 sm:block">
                 创作台
               </div>
+              {session.role === "admin" ? (
+                <Link
+                  href="/dashboard"
+                  className="inline-flex h-10 items-center gap-2 rounded-full bg-white px-3 text-sm font-medium text-slate-600 shadow-sm transition hover:text-slate-950 hover:shadow-md dark:bg-slate-800 dark:text-slate-200 dark:hover:text-white dark:hover:shadow-black/30 sm:px-4"
+                  aria-label="返回后台"
+                >
+                  <ArrowLeft className="size-4" />
+                  <span className="hidden sm:inline">返回后台</span>
+                </Link>
+              ) : null}
               <button
                 type="button"
                 className="hidden h-10 items-center gap-2 rounded-full px-4 text-sm font-medium text-slate-500 transition hover:bg-white hover:text-slate-950 hover:shadow-sm dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100 sm:inline-flex"
@@ -1760,7 +1769,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                     className="block aspect-square w-full cursor-zoom-in overflow-hidden bg-slate-100 dark:bg-slate-800"
                                     onClick={() => openLightbox(successfulImages, lightboxIndexForImage)}
                                   >
-                                    <img src={imageSrc} alt={`生成结果 ${index + 1}`} className="h-full w-full object-cover transition hover:scale-[1.02]" />
+                                    <AuthenticatedImage src={imageSrc} alt={`生成结果 ${index + 1}`} className="h-full w-full object-cover transition hover:scale-[1.02]" />
                                   </button>
                                   <div className="flex items-center justify-between gap-2 p-3">
                                     <span className="text-xs text-slate-500 dark:text-slate-400">结果 {index + 1}</span>
@@ -2211,15 +2220,11 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                       className={cn("relative block aspect-square w-full overflow-hidden text-left", isDarkTheme ? "bg-slate-800" : "bg-slate-100")}
                       onClick={() => openImageLibraryLightbox(index)}
                     >
-                      <img
+                      <AuthenticatedImage
                         src={item.thumbnail_url || item.url}
+                        fallbackSrc={item.url}
                         alt={item.name}
                         className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
-                        onError={(event) => {
-                          if (event.currentTarget.src !== item.url) {
-                            event.currentTarget.src = item.url;
-                          }
-                        }}
                       />
                       <span className="absolute right-2 bottom-2 grid size-8 place-items-center rounded-full bg-black/45 text-white opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
                         <Maximize2 className="size-4" />

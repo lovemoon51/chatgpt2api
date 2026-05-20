@@ -118,12 +118,18 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/images")
     async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
-        require_identity(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
+        identity = require_identity(authorization)
+        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip(), identity=identity)
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
-    async def get_image_thumbnail(image_path: str):
-        return get_thumbnail_response(image_path)
+    async def get_image_thumbnail(image_path: str, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return get_thumbnail_response(image_path, identity)
+
+    @router.get("/images/{image_path:path}", include_in_schema=False)
+    async def get_protected_image(image_path: str, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return get_image_download_response(image_path, identity)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
@@ -142,8 +148,8 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/images/download/{image_path:path}")
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
-        require_identity(authorization)
-        return get_image_download_response(image_path)
+        identity = require_identity(authorization)
+        return get_image_download_response(image_path, identity)
 
     @router.get("/api/logs")
     async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):

@@ -56,6 +56,14 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     return max(minimum, normalized)
 
 
+def _normalize_positive_float(value: object, default: float, minimum: float = 0.0) -> float:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        normalized = default
+    return max(minimum, normalized)
+
+
 def _normalize_backup_include(value: object) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     normalized = dict(DEFAULT_BACKUP_INCLUDE)
@@ -228,6 +236,14 @@ class ConfigStore:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
         except (TypeError, ValueError):
             return 3
+
+    @property
+    def image_pool_preflight_wait_seconds(self) -> float:
+        return _normalize_positive_float(self.data.get("image_pool_preflight_wait_seconds"), 3.0, 0.0)
+
+    @property
+    def image_pool_replenish_debounce_seconds(self) -> float:
+        return _normalize_positive_float(self.data.get("image_pool_replenish_debounce_seconds"), 15.0, 0.0)
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:

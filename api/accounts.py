@@ -56,6 +56,7 @@ class AccountDeleteRequest(BaseModel):
 class AccountRefreshRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
     scope: str = ""
+    stream: bool = False
 
 
 class AccountCpaExportRequest(BaseModel):
@@ -105,6 +106,40 @@ class Sub2APIServerUpdateRequest(BaseModel):
 
 class Sub2APIImportRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list)
+
+
+import asyncio
+import json
+from typing import AsyncIterator, Iterable
+
+
+async def _stream_refresh_events(access_tokens: list[str], log_title: str) -> AsyncIterator[bytes]:
+    """Run account_service.iter_refresh_accounts in a worker thread and yield NDJSON events."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    sentinel = object()
+
+    def _produce() -> None:
+        try:
+            for event in account_service.iter_refresh_accounts(access_tokens, log_title=log_title):
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {"type": "error", "error": str(exc) or exc.__class__.__name__},
+            )
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    task = loop.run_in_executor(None, _produce)
+    try:
+        while True:
+            event = await queue.get()
+            if event is sentinel:
+                break
+            yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+    finally:
+        await task
 
 
 def create_router() -> APIRouter:
@@ -202,6 +237,12 @@ def create_router() -> APIRouter:
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
         log_title = "一键刷新所有账号信息和额度" if requested_all else "批量刷新账号"
+        if body.stream:
+            return StreamingResponse(
+                _stream_refresh_events(access_tokens, log_title),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         return await run_in_threadpool(account_service.refresh_accounts, access_tokens, log_title)
 
     @router.get("/api/accounts/export/cpa")

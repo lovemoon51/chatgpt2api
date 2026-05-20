@@ -45,7 +45,7 @@ import {
   deleteAccounts,
   downloadCpaAccounts,
   fetchAccounts,
-  refreshAccounts,
+  refreshAccountsStream,
   updateAccount,
   type Account,
   type AccountStatus,
@@ -84,6 +84,22 @@ const metricCards = [
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
+
+const headerButtonClass =
+  "h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-700 shadow-sm shadow-stone-200/40 hover:bg-white sm:px-4";
+
+const refreshActionClass =
+  "h-10 rounded-xl border-sky-100 bg-sky-50/90 px-3 text-sky-700 shadow-sm shadow-sky-100/60 hover:border-sky-200 hover:bg-sky-100/80 hover:text-sky-800 sm:px-4";
+
+const refreshToastOptions = {
+  position: "bottom-right" as const,
+  classNames: {
+    toast:
+      "w-[min(320px,calc(100vw-2rem))] rounded-xl border border-sky-100 bg-white/95 px-3 py-2.5 text-stone-800 shadow-lg shadow-stone-300/25 backdrop-blur",
+    title: "text-sm font-medium",
+    loader: "text-sky-600",
+  },
+};
 
 function isUnlimitedImageQuotaAccount(account: Account) {
   return account.type === "pro" || account.type === "prolite";
@@ -300,65 +316,111 @@ function AccountsPageContent() {
     }
   };
 
-  const handleRefreshAccounts = async (accessTokens: string[]) => {
+  const runRefreshStream = async (
+    accessTokens: string[],
+    options: { scope?: "all" | "selected"; toastLabel: string } = { toastLabel: "刷新账号" },
+  ) => {
     if (accessTokens.length === 0) {
       toast.error("没有需要刷新的账户");
       return;
     }
 
+    const toastId = toast.loading(`${options.toastLabel}：连接中…`, refreshToastOptions);
     setIsRefreshing(true);
     try {
-      const data = await refreshAccounts(accessTokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
-        const removedText = data.removed_failed ? `，已删除 ${data.removed_failed} 个失败账号` : "";
+      let removedFailedRunning = 0;
+      let removedRateRunning = 0;
+      let receivedAny = false;
+      let lastCompleted = 0;
+      const updateProgressToast = (completed: number, requested: number) => {
+        lastCompleted = completed;
+        const parts = [`${options.toastLabel}（${completed} / ${requested}）`];
+        if (removedFailedRunning > 0) {
+          parts.push(`已移除失效账号 ${removedFailedRunning} 个`);
+        }
+        if (removedRateRunning > 0) {
+          parts.push(`已移除限流账号 ${removedRateRunning} 个`);
+        }
+        toast.loading(parts.join("，"), { ...refreshToastOptions, id: toastId });
+      };
+
+      const final = await refreshAccountsStream(accessTokens, {
+        ...(options.scope ? { scope: options.scope } : {}),
+        onEvent: (event) => {
+          if (typeof window !== "undefined") {
+            // eslint-disable-next-line no-console
+            console.debug("[refresh-stream]", event);
+          }
+          receivedAny = true;
+          if (event.type === "start") {
+            toast.loading(
+              `${options.toastLabel}（0 / ${event.requested}）`,
+              { ...refreshToastOptions, id: toastId },
+            );
+          } else if (event.type === "account") {
+            if (event.outcome === "invalid") {
+              removedFailedRunning += 1;
+            }
+            updateProgressToast(event.completed, event.requested);
+          } else if (event.type === "batch") {
+            setAccounts(event.items);
+            setSelectedIds((prev) =>
+              prev.filter((id) => event.items.some((item) => item.access_token === id)),
+            );
+            removedRateRunning += event.removed_rate_limited;
+            updateProgressToast(event.completed, event.requested);
+          }
+        },
+      });
+      void receivedAny;
+      void lastCompleted;
+
+      const items = final?.items ?? [];
+      if (items.length > 0 || final) {
+        setAccounts(items);
+        setSelectedIds((prev) => prev.filter((id) => items.some((item) => item.access_token === id)));
+      }
+
+      const refreshed = final?.refreshed ?? 0;
+      const removedFailed = final?.removed_failed ?? 0;
+      const removedRate = final?.removed_rate_limited ?? 0;
+      const errors = final?.errors ?? [];
+      const firstError = errors[0]?.error;
+      const removedTexts: string[] = [];
+      if (removedFailed > 0) removedTexts.push(`已移除失效账号 ${removedFailed} 个`);
+      if (removedRate > 0) removedTexts.push(`已移除限流账号 ${removedRate} 个`);
+      const removedSuffix = removedTexts.length ? `，${removedTexts.join("，")}` : "";
+
+      if (errors.length > 0) {
         const summary =
-          data.refreshed > 0
-            ? `刷新完成：成功 ${data.refreshed} 个，失败 ${data.errors.length} 个`
-            : `刷新失败 ${data.errors.length} 个`;
+          refreshed > 0
+            ? `${options.toastLabel}完成：成功 ${refreshed} 个，失败 ${errors.length} 个`
+            : `${options.toastLabel}失败 ${errors.length} 个`;
         toast.error(
-          `${summary}${removedText}${firstError ? `，首个错误：${firstError}` : ""}`,
+          `${summary}${removedSuffix}${firstError ? `，首个错误：${firstError}` : ""}`,
+          { ...refreshToastOptions, id: toastId },
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户`);
+        toast.success(`${options.toastLabel}完成：成功 ${refreshed} 个${removedSuffix}`, {
+          ...refreshToastOptions,
+          id: toastId,
+        });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "刷新账户失败";
-      toast.error(message);
+      const message = error instanceof Error ? error.message : `${options.toastLabel}失败`;
+      toast.error(message, { ...refreshToastOptions, id: toastId });
     } finally {
       setIsRefreshing(false);
     }
   };
 
+  const handleRefreshAccounts = async (accessTokens: string[]) => {
+    await runRefreshStream(accessTokens, { toastLabel: "刷新账号" });
+  };
+
   const handleRefreshAllAccounts = async () => {
     const tokens = accounts.map((item) => item.access_token).filter(Boolean);
-    if (tokens.length === 0) {
-      toast.error("没有需要刷新的账户");
-      return;
-    }
-
-    setIsRefreshing(true);
-    try {
-      const data = await refreshAccounts(tokens, { scope: "all" });
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
-        const removedText = data.removed_failed ? `，已删除 ${data.removed_failed} 个失败账号` : "";
-        toast.error(
-          `刷新完成：成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${removedText}${firstError ? `，首个错误：${firstError}` : ""}`,
-        );
-      } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "刷新账户失败";
-      toast.error(message);
-    } finally {
-      setIsRefreshing(false);
-    }
+    await runRefreshStream(tokens, { scope: "all", toastLabel: "一键刷新账号" });
   };
 
   const handleDownloadCpaAccounts = async (accessTokens: string[]) => {
@@ -427,21 +489,25 @@ function AccountsPageContent() {
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            size="icon"
+            className={cn(headerButtonClass, "w-10 px-0 sm:w-auto sm:px-3")}
             onClick={() => void loadAccounts()}
             disabled={isLoading || isRefreshing || isDeleting}
+            aria-label="刷新账号列表"
+            title="刷新账号列表"
           >
             <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            刷新
+            <span className="hidden sm:inline">刷新</span>
           </Button>
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            className={cn(refreshActionClass, "max-w-full")}
             onClick={() => void handleRefreshAllAccounts()}
             disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
+            <span className="hidden sm:inline">一键刷新全部</span>
+            <span className="sm:hidden">刷新全部</span>
           </Button>
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
@@ -453,7 +519,7 @@ function AccountsPageContent() {
           />
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            className={headerButtonClass}
             onClick={() => downloadTokens(accounts)}
             disabled={accounts.length === 0}
           >
@@ -462,7 +528,7 @@ function AccountsPageContent() {
           </Button>
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            className={headerButtonClass}
             onClick={() => void handleDownloadCpaAccounts(accounts.map((item) => item.access_token))}
             disabled={accounts.length === 0 || isExportingCpa}
           >
@@ -653,16 +719,22 @@ function AccountsPageContent() {
           )}
         >
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-3 border-b border-stone-100 bg-stone-50/35 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
                 <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                  variant="outline"
+                  className="h-9 rounded-lg border-sky-100 bg-white px-3 text-sky-700 shadow-xs hover:border-sky-200 hover:bg-sky-50 hover:text-sky-800 disabled:border-stone-100 disabled:bg-stone-50 disabled:text-stone-400"
                   onClick={() => void handleRefreshAccounts(selectedTokens)}
                   disabled={selectedTokens.length === 0 || isRefreshing}
+                  title={selectedTokens.length === 0 ? "先选择账号" : "刷新选中账号信息和额度"}
                 >
                   {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                  刷新选中账号信息和额度
+                  <span>刷新选中</span>
+                  {selectedTokens.length > 0 ? (
+                    <span className="ml-0.5 rounded-md bg-sky-100 px-1.5 py-0.5 text-xs text-sky-700">
+                      {selectedTokens.length}
+                    </span>
+                  ) : null}
                 </Button>
                 <Button
                   variant="ghost"

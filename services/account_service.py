@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import queue as _queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Condition, Lock
-from typing import Any
+from typing import Any, Iterator
 
 from services.config import config
 from services.log_service import (
@@ -16,12 +19,15 @@ from utils.helper import anonymize_token
 
 
 PLUS_PROMO_ACCOUNT_TAG = "可开通 Plus"
-DEFAULT_REFRESH_WORKERS = 3
-MAX_REFRESH_WORKERS = 4
+DEFAULT_REFRESH_WORKERS = 4
+MAX_REFRESH_WORKERS = 8
 DEFAULT_LIMITED_REFRESH_BATCH_SIZE = 3
 DEFAULT_REFRESH_FAST_PATH_THRESHOLD = 3
-DEFAULT_REFRESH_BATCH_SIZE = 3
-DEFAULT_REFRESH_BATCH_INTERVAL_SECONDS = 2.0
+DEFAULT_REFRESH_BATCH_SIZE = 4
+DEFAULT_REFRESH_BATCH_INTERVAL_SECONDS = 1.0
+CPA_DELETE_PARALLELISM = 4
+IMAGE_POOL_REPLENISH_HIGH = "high"
+IMAGE_POOL_REPLENISH_LOW = "low"
 
 
 def _is_upstream_timeout_error(exc: Exception) -> bool:
@@ -122,6 +128,11 @@ class AccountService:
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
+        self._active_image_requests = 0
+        self._image_pool_replenish_running = False
+        self._image_pool_replenish_last_started_at = 0.0
+        self._image_pool_replenish_thread: threading.Thread | None = None
+        self._image_pool_register_running = False
 
     def _load_accounts(self) -> dict[str, dict]:
         accounts = self.storage.load_accounts()
@@ -238,6 +249,139 @@ class AccountService:
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
+    def _has_ready_image_account_locked(self) -> bool:
+        return bool(self._list_ready_candidate_tokens())
+
+    def begin_image_request(self) -> None:
+        with self._image_slot_condition:
+            self._active_image_requests += 1
+            self._image_slot_condition.notify_all()
+
+    def end_image_request(self) -> None:
+        should_replenish = False
+        with self._image_slot_condition:
+            self._active_image_requests = max(0, self._active_image_requests - 1)
+            should_replenish = self._active_image_requests == 0
+            self._image_slot_condition.notify_all()
+        if should_replenish:
+            self.schedule_image_pool_replenish("image_request_finished", priority=IMAGE_POOL_REPLENISH_LOW)
+
+    def has_active_image_requests(self) -> bool:
+        with self._lock:
+            return self._active_image_requests > 0
+
+    def ensure_image_capacity(self, timeout_seconds: float | None = None) -> bool:
+        timeout = config.image_pool_preflight_wait_seconds if timeout_seconds is None else max(0.0, float(timeout_seconds))
+        deadline = time.time() + timeout
+        replenish_requested = False
+        while True:
+            with self._image_slot_condition:
+                if self._has_ready_image_account_locked():
+                    return True
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                replenish_running = self._image_pool_replenish_running
+            if not replenish_running and not replenish_requested:
+                replenish_requested = self.schedule_image_pool_replenish(
+                    "image_preflight",
+                    priority=IMAGE_POOL_REPLENISH_HIGH,
+                )
+            with self._image_slot_condition:
+                if self._has_ready_image_account_locked():
+                    return True
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                self._image_slot_condition.wait(timeout=min(0.25, remaining))
+
+    def schedule_image_pool_replenish(self, reason: str = "", priority: str = IMAGE_POOL_REPLENISH_LOW) -> bool:
+        normalized_priority = IMAGE_POOL_REPLENISH_HIGH if priority == IMAGE_POOL_REPLENISH_HIGH else IMAGE_POOL_REPLENISH_LOW
+        if normalized_priority == IMAGE_POOL_REPLENISH_HIGH:
+            return self._start_image_pool_replenish(reason, normalized_priority)
+
+        now = time.time()
+        with self._image_slot_condition:
+            if self._image_pool_replenish_running:
+                return False
+            debounce_seconds = max(0.0, float(config.image_pool_replenish_debounce_seconds))
+            if debounce_seconds > 0 and now - self._image_pool_replenish_last_started_at < debounce_seconds:
+                return False
+        return self._start_image_pool_replenish(reason, normalized_priority)
+
+    def _start_image_pool_replenish(self, reason: str, priority: str) -> bool:
+        with self._image_slot_condition:
+            if self._image_pool_replenish_running:
+                return False
+        limit = self.limited_refresh_batch_size() if priority == IMAGE_POOL_REPLENISH_HIGH else 1
+        tokens = self.list_limited_tokens(due_only=True, limit=limit)
+        if not tokens:
+            return False
+        with self._image_slot_condition:
+            if self._image_pool_replenish_running:
+                return False
+            self._image_pool_replenish_running = True
+            self._image_pool_replenish_last_started_at = time.time()
+            self._image_pool_replenish_thread = threading.Thread(
+                target=self._run_image_pool_replenish,
+                args=(tokens, reason, priority),
+                name=f"image-pool-replenish-{priority}",
+                daemon=True,
+            )
+            self._image_pool_replenish_thread.start()
+            return True
+
+    def _run_image_pool_replenish(self, tokens: list[str], reason: str, priority: str) -> None:
+        started = time.time()
+        refreshed = 0
+        failed = 0
+        skipped = 0
+        first_error = ""
+        for token in tokens:
+            if priority != IMAGE_POOL_REPLENISH_HIGH and self.has_active_image_requests():
+                skipped += 1
+                break
+            fetched: dict[str, dict[str, Any]] = {}
+            invalid_tokens: set[str] = set()
+            try:
+                result = self._fetch_remote_user_info(token)
+                fetched[token] = result
+            except Exception as exc:
+                failed += 1
+                if not first_error:
+                    first_error = _format_refresh_error(exc)
+                if self._is_invalid_token_error(exc):
+                    invalid_tokens.add(token)
+            delta = self._apply_refresh_batch(fetched, invalid_tokens)
+            refreshed += int(delta.get("refreshed") or 0)
+            if priority == IMAGE_POOL_REPLENISH_HIGH and self.available_account_count() > 0:
+                break
+
+        duration_ms = int((time.time() - started) * 1000)
+        try:
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                f"图片号池补充完成：成功 {refreshed} 个，失败 {failed} 个",
+                {
+                    "reason": reason,
+                    "priority": priority,
+                    "requested": len(tokens),
+                    "refreshed": refreshed,
+                    "failed": failed,
+                    "skipped": skipped,
+                    "first_error": first_error,
+                    "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+                    "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_ms": duration_ms,
+                },
+            )
+        except Exception:
+            pass
+        finally:
+            with self._image_slot_condition:
+                self._image_pool_replenish_running = False
+                self._image_slot_condition.notify_all()
+
     def _list_text_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
@@ -260,6 +404,19 @@ class AccountService:
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
                 self._image_slot_condition.wait(timeout=1.0)
+
+    def _acquire_specific_candidate_token(self, access_token: str) -> str:
+        if not access_token:
+            raise RuntimeError("no available image quota")
+        max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        with self._image_slot_condition:
+            account = self._accounts.get(access_token)
+            if not self._is_image_account_available(account or {}):
+                raise RuntimeError("registered account is not available for image generation")
+            if int(self._image_inflight.get(access_token, 0)) >= max_concurrency:
+                raise RuntimeError("registered account image concurrency exceeded")
+            self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+            return access_token
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
@@ -287,6 +444,64 @@ class AccountService:
             if self._is_image_account_available(account or {}):
                 return access_token
             self.release_image_slot(access_token)
+
+    def register_image_account_for_request(self, excluded_tokens: set[str] | None = None, reason: str = "image_first_failure") -> str:
+        excluded = set(excluded_tokens or set())
+        with self._image_slot_condition:
+            if self._image_pool_register_running:
+                while self._image_pool_register_running:
+                    self._image_slot_condition.wait(timeout=0.5)
+                registered_by_other = True
+            else:
+                registered_by_other = False
+                self._image_pool_register_running = True
+        if registered_by_other:
+            return self._acquire_next_candidate_token(excluded_tokens=excluded)
+
+        started = time.time()
+        access_token = ""
+        error = ""
+        try:
+            from services.register import openai_register
+
+            with openai_register.stats_lock:
+                if not openai_register.stats.get("start_time"):
+                    openai_register.stats["start_time"] = time.time()
+            result = openai_register.worker(int(started * 1000) % 1_000_000)
+            if not isinstance(result, dict) or not result.get("ok"):
+                raise RuntimeError(str((result or {}).get("error") or "register failed"))
+            raw_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+            access_token = str(raw_result.get("access_token") or "").strip()
+            if not access_token:
+                raise RuntimeError("registered account did not return access_token")
+            try:
+                return self._acquire_specific_candidate_token(access_token)
+            except RuntimeError:
+                return self._acquire_next_candidate_token(excluded_tokens=excluded)
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            raise
+        finally:
+            duration_ms = int((time.time() - started) * 1000)
+            try:
+                log_service.add(
+                    LOG_TYPE_ACCOUNT,
+                    "图片请求触发即时注册补号",
+                    {
+                        "reason": reason,
+                        "success": bool(access_token and not error),
+                        "token": anonymize_token(access_token) if access_token else "",
+                        "error": error[:500],
+                        "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+                        "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "duration_ms": duration_ms,
+                    },
+                )
+            except Exception:
+                pass
+            with self._image_slot_condition:
+                self._image_pool_register_running = False
+                self._image_slot_condition.notify_all()
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         with self._lock:
@@ -630,9 +845,8 @@ class AccountService:
             access_tokens: list[str],
             *,
             max_workers: int,
+            on_token_done: "Any | None" = None,
     ) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]], set[str]]:
-        from services.openai_backend_api import InvalidAccessTokenError
-
         fetched: dict[str, dict[str, Any]] = {}
         errors: list[dict[str, str]] = []
         failed_invalid_tokens: set[str] = set()
@@ -644,61 +858,75 @@ class AccountService:
             }
             for future in as_completed(futures):
                 token = futures[future]
+                error_message: str | None = None
+                outcome = "succeeded"
                 try:
                     fetched[token] = future.result()
                 except Exception as exc:
-                    if isinstance(exc, InvalidAccessTokenError):
+                    error_message = _format_refresh_error(exc)
+                    if self._is_invalid_token_error(exc):
                         failed_invalid_tokens.add(token)
-                    errors.append({"token": anonymize_token(token), "error": _format_refresh_error(exc)})
-                    continue
+                        outcome = "invalid"
+                    else:
+                        outcome = "failed"
+                    errors.append({"token": anonymize_token(token), "error": error_message})
+                if on_token_done is not None:
+                    try:
+                        on_token_done(token, outcome, error_message)
+                    except Exception:
+                        pass
         return fetched, errors, failed_invalid_tokens
 
-    def refresh_accounts(self, access_tokens: list[str], log_title: str = "批量刷新账号") -> dict[str, Any]:
-        access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
-        if not access_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
-        started = time.time()
+    @staticmethod
+    def _is_invalid_token_error(exc: Exception) -> bool:
+        from services.openai_backend_api import InvalidAccessTokenError
 
-        fetched: dict[str, dict[str, Any]] = {}
-        errors: list[dict[str, str]] = []
-        failed_invalid_tokens: set[str] = set()
-        max_workers = self._refresh_worker_count(len(access_tokens))
-        fast_path_threshold = self.refresh_fast_path_threshold()
-        batch_size = self.refresh_batch_size()
-        batch_interval_seconds = self.refresh_batch_interval_seconds()
+        if isinstance(exc, InvalidAccessTokenError):
+            return True
+        message = str(exc or "").lower()
+        if not message:
+            return False
+        invalid_markers = (
+            "http 401", "http 403",
+            " 401 ", " 403 ",
+            "unauthorized",
+            "invalid_access_token",
+            "invalid token",
+            "token expired",
+            "token has expired",
+            "reauth",
+            "please log in",
+            "please login",
+            "login required",
+            "need login",
+            "need to log in",
+        )
+        return any(marker in message for marker in invalid_markers)
 
-        batches = [access_tokens] if len(access_tokens) <= fast_path_threshold else self._chunks(access_tokens, batch_size)
-        for index, batch in enumerate(batches):
-            active_batch = [token for token in batch if token not in failed_invalid_tokens]
-            if not active_batch:
-                continue
-            batch_fetched, batch_errors, batch_invalid_tokens = self._refresh_remote_batch(
-                active_batch,
-                max_workers=max_workers,
-            )
-            fetched.update(batch_fetched)
-            errors.extend(batch_errors)
-            failed_invalid_tokens.update(batch_invalid_tokens)
-            if len(access_tokens) > fast_path_threshold and index < len(batches) - 1 and batch_interval_seconds > 0:
-                time.sleep(batch_interval_seconds)
-
+    def _apply_refresh_batch(
+            self,
+            batch_fetched: dict[str, dict[str, Any]],
+            batch_invalid_tokens: set[str],
+    ) -> dict[str, Any]:
+        """Apply one batch of remote results to memory + storage."""
         refreshed = 0
         removed_failed = 0
         removed_rate_limited = 0
-        changed = False
         invalid_accounts: list[dict] = []
+        removed_tokens: list[str] = []
+        changed = False
 
         with self._lock:
-            for token in failed_invalid_tokens:
+            for token in batch_invalid_tokens:
                 removed_account = self._accounts.pop(token, None)
-                removed = removed_account is not None
                 self._image_inflight.pop(token, None)
-                if removed:
+                if removed_account is not None:
                     invalid_accounts.append(dict(removed_account))
+                    removed_tokens.append(token)
                     removed_failed += 1
                     changed = True
 
-            for token, result in fetched.items():
+            for token, result in batch_fetched.items():
                 current = self._accounts.get(token)
                 if current is None:
                     continue
@@ -708,6 +936,7 @@ class AccountService:
                 if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                     self._accounts.pop(token, None)
                     self._image_inflight.pop(token, None)
+                    removed_tokens.append(token)
                     removed_rate_limited += 1
                     changed = True
                     continue
@@ -724,44 +953,204 @@ class AccountService:
                 self._image_slot_condition.notify_all()
             items = [dict(item) for item in self._accounts.values()]
 
-        for account in invalid_accounts:
-            self._sync_cpa_delete(account, "refresh_accounts_invalid")
-
-        if fetched or errors:
-            ended = time.time()
-            duration_ms = int((ended - started) * 1000)
-            first_error = errors[0].get("error") if errors and isinstance(errors[0], dict) else ""
-            log_service.add(
-                LOG_TYPE_ACCOUNT,
-                self._refresh_log_summary(
-                    log_title or "批量刷新账号",
-                    refreshed,
-                    errors,
-                    removed_failed,
-                    removed_rate_limited,
-                    duration_ms,
-                ),
-                {
-                    "title": log_title or "批量刷新账号",
-                    "requested": len(access_tokens),
-                    "refreshed": refreshed,
-                    "failed": len(errors),
-                    "workers": max_workers,
-                    "removed_failed": removed_failed,
-                    "removed_rate_limited": removed_rate_limited,
-                    "first_error": first_error,
-                    "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
-                    "ended_at": datetime.fromtimestamp(ended).strftime("%Y-%m-%d %H:%M:%S"),
-                    "duration_ms": duration_ms,
-                },
-            )
+        if invalid_accounts:
+            self._sync_cpa_delete_many(invalid_accounts, "refresh_accounts_invalid")
 
         return {
             "refreshed": refreshed,
-            "errors": errors,
             "removed_failed": removed_failed,
+            "removed_rate_limited": removed_rate_limited,
+            "invalid_accounts": invalid_accounts,
+            "removed_tokens": removed_tokens,
             "items": items,
         }
 
+    def _sync_cpa_delete_many(self, accounts: list[dict], event: str) -> None:
+        if not accounts:
+            return
+        if len(accounts) == 1:
+            self._sync_cpa_delete(accounts[0], event)
+            return
+        workers = max(1, min(CPA_DELETE_PARALLELISM, len(accounts)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(lambda account: self._sync_cpa_delete(account, event), accounts))
+
+    def iter_refresh_accounts(
+            self,
+            access_tokens: list[str],
+            log_title: str = "批量刷新账号",
+    ) -> Iterator[dict[str, Any]]:
+        """逐批刷新账号并以生成器的形式 yield 进度事件。"""
+        access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
+        if not access_tokens:
+            yield {
+                "type": "done",
+                "refreshed": 0,
+                "removed_failed": 0,
+                "removed_rate_limited": 0,
+                "errors": [],
+                "items": self.list_accounts(),
+                "requested": 0,
+                "completed": 0,
+                "duration_ms": 0,
+            }
+            return
+
+        started = time.time()
+        max_workers = self._refresh_worker_count(len(access_tokens))
+        fast_path_threshold = self.refresh_fast_path_threshold()
+        batch_size = self.refresh_batch_size()
+        batch_interval_seconds = self.refresh_batch_interval_seconds()
+
+        batches = (
+            [access_tokens]
+            if len(access_tokens) <= fast_path_threshold
+            else self._chunks(access_tokens, batch_size)
+        )
+        total = len(access_tokens)
+        completed = 0
+        refreshed_total = 0
+        removed_failed_total = 0
+        removed_rate_limited_total = 0
+        errors_total: list[dict[str, str]] = []
+        latest_items: list[dict] = []
+        seen_invalid: set[str] = set()
+
+        yield {
+            "type": "start",
+            "requested": total,
+            "batches": len(batches),
+            "batch_size": batch_size,
+            "workers": max_workers,
+            "interval_seconds": batch_interval_seconds,
+        }
+
+        for index, batch in enumerate(batches):
+            active_batch = [token for token in batch if token not in seen_invalid]
+            if not active_batch:
+                completed += len(batch)
+                continue
+
+            event_queue: _queue.Queue = _queue.Queue()
+
+            def _on_token_done(token: str, outcome: str, error_message: str | None) -> None:
+                event_queue.put((token, outcome, error_message))
+
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="refresh-batch") as executor:
+                future = executor.submit(
+                    self._refresh_remote_batch,
+                    active_batch,
+                    max_workers=max_workers,
+                    on_token_done=_on_token_done,
+                )
+                while True:
+                    try:
+                        token, outcome, error_message = event_queue.get(timeout=0.1)
+                    except _queue.Empty:
+                        if future.done():
+                            break
+                        continue
+                    completed += 1
+                    payload: dict[str, Any] = {
+                        "type": "account",
+                        "token": anonymize_token(token),
+                        "outcome": outcome,
+                        "completed": completed,
+                        "requested": total,
+                        "index": index,
+                        "total_batches": len(batches),
+                    }
+                    if error_message:
+                        payload["error"] = error_message
+                    yield payload
+                batch_fetched, batch_errors, batch_invalid_tokens = future.result()
+            seen_invalid.update(batch_invalid_tokens)
+            errors_total.extend(batch_errors)
+
+            delta = self._apply_refresh_batch(batch_fetched, batch_invalid_tokens)
+            refreshed_total += int(delta["refreshed"])
+            removed_failed_total += int(delta["removed_failed"])
+            removed_rate_limited_total += int(delta["removed_rate_limited"])
+            latest_items = delta["items"]
+
+            yield {
+                "type": "batch",
+                "index": index,
+                "total_batches": len(batches),
+                "requested": total,
+                "completed": completed,
+                "refreshed": int(delta["refreshed"]),
+                "removed_failed": int(delta["removed_failed"]),
+                "removed_rate_limited": int(delta["removed_rate_limited"]),
+                "removed_tokens": list(delta["removed_tokens"]),
+                "errors": list(batch_errors),
+                "items": delta["items"],
+            }
+
+            if (
+                len(access_tokens) > fast_path_threshold
+                and index < len(batches) - 1
+                and batch_interval_seconds > 0
+            ):
+                time.sleep(batch_interval_seconds)
+
+        ended = time.time()
+        duration_ms = int((ended - started) * 1000)
+
+        first_error = errors_total[0].get("error") if errors_total and isinstance(errors_total[0], dict) else ""
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            self._refresh_log_summary(
+                log_title or "批量刷新账号",
+                refreshed_total,
+                errors_total,
+                removed_failed_total,
+                removed_rate_limited_total,
+                duration_ms,
+            ),
+            {
+                "title": log_title or "批量刷新账号",
+                "requested": total,
+                "refreshed": refreshed_total,
+                "failed": len(errors_total),
+                "workers": max_workers,
+                "removed_failed": removed_failed_total,
+                "removed_rate_limited": removed_rate_limited_total,
+                "first_error": first_error,
+                "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+                "ended_at": datetime.fromtimestamp(ended).strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_ms": duration_ms,
+            },
+        )
+
+        if not latest_items:
+            latest_items = self.list_accounts()
+
+        yield {
+            "type": "done",
+            "refreshed": refreshed_total,
+            "removed_failed": removed_failed_total,
+            "removed_rate_limited": removed_rate_limited_total,
+            "errors": errors_total,
+            "items": latest_items,
+            "requested": total,
+            "completed": completed,
+            "duration_ms": duration_ms,
+        }
+
+    def refresh_accounts(self, access_tokens: list[str], log_title: str = "批量刷新账号") -> dict[str, Any]:
+        """同步刷新接口 — 仅返回最终汇总结果。"""
+        final_event: dict[str, Any] | None = None
+        for event in self.iter_refresh_accounts(access_tokens, log_title=log_title):
+            if event.get("type") == "done":
+                final_event = event
+        if final_event is None:
+            return {"refreshed": 0, "errors": [], "removed_failed": 0, "items": self.list_accounts()}
+        return {
+            "refreshed": final_event.get("refreshed", 0),
+            "errors": final_event.get("errors", []),
+            "removed_failed": final_event.get("removed_failed", 0),
+            "items": final_event.get("items", self.list_accounts()),
+        }
 
 account_service = AccountService(config.get_storage_backend())

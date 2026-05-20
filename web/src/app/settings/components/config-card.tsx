@@ -1,6 +1,6 @@
 "use client";
 
-import { LoaderCircle, PlugZap, Save } from "lucide-react";
+import { LoaderCircle, PlugZap, Save, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -32,6 +32,7 @@ export function ConfigCard() {
   const setGlobalSystemPrompt = useSettingsStore((state) => state.setGlobalSystemPrompt);
   const setSensitiveWordsText = useSettingsStore((state) => state.setSensitiveWordsText);
   const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
+  const setAutoRegisterField = useSettingsStore((state) => state.setAutoRegisterField);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const handleTestProxy = async () => {
@@ -176,6 +177,70 @@ export function ConfigCard() {
             />
             自动移除限流账号
           </label>
+          <div className="space-y-4 rounded-xl border border-stone-200 bg-white px-4 py-3 md:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex size-9 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700">
+                  <ShieldCheck className="size-4" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-stone-800">图片健康号池巡检</label>
+                  <p className="mt-1 text-xs leading-6 text-stone-500">
+                    后台定时检查可生图账号数量，低于阈值时自动启动注册补池，减少用户请求时等待补号。
+                  </p>
+                </div>
+              </div>
+              <label className="flex h-9 items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.auto_register?.enabled)}
+                  onCheckedChange={(checked) => setAutoRegisterField("enabled", Boolean(checked))}
+                />
+                启用
+              </label>
+            </div>
+            <div className="grid gap-4 md:grid-cols-4">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">最低健康账号</label>
+                <Input
+                  value={String(config?.auto_register?.min_available || "")}
+                  onChange={(event) => setAutoRegisterField("min_available", event.target.value)}
+                  placeholder="100"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">低于该数量就补池。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">目标健康账号</label>
+                <Input
+                  value={String(config?.auto_register?.target_available || "")}
+                  onChange={(event) => setAutoRegisterField("target_available", event.target.value)}
+                  placeholder="100"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">补池任务会补到该数量。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">检查间隔</label>
+                <Input
+                  value={String(config?.auto_register?.check_interval_seconds || "")}
+                  onChange={(event) => setAutoRegisterField("check_interval_seconds", event.target.value)}
+                  placeholder="30"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">单位秒，最小 5 秒。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">触发冷却</label>
+                <Input
+                  value={String(config?.auto_register?.cooldown_seconds || "")}
+                  onChange={(event) => setAutoRegisterField("cooldown_seconds", event.target.value)}
+                  placeholder="300"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">单位秒，避免重复启动。</p>
+              </div>
+            </div>
+          </div>
           <div className="space-y-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
             <div>
               <label className="text-sm text-stone-700">控制台日志级别</label>

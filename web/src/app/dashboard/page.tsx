@@ -1,16 +1,26 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   Archive,
+  ArrowRight,
   CheckCircle2,
   Clock3,
   Database,
+  Gauge,
   HardDrive,
+  ImageIcon,
+  KeyRound,
+  ListChecks,
   LoaderCircle,
   RefreshCw,
   ServerCog,
+  Settings,
+  ShieldCheck,
+  Sparkles,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -21,6 +31,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { fetchDashboard, type DashboardMetricGroup, type DashboardResponse } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
+
+type DashboardFailureReason = NonNullable<NonNullable<DashboardResponse["calls"]>["failure_reasons"]>[number];
 
 function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -96,6 +108,53 @@ function statusLabel(value?: unknown) {
   return value;
 }
 
+function healthLabel(level?: string) {
+  if (level === "critical") {
+    return "异常";
+  }
+  if (level === "warning") {
+    return "注意";
+  }
+  return "正常";
+}
+
+function healthBadgeVariant(level?: string) {
+  if (level === "critical") {
+    return "danger" as const;
+  }
+  if (level === "warning") {
+    return "warning" as const;
+  }
+  return "success" as const;
+}
+
+function healthIconClassName(level?: string) {
+  if (level === "critical") {
+    return "bg-rose-50 text-rose-600";
+  }
+  if (level === "warning") {
+    return "bg-amber-50 text-amber-600";
+  }
+  return "bg-emerald-50 text-emerald-600";
+}
+
+function quotaLabel(total?: number | null, unknown?: boolean) {
+  if (unknown) {
+    return "部分未知";
+  }
+  if (total === null || total === undefined) {
+    return "—";
+  }
+  return formatNumber(total);
+}
+
+function compactEndpoint(value?: string) {
+  if (!value || value === "unknown") {
+    return "未知接口";
+  }
+  return value.replace(/^\/api\//, "api/").replace(/^\/v1\//, "v1/");
+}
+
 function storageStatusValue(storage: DashboardResponse["storage"]) {
   return storage?.status ?? storage?.health?.status ?? (storage?.ok === true ? "ok" : storage?.ok === false ? "error" : undefined);
 }
@@ -160,17 +219,33 @@ function DashboardContent() {
     const calls = metricGroup(data?.calls);
     const today = metricGroup(data?.calls?.today);
     const recent = metricGroup(data?.calls?.recent);
+    const image = metricGroup(data?.calls?.image);
     const backup = data?.backup || {};
     const storage = data?.storage || {};
+    const imageQuota = accounts.image_quota || {};
 
     return {
       accountsTotal: pickNumber(accounts, ["total", "accounts", "count"]),
       accountsActive: pickNumber(accounts, ["active", "normal", "available", "enabled"]),
+      accountsLimited: pickNumber(accounts, ["limited"]),
+      accountsError: pickNumber(accounts, ["error"]),
+      accountsDisabled: pickNumber(accounts, ["disabled"]),
+      imageAvailable: pickNumber(accounts, ["image_available", "available"]),
+      imageQuotaTotal: typeof imageQuota.total === "number" || imageQuota.total === null ? imageQuota.total : undefined,
+      imageQuotaUnknown: Boolean(imageQuota.unknown),
       todaySuccess: pickNumber(today, ["success", "succeeded", "ok"]) ?? pickNumber(calls, ["today_success", "success_today"]),
       todayFailed: pickNumber(today, ["failed", "fail", "error", "errors"]) ?? pickNumber(calls, ["today_failed", "today_fail"]),
       recentSuccess: pickNumber(recent, ["success", "succeeded", "ok"]) ?? pickNumber(calls, ["recent_success", "success"]),
       recentFailed: pickNumber(recent, ["failed", "fail", "error", "errors"]) ?? pickNumber(calls, ["recent_failed", "fail", "failed"]),
       avgDuration: pickNumber(calls, ["avg_duration_ms", "average_duration_ms", "avg_latency_ms", "duration_ms"]),
+      imageTotal: pickNumber(image, ["total"]),
+      imageSuccess: pickNumber(image, ["success", "succeeded", "ok"]),
+      imageFailed: pickNumber(image, ["failed", "fail", "error", "errors"]),
+      imageAvgDuration: pickNumber(image, ["avg_duration_ms", "average_duration_ms", "avg_latency_ms", "duration_ms"]),
+      imageLastAt: typeof image.last_at === "string" ? image.last_at : null,
+      failureReasons: Array.isArray(data?.calls?.failure_reasons) ? data.calls.failure_reasons : [],
+      health: data?.health,
+      autoRegister: data?.auto_register,
       backup,
       storage,
     };
@@ -223,6 +298,26 @@ function DashboardContent() {
 
   const backupStatus = statusLabel(summary.backup.last_status ?? summary.backup.status);
   const storageStatus = statusLabel(storageStatusValue(summary.storage));
+  const healthLevel = summary.health?.level || "normal";
+  const healthReasons = Array.isArray(summary.health?.reasons) && summary.health.reasons.length > 0
+    ? summary.health.reasons
+    : ["系统运行正常"];
+  const hasImageStats = summary.imageTotal !== undefined;
+  const accountStats = [
+    { label: "总账号", value: formatNumber(summary.accountsTotal) },
+    { label: "可用账号", value: formatNumber(summary.accountsActive) },
+    { label: "限流", value: formatNumber(summary.accountsLimited) },
+    { label: "异常", value: formatNumber(summary.accountsError) },
+    { label: "禁用", value: formatNumber(summary.accountsDisabled) },
+    { label: "图片额度", value: quotaLabel(summary.imageQuotaTotal, summary.imageQuotaUnknown) },
+  ];
+  const quickActions = [
+    { href: "/studio", label: "进入创作台", icon: Sparkles },
+    { href: "/accounts", label: "号池管理", icon: ServerCog },
+    { href: "/logs", label: "日志管理", icon: ListChecks },
+    { href: "/settings", label: "设置备份", icon: Settings },
+    { href: "/image-manager", label: "图片管理", icon: ImageIcon },
+  ];
 
   return (
     <section className="space-y-5">
@@ -251,111 +346,314 @@ function DashboardContent() {
         </Card>
       ) : null}
 
-      <div className={cn("grid gap-3 md:grid-cols-3 xl:grid-cols-6", isLoading && !data ? "hidden" : "")}>
-        {metricCards.map((item) => {
-          const Icon = item.icon;
-          return (
-            <Card key={item.label} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-              <CardContent className="p-4">
-                <div className="mb-4 flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium text-stone-400">{item.label}</div>
-                    <div className="mt-1 text-xs text-stone-400">{item.hint}</div>
-                  </div>
-                  <Icon className="size-4 shrink-0 text-stone-400" />
-                </div>
-                <div className={cn("truncate text-[1.55rem] font-semibold tracking-tight", item.color)}>{item.value}</div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
-
-      <div className={cn("grid gap-4 lg:grid-cols-2", isLoading && !data ? "hidden" : "")}>
+      <div className={cn("space-y-5", isLoading && !data ? "hidden" : "")}>
         <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="space-y-4 p-5">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
-                  <Archive className="size-4 text-stone-600" />
+          <CardContent className="flex flex-col gap-5 p-5 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 items-start gap-4">
+              <div className={cn("grid size-12 shrink-0 place-items-center rounded-xl", healthIconClassName(healthLevel))}>
+                {healthLevel === "normal" ? <CheckCircle2 className="size-6" /> : <AlertTriangle className="size-6" />}
+              </div>
+              <div className="min-w-0">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-semibold tracking-tight">系统健康概览</h2>
+                  <Badge variant={healthBadgeVariant(healthLevel)} className="rounded-md">
+                    {healthLabel(healthLevel)}
+                  </Badge>
                 </div>
-                <div>
-                  <h2 className="text-base font-semibold tracking-tight">备份状态</h2>
-                  <p className="text-xs text-stone-500">最近一次备份任务和对象信息</p>
+                <div className="flex flex-wrap gap-2">
+                  {healthReasons.map((reason) => (
+                    <span key={reason} className="rounded-md bg-stone-100 px-2.5 py-1 text-xs text-stone-600">
+                      {reason}
+                    </span>
+                  ))}
                 </div>
               </div>
-              <Badge variant={backupStatus === "异常" ? "danger" : "secondary"} className="rounded-md">
-                {summary.backup.running ? "运行中" : backupStatus}
-              </Badge>
             </div>
-            <div className="grid gap-3 text-sm sm:grid-cols-2">
-              <div className="rounded-xl bg-stone-50 px-4 py-3">
-                <div className="text-xs text-stone-400">启用状态</div>
-                <div className="mt-1 font-medium text-stone-700">
-                  {summary.backup.enabled === undefined ? "—" : summary.backup.enabled ? "已启用" : "未启用"}
+            <div className="shrink-0 rounded-xl bg-stone-50 px-4 py-3 text-sm text-stone-500">
+              <div className="text-xs text-stone-400">最后刷新</div>
+              <div className="mt-1 font-medium text-stone-700">{formatDateTime(summary.health?.refreshed_at)}</div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+          {metricCards.map((item) => {
+            const Icon = item.icon;
+            return (
+              <Card key={item.label} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+                <CardContent className="p-4">
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-stone-400">{item.label}</div>
+                      <div className="mt-1 text-xs text-stone-400">{item.hint}</div>
+                    </div>
+                    <Icon className="size-4 shrink-0 text-stone-400" />
+                  </div>
+                  <div className={cn("truncate text-[1.55rem] font-semibold tracking-tight", item.color)}>{item.value}</div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
+                    <KeyRound className="size-4 text-stone-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">账号池健康</h2>
+                    <p className="text-xs text-stone-500">账号状态、图片额度和可用性</p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button asChild variant="outline" size="sm" className="rounded-xl border-stone-200 bg-white">
+                    <Link href="/accounts">查看号池</Link>
+                  </Button>
+                  <Button asChild variant="outline" size="sm" className="rounded-xl border-stone-200 bg-white">
+                    <Link href="/accounts">刷新账号</Link>
+                  </Button>
                 </div>
               </div>
-              <div className="rounded-xl bg-stone-50 px-4 py-3">
-                <div className="text-xs text-stone-400">最近完成</div>
-                <div className="mt-1 font-medium text-stone-700">{formatDateTime(summary.backup.last_finished_at)}</div>
+              <div className="grid gap-3 text-sm sm:grid-cols-3">
+                {accountStats.map((item) => (
+                  <div key={item.label} className="rounded-xl bg-stone-50 px-4 py-3">
+                    <div className="text-xs text-stone-400">{item.label}</div>
+                    <div className="mt-1 font-medium text-stone-700">{item.value}</div>
+                  </div>
+                ))}
               </div>
-              <div className="rounded-xl bg-stone-50 px-4 py-3 sm:col-span-2">
-                <div className="text-xs text-stone-400">对象 Key</div>
-                <div className="mt-1 truncate font-mono text-xs text-stone-700">{summary.backup.last_object_key || "—"}</div>
-              </div>
-              {summary.backup.last_error ? (
-                <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-rose-700 sm:col-span-2">
-                  <div className="text-xs font-medium">最近错误</div>
-                  <div className="mt-1 break-words text-xs leading-5">{summary.backup.last_error}</div>
+              {summary.imageQuotaUnknown ? (
+                <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+                  存在图片额度未知账号，建议刷新号池后再判断容量。
                 </div>
               ) : null}
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
 
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="space-y-4 p-5">
-            <div className="flex items-center justify-between gap-3">
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
+                    <ImageIcon className="size-4 text-stone-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">生图链路</h2>
+                    <p className="text-xs text-stone-500">图片账号、图片调用和最近耗时</p>
+                  </div>
+                </div>
+                <Badge variant={summary.imageAvailable === 0 ? "danger" : summary.imageAvailable !== undefined && summary.imageAvailable <= 3 ? "warning" : "success"} className="rounded-md">
+                  可用 {formatNumber(summary.imageAvailable)}
+                </Badge>
+              </div>
+              <div className="grid gap-3 text-sm sm:grid-cols-3">
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">图片额度</div>
+                  <div className="mt-1 font-medium text-stone-700">{quotaLabel(summary.imageQuotaTotal, summary.imageQuotaUnknown)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">最近成功</div>
+                  <div className="mt-1 font-medium text-emerald-700">{hasImageStats ? formatNumber(summary.imageSuccess) : "暂无统计"}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">最近失败</div>
+                  <div className="mt-1 font-medium text-rose-600">{hasImageStats ? formatNumber(summary.imageFailed) : "暂无统计"}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">平均耗时</div>
+                  <div className="mt-1 font-medium text-stone-700">{hasImageStats ? formatDuration(summary.imageAvgDuration) : "暂无统计"}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3 sm:col-span-2">
+                  <div className="text-xs text-stone-400">最后图片调用</div>
+                  <div className="mt-1 font-medium text-stone-700">{hasImageStats ? formatDateTime(summary.imageLastAt) : "暂无统计"}</div>
+                </div>
+              </div>
+              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-stone-700">
+                    <ShieldCheck className="size-4 text-stone-400" />
+                    健康号池巡检
+                  </div>
+                  <Badge variant={summary.autoRegister?.enabled ? "success" : "secondary"} className="rounded-md">
+                    {summary.autoRegister?.enabled ? "已启用" : "未启用"}
+                  </Badge>
+                </div>
+                <div className="grid gap-2 text-xs text-stone-500 sm:grid-cols-4">
+                  <div>最低 {formatNumber(Number(summary.autoRegister?.min_available || 0) || undefined)}</div>
+                  <div>目标 {formatNumber(Number(summary.autoRegister?.target_available || 0) || undefined)}</div>
+                  <div>间隔 {formatNumber(Number(summary.autoRegister?.check_interval_seconds || 0) || undefined)} 秒</div>
+                  <div>冷却 {formatNumber(Number(summary.autoRegister?.cooldown_seconds || 0) || undefined)} 秒</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
+                    <Gauge className="size-4 text-stone-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">最近失败原因</h2>
+                    <p className="text-xs text-stone-500">最近调用失败 Top 5</p>
+                  </div>
+                </div>
+                <Button asChild variant="outline" size="sm" className="rounded-xl border-stone-200 bg-white">
+                  <Link href="/logs">查看日志</Link>
+                </Button>
+              </div>
+              {summary.failureReasons.length > 0 ? (
+                <div className="space-y-2">
+                  {summary.failureReasons.map((item: DashboardFailureReason, index: number) => (
+                    <div key={`${item.reason || "failure"}-${item.endpoint || index}`} className="flex flex-col gap-2 rounded-xl bg-stone-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant={index === 0 ? "warning" : "secondary"} className="rounded-md">
+                            {item.reason || "上游调用失败"}
+                          </Badge>
+                          <span className="text-xs text-stone-400">{compactEndpoint(item.endpoint)}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-stone-400">最近 {formatDateTime(item.last_at)}</div>
+                      </div>
+                      <div className="shrink-0 text-sm font-semibold text-stone-700">{formatNumber(item.count)} 次</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex min-h-32 items-center justify-center rounded-xl bg-stone-50 text-sm text-stone-400">
+                  最近没有失败记录
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-4 p-5">
               <div className="flex items-center gap-3">
                 <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
-                  <HardDrive className="size-4 text-stone-600" />
+                  <ListChecks className="size-4 text-stone-600" />
                 </div>
                 <div>
-                  <h2 className="text-base font-semibold tracking-tight">存储状态</h2>
-                  <p className="text-xs text-stone-500">本地/对象存储占用概览</p>
+                  <h2 className="text-base font-semibold tracking-tight">快捷操作</h2>
+                  <p className="text-xs text-stone-500">只提供安全跳转，不直接执行高风险操作</p>
                 </div>
               </div>
-              <Badge variant={storageStatus === "异常" ? "danger" : "secondary"} className="rounded-md">
-                {storageStatus}
-              </Badge>
-            </div>
-            <div className="grid gap-3 text-sm sm:grid-cols-2">
-              <div className="rounded-xl bg-stone-50 px-4 py-3">
-                <div className="text-xs text-stone-400">已用空间</div>
-                <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.used_bytes)}</div>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+                {quickActions.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className="flex h-11 items-center justify-between rounded-xl bg-stone-50 px-3 text-sm font-medium text-stone-700 transition hover:bg-stone-100 hover:text-stone-950"
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <Icon className="size-4 shrink-0 text-stone-400" />
+                        <span className="truncate">{item.label}</span>
+                      </span>
+                      <ArrowRight className="size-4 shrink-0 text-stone-400" />
+                    </Link>
+                  );
+                })}
               </div>
-              <div className="rounded-xl bg-stone-50 px-4 py-3">
-                <div className="text-xs text-stone-400">可用空间</div>
-                <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.free_bytes)}</div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
+                    <Archive className="size-4 text-stone-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">备份状态</h2>
+                    <p className="text-xs text-stone-500">最近一次备份任务和对象信息</p>
+                  </div>
+                </div>
+                <Badge variant={backupStatus === "异常" ? "danger" : "secondary"} className="rounded-md">
+                  {summary.backup.running ? "运行中" : backupStatus}
+                </Badge>
               </div>
-              <div className="rounded-xl bg-stone-50 px-4 py-3">
-                <div className="text-xs text-stone-400">图片占用</div>
-                <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.images_bytes)}</div>
+              <div className="grid gap-3 text-sm sm:grid-cols-2">
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">启用状态</div>
+                  <div className="mt-1 font-medium text-stone-700">
+                    {summary.backup.enabled === undefined ? "—" : summary.backup.enabled ? "已启用" : "未启用"}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">最近完成</div>
+                  <div className="mt-1 font-medium text-stone-700">{formatDateTime(summary.backup.last_finished_at)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3 sm:col-span-2">
+                  <div className="text-xs text-stone-400">对象 Key</div>
+                  <div className="mt-1 truncate font-mono text-xs text-stone-700">{summary.backup.last_object_key || "—"}</div>
+                </div>
+                {summary.backup.last_error ? (
+                  <div className="rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-rose-700 sm:col-span-2">
+                    <div className="text-xs font-medium">最近错误</div>
+                    <div className="mt-1 break-words text-xs leading-5">{summary.backup.last_error}</div>
+                  </div>
+                ) : null}
               </div>
-              <div className="rounded-xl bg-stone-50 px-4 py-3">
-                <div className="text-xs text-stone-400">备份占用</div>
-                <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.backups_bytes)}</div>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100">
+                    <HardDrive className="size-4 text-stone-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold tracking-tight">存储状态</h2>
+                    <p className="text-xs text-stone-500">本地/对象存储占用概览</p>
+                  </div>
+                </div>
+                <Badge variant={storageStatus === "异常" ? "danger" : "secondary"} className="rounded-md">
+                  {storageStatus}
+                </Badge>
               </div>
-              <div className="rounded-xl bg-stone-50 px-4 py-3 sm:col-span-2">
-                <div className="text-xs text-stone-400">后端</div>
-                <div className="mt-1 flex items-center gap-2 font-medium text-stone-700">
-                  <Database className="size-4 text-stone-400" />
-                  <span className="truncate">{storageBackendLabel(summary.storage)}</span>
+              <div className="grid gap-3 text-sm sm:grid-cols-2">
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">已用空间</div>
+                  <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.used_bytes)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">可用空间</div>
+                  <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.free_bytes)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">图片占用</div>
+                  <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.images_bytes)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">备份占用</div>
+                  <div className="mt-1 font-medium text-stone-700">{formatBytes(summary.storage.backups_bytes)}</div>
+                </div>
+                <div className="rounded-xl bg-stone-50 px-4 py-3 sm:col-span-2">
+                  <div className="text-xs text-stone-400">后端</div>
+                  <div className="mt-1 flex items-center gap-2 font-medium text-stone-700">
+                    <Database className="size-4 text-stone-400" />
+                    <span className="truncate">{storageBackendLabel(summary.storage)}</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </section>
   );

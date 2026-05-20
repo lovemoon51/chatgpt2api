@@ -13,6 +13,7 @@ from services.account_service import account_service
 from services.auth_audit_service import auth_audit_service, key_hint, source_hint
 from services.auth_service import auth_service
 from services.config import config
+from services.log_service import LOG_TYPE_ACCOUNT, log_service
 from services.usage_limit_service import UsageLimitError, usage_limit_service
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -285,6 +286,13 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
     return thread
 
 
+def _add_account_log(summary: str, detail: dict) -> None:
+    try:
+        log_service.add(LOG_TYPE_ACCOUNT, summary, detail)
+    except Exception:
+        pass
+
+
 def run_auto_register_check(
     last_triggered_at: float = 0.0,
     *,
@@ -305,21 +313,44 @@ def run_auto_register_check(
     min_available = int(settings.get("min_available") or 100)
     target_available = max(min_available, int(settings.get("target_available") or min_available))
     register_state = registrar.get()
-    if available >= min_available or register_state.get("enabled"):
+    current_time = time.time() if now is None else now
+    detail = {
+        "available": available,
+        "min_available": min_available,
+        "target_available": target_available,
+        "check_interval_seconds": int(settings.get("check_interval_seconds") or 30),
+        "cooldown_seconds": int(settings.get("cooldown_seconds") or 300),
+        "triggered": False,
+        "reason": "",
+    }
+    if available >= min_available:
+        detail["reason"] = "enough_available_accounts"
+        _add_account_log("图片健康号池巡检", detail)
+        return last_triggered_at, False
+    if register_state.get("enabled"):
+        detail["reason"] = "register_already_running"
+        _add_account_log("图片健康号池巡检", detail)
         return last_triggered_at, False
 
-    current_time = time.time() if now is None else now
     cooldown_seconds = int(settings.get("cooldown_seconds") or 300)
     if last_triggered_at and current_time - last_triggered_at < cooldown_seconds:
+        detail["reason"] = "cooldown"
+        detail["last_triggered_at"] = last_triggered_at
+        _add_account_log("图片健康号池巡检", detail)
         return last_triggered_at, False
 
     print(f"[auto-register-watcher] available={available}, target={target_available}, starting register")
+    total = max(1, target_available - available)
     registrar.update({
         "mode": "available",
         "target_available": target_available,
-        "total": max(1, target_available - available),
+        "total": total,
     })
     registrar.start()
+    detail["triggered"] = True
+    detail["reason"] = "below_min_available"
+    detail["total"] = total
+    _add_account_log("图片健康号池巡检触发补池", detail)
     return current_time, True
 
 
@@ -335,6 +366,7 @@ def start_auto_register_watcher(stop_event: Event) -> Thread:
                 last_triggered_at, _triggered = run_auto_register_check(last_triggered_at)
             except Exception as exc:
                 print(f"[auto-register-watcher] fail {exc}")
+                _add_account_log("图片健康号池巡检失败", {"error": str(exc), "triggered": False})
             stop_event.wait(int(config.get_auto_register_settings().get("check_interval_seconds") or 30))
 
     thread = Thread(target=worker, name="auto-register-watcher", daemon=True)

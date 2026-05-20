@@ -46,7 +46,7 @@ class AutoRegisterWatcherTests(unittest.TestCase):
                 "check_interval_seconds": 30,
                 "cooldown_seconds": 300,
             },
-        ):
+        ), mock.patch.object(support_module.log_service, "add") as add_log:
             last_triggered_at, triggered = support_module.run_auto_register_check(
                 0,
                 now=1000,
@@ -60,6 +60,9 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         self.assertEqual(registrar.updates[0]["mode"], "available")
         self.assertEqual(registrar.updates[0]["target_available"], 100)
         self.assertEqual(registrar.updates[0]["total"], 97)
+        self.assertEqual(add_log.call_args.args[0], support_module.LOG_TYPE_ACCOUNT)
+        self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检触发补池")
+        self.assertTrue(add_log.call_args.args[2]["triggered"])
 
     def test_does_not_start_during_cooldown_or_when_running(self) -> None:
         settings = {
@@ -69,7 +72,10 @@ class AutoRegisterWatcherTests(unittest.TestCase):
             "check_interval_seconds": 30,
             "cooldown_seconds": 300,
         }
-        with mock.patch.object(support_module.config, "get_auto_register_settings", return_value=settings):
+        with (
+            mock.patch.object(support_module.config, "get_auto_register_settings", return_value=settings),
+            mock.patch.object(support_module.log_service, "add") as add_log,
+        ):
             cooldown_registrar = FakeRegistrar(enabled=False)
             last_triggered_at, triggered = support_module.run_auto_register_check(
                 900,
@@ -90,6 +96,35 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         self.assertEqual(cooldown_registrar.started, 0)
         self.assertFalse(running_triggered)
         self.assertEqual(running_registrar.started, 0)
+        reasons = [call.args[2]["reason"] for call in add_log.call_args_list]
+        self.assertEqual(reasons, ["cooldown", "register_already_running"])
+
+    def test_logs_when_available_accounts_are_enough(self) -> None:
+        settings = {
+            "enabled": True,
+            "min_available": 100,
+            "target_available": 120,
+            "check_interval_seconds": 30,
+            "cooldown_seconds": 300,
+        }
+        registrar = FakeRegistrar(enabled=False)
+        with (
+            mock.patch.object(support_module.config, "get_auto_register_settings", return_value=settings),
+            mock.patch.object(support_module.log_service, "add") as add_log,
+        ):
+            last_triggered_at, triggered = support_module.run_auto_register_check(
+                0,
+                now=1000,
+                account_pool=FakeAccountPool(available=101),
+                registrar=registrar,
+            )
+
+        self.assertFalse(triggered)
+        self.assertEqual(last_triggered_at, 0)
+        self.assertEqual(registrar.started, 0)
+        self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检")
+        self.assertEqual(add_log.call_args.args[2]["reason"], "enough_available_accounts")
+        self.assertEqual(add_log.call_args.args[2]["available"], 101)
 
 
 if __name__ == "__main__":

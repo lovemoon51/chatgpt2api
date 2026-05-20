@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import webConfig from "@/constants/common-env";
 import {
   createImageEditTask,
   createImageGenerationTask,
@@ -41,6 +42,7 @@ import {
   type StoredImage,
   type StoredReferenceImage,
 } from "@/store/image-conversations";
+import { getStoredAuthKey } from "@/store/auth";
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
@@ -95,13 +97,53 @@ function readFileAsDataUrl(file: File) {
 
 function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
   const [header, content] = dataUrl.split(",", 2);
+  if (!header.startsWith("data:") || !content) {
+    throw new Error("读取结果图失败");
+  }
   const matchedMimeType = header.match(/data:(.*?);base64/)?.[1];
-  const binary = atob(content || "");
+  const binary = atob(content);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
+}
+
+function getApiBaseUrl() {
+  const configured = webConfig.apiUrl.replace(/\/$/, "");
+  if (configured) {
+    return configured;
+  }
+  return typeof window === "undefined" ? "" : window.location.origin;
+}
+
+function appendUnique(items: string[], value: string) {
+  if (value && !items.includes(value)) {
+    items.push(value);
+  }
+}
+
+function getImageFetchCandidates(rawUrl: string) {
+  const candidates: string[] = [];
+  const apiBaseUrl = getApiBaseUrl();
+  const pageBaseUrl = typeof window === "undefined" ? apiBaseUrl : window.location.href;
+
+  try {
+    const parsed = new URL(rawUrl, pageBaseUrl || undefined);
+    const pathAndSearch = `${parsed.pathname}${parsed.search}`;
+    if (apiBaseUrl && (parsed.pathname.startsWith("/images/") || parsed.pathname.startsWith("/api/images/download/"))) {
+      appendUnique(candidates, `${apiBaseUrl}${pathAndSearch}`);
+    }
+    if (apiBaseUrl && parsed.pathname.startsWith("/images/")) {
+      const relativeImagePath = parsed.pathname.slice("/images/".length);
+      appendUnique(candidates, `${apiBaseUrl}/api/images/download/${relativeImagePath}`);
+    }
+  } catch {
+    // Keep the original value below; fetch will surface a useful failure.
+  }
+
+  appendUnique(candidates, rawUrl);
+  return candidates;
 }
 
 function buildReferenceImageFromResult(image: StoredImage, fileName: string): StoredReferenceImage | null {
@@ -117,12 +159,27 @@ function buildReferenceImageFromResult(image: StoredImage, fileName: string): St
 }
 
 async function fetchImageAsFile(url: string, fileName: string) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("读取结果图失败");
+  const authKey = await getStoredAuthKey();
+
+  for (const candidate of getImageFetchCandidates(url)) {
+    try {
+      const parsed = new URL(candidate, getApiBaseUrl() || (typeof window === "undefined" ? undefined : window.location.href));
+      const headers: HeadersInit = {};
+      if (authKey && parsed.pathname.startsWith("/api/images/download/")) {
+        headers.Authorization = `Bearer ${authKey}`;
+      }
+      const response = await fetch(candidate, { headers });
+      if (!response.ok) {
+        continue;
+      }
+      const blob = await response.blob();
+      return new File([blob], fileName, { type: blob.type || "image/png" });
+    } catch {
+      // Try the next candidate; older history may point at a stale host.
+    }
   }
-  const blob = await response.blob();
-  return new File([blob], fileName, { type: blob.type || "image/png" });
+
+  throw new Error("读取结果图失败，请刷新页面后再试");
 }
 
 async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
@@ -136,6 +193,17 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
 
   if (!image.url) {
     return null;
+  }
+  if (image.url.startsWith("data:")) {
+    const file = dataUrlToFile(image.url, fileName);
+    return {
+      referenceImage: {
+        name: file.name,
+        type: file.type || "image/png",
+        dataUrl: image.url,
+      },
+      file,
+    };
   }
   const file = await fetchImageAsFile(image.url, fileName);
   return {

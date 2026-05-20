@@ -47,8 +47,17 @@ class FakeAccountService:
 class FakeLogService:
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200):
         return [
-            {"time": "2026-05-19 10:00:00", "type": "call", "detail": {"status": "success", "duration_ms": 120}},
-            {"time": "2026-05-19 09:59:00", "type": "text", "detail": {"status": "failed", "duration_ms": 360}},
+            {
+                "time": "2026-05-19 10:00:00",
+                "type": "call",
+                "summary": "文生图调用完成",
+                "detail": {"endpoint": "/v1/images/generations", "status": "success", "duration_ms": 120},
+            },
+            {
+                "time": "2026-05-19 09:59:00",
+                "type": "text",
+                "detail": {"endpoint": "/v1/chat/completions", "status": "failed", "duration_ms": 360, "error": "timeout"},
+            },
             {"time": "2026-05-19 09:58:00", "type": "account", "detail": {"status": "success"}},
         ]
 
@@ -115,12 +124,39 @@ class SystemStatusApiTests(unittest.TestCase):
         self.assertEqual(payload["accounts"]["error"], 1)
         self.assertEqual(payload["accounts"]["disabled"], 1)
         self.assertTrue(payload["accounts"]["image_quota"]["unknown"])
+        self.assertEqual(payload["accounts"]["image_available"], 2)
         self.assertEqual(payload["calls"]["total"], 2)
         self.assertEqual(payload["calls"]["success"], 1)
         self.assertEqual(payload["calls"]["failed"], 1)
         self.assertEqual(payload["calls"]["average_duration_ms"], 240)
+        self.assertEqual(payload["calls"]["image"]["total"], 1)
+        self.assertEqual(payload["calls"]["image"]["success"], 1)
+        self.assertEqual(payload["calls"]["failure_reasons"][0]["reason"], "请求超时")
+        self.assertEqual(payload["health"]["level"], "warning")
+        self.assertIn("可用图片账号偏低", payload["health"]["reasons"][0])
         self.assertTrue(payload["backup"]["enabled"])
         self.assertTrue(payload["storage"]["ok"])
+
+    def test_dashboard_health_reports_critical_when_no_image_accounts(self):
+        class EmptyImageAccountService:
+            def list_accounts(self):
+                return [{"access_token": "token-1", "status": "正常", "quota": 0, "image_quota_unknown": False}]
+
+        with (
+            mock.patch.object(system_module, "require_admin", lambda _authorization: {"role": "admin"}),
+            mock.patch.object(system_module, "config", FakeConfig(FakeStorage(healthy=True))),
+            mock.patch.object(system_module, "account_service", EmptyImageAccountService()),
+            mock.patch.object(system_module, "log_service", FakeLogService()),
+            mock.patch.object(system_module, "backup_service", FakeBackupService()),
+        ):
+            response = self.client.get("/api/dashboard", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["accounts"]["available"], 1)
+        self.assertEqual(payload["accounts"]["image_available"], 0)
+        self.assertEqual(payload["health"]["level"], "critical")
+        self.assertIn("当前无可用图片账号", payload["health"]["reasons"])
 
 
 if __name__ == "__main__":

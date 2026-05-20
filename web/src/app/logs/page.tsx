@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -29,8 +30,8 @@ const typeLabels: Record<string, string> = {
   [LogType.Account]: "账号管理日志",
 };
 
-const textLogEndpoints = new Set(["/v1/chat/completions", "/v1/responses", "/v1/messages"]);
-const textLogSummaryPrefixes = ["文本生成", "Responses", "Messages"];
+const textLogEndpoints = new Set(["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"]);
+const textLogSummaryPrefixes = ["文本生成", "Responses", "Messages", "Embeddings"];
 
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
@@ -40,6 +41,14 @@ function getDetailText(item: SystemLog, key: string) {
 function formatDuration(item: SystemLog) {
   const value = item.detail?.duration_ms;
   return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
+}
+
+function formatSummary(item: SystemLog) {
+  const summary = item.summary || "-";
+  if (item.type === LogType.Account && typeof item.detail?.duration_ms === "number") {
+    return summary.replace(/，耗时\s*\d+(?:\.\d+)?\s*s$/, "");
+  }
+  return summary;
 }
 
 function getUrls(item: SystemLog | null) {
@@ -97,6 +106,7 @@ function LogsContent() {
   const isCallLog = type === LogType.Call;
   const isTextLog = type === LogType.Text;
   const hasCallMeta = isCallLog || isTextLog;
+  const showDuration = hasCallMeta || type === LogType.Account;
   const showImages = isCallLog;
   const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
@@ -229,14 +239,14 @@ function LogsContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[980px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
                   <TableHead>时间</TableHead>
                   <TableHead>类型</TableHead>
                   {hasCallMeta ? <TableHead>令牌名称</TableHead> : null}
-                  {hasCallMeta ? <TableHead>调用耗时</TableHead> : null}
+                  {showDuration ? <TableHead>接口耗时</TableHead> : null}
                   {hasCallMeta ? <TableHead>状态</TableHead> : null}
                   {hasCallMeta ? <TableHead>模型</TableHead> : null}
                   {showImages ? <TableHead className="w-36">图片</TableHead> : null}
@@ -255,7 +265,7 @@ function LogsContent() {
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {hasCallMeta ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
-                      {hasCallMeta ? <TableCell>{formatDuration(item)}</TableCell> : null}
+                      {showDuration ? <TableCell className="whitespace-nowrap tabular-nums">{formatDuration(item)}</TableCell> : null}
                       {hasCallMeta ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
@@ -289,7 +299,7 @@ function LogsContent() {
                           )}
                         </TableCell>
                       ) : null}
-                      <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
+                      <TableCell className="max-w-[420px] truncate text-stone-500">{formatSummary(item)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
@@ -347,7 +357,7 @@ function LogsContent() {
                         setLightboxOpen(true);
                       }}
                     >
-                      <img src={url} alt="" className="h-full w-full object-cover" />
+                      <AuthenticatedImage src={url} alt="" className="h-full w-full object-cover" />
                     </button>
                   ))}
                 </div>

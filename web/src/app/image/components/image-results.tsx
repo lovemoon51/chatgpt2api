@@ -3,7 +3,9 @@
 import { useState } from "react";
 import { Clock3, Download, LoaderCircle, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
+import { downloadImageUrl } from "@/lib/image-fetch";
 import { cn } from "@/lib/utils";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
@@ -41,8 +43,8 @@ async function downloadStoredImage(image: StoredImage, index: number) {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     blob = new Blob([bytes], { type: "image/png" });
   } else if (image.url) {
-    const res = await fetch(image.url);
-    blob = await res.blob();
+    await downloadImageUrl(image.url, `image-${index + 1}.png`);
+    return;
   } else {
     return;
   }
@@ -223,7 +225,7 @@ export function ImageResults({
                               onClick={() => onOpenLightbox(successfulTurnImages, currentIndex)}
                               className="group block aspect-square w-full cursor-zoom-in overflow-hidden rounded-xl sm:aspect-auto"
                             >
-                              <img
+                              <AuthenticatedImage
                                 src={imageSrc}
                                 alt={`Generated result ${index + 1}`}
                                 className="block h-full w-full object-cover transition duration-200 group-hover:brightness-90 sm:h-auto sm:object-contain"

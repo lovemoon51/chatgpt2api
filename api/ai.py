@@ -127,6 +127,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
+        payload["owner_identity"] = identity
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
         with usage_limited_call(identity, "/v1/images/generations", body.model, "image") as release_limit:
             await filter_or_log(call, body.prompt)
@@ -175,6 +176,7 @@ def create_router() -> APIRouter:
                 "response_format": response_format,
                 "stream": stream,
                 "base_url": resolve_image_base_url(request),
+                "owner_identity": identity,
             }
             response = await call.run(openai_v1_image_edit.handle, payload)
             return release_usage_limit_after_response(response, release_limit)
@@ -183,6 +185,7 @@ def create_router() -> APIRouter:
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        payload["owner_identity"] = identity
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
         call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成", request_text=request_preview)
@@ -195,6 +198,7 @@ def create_router() -> APIRouter:
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        payload["owner_identity"] = identity
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
         call = LoggedCall(identity, "/v1/responses", model, "Responses", request_text=request_preview)

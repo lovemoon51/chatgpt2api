@@ -119,6 +119,7 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "owner_identity": dict(identity),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -141,6 +142,7 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "owner_identity": dict(identity),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 

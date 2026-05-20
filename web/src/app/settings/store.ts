@@ -21,6 +21,7 @@ import {
   updateCPAPool,
   updateRegisterConfig,
   updateSettingsConfig,
+  type AutoRegisterSettings,
   type BackupItem,
   type BackupSettings,
   type BackupState,
@@ -35,6 +36,15 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
+  const autoRegister = typeof config.auto_register === "object" && config.auto_register
+    ? config.auto_register as AutoRegisterSettings
+    : {
+      enabled: true,
+      min_available: 100,
+      target_available: 100,
+      check_interval_seconds: 30,
+      cooldown_seconds: 300,
+    };
   const backup = typeof config.backup === "object" && config.backup
     ? config.backup as BackupSettings
     : {
@@ -104,6 +114,13 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         auth_keys_snapshot: Boolean(backup.include?.auth_keys_snapshot ?? true),
         images: Boolean(backup.include?.images ?? false),
       },
+    },
+    auto_register: {
+      enabled: Boolean(autoRegister.enabled),
+      min_available: Number(autoRegister.min_available || 100),
+      target_available: Number(autoRegister.target_available || 100),
+      check_interval_seconds: Number(autoRegister.check_interval_seconds || 30),
+      cooldown_seconds: Number(autoRegister.cooldown_seconds || 300),
     },
   };
 }
@@ -210,6 +227,7 @@ type SettingsStore = {
   setGlobalSystemPrompt: (value: string) => void;
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
+  setAutoRegisterField: (key: keyof AutoRegisterSettings, value: string | boolean) => void;
   setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
   setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
 
@@ -347,6 +365,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           model: String(config.ai_review?.model || "").trim(),
           prompt: String(config.ai_review?.prompt || "").trim(),
         },
+        auto_register: {
+          enabled: Boolean(config.auto_register?.enabled),
+          min_available: Math.max(1, Number(config.auto_register?.min_available) || 100),
+          target_available: Math.max(1, Number(config.auto_register?.target_available) || 100),
+          check_interval_seconds: Math.max(5, Number(config.auto_register?.check_interval_seconds) || 30),
+          cooldown_seconds: Math.max(30, Number(config.auto_register?.cooldown_seconds) || 300),
+        },
         backup: {
           ...(config.backup as BackupSettings),
           account_id: String(config.backup?.account_id || "").trim(),
@@ -454,6 +479,30 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setAIReviewField: (key, value) => {
     set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } } } : {});
+  },
+
+  setAutoRegisterField: (key, value) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      const current = state.config.auto_register || {
+        enabled: true,
+        min_available: 100,
+        target_available: 100,
+        check_interval_seconds: 30,
+        cooldown_seconds: 300,
+      };
+      return {
+        config: {
+          ...state.config,
+          auto_register: {
+            ...current,
+            [key]: value,
+          },
+        },
+      };
+    });
   },
 
   setBackupField: (key, value) => {

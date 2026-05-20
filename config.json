@@ -53,5 +53,9 @@
     "target_available": 100,
     "check_interval_seconds": 30,
     "cooldown_seconds": 300
-  }
+  },
+  "refresh_account_workers": 4,
+  "refresh_account_batch_size": 8,
+  "refresh_account_batch_interval_seconds": 0.3,
+  "refresh_account_fast_path_threshold": 3
 }

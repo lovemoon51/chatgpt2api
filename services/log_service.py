@@ -23,8 +23,8 @@ LOG_TYPE_CALL = "call"
 LOG_TYPE_TEXT = "text"
 LOG_TYPE_ACCOUNT = "account"
 
-TEXT_LOG_ENDPOINTS = {"/v1/chat/completions", "/v1/responses", "/v1/messages"}
-TEXT_LOG_SUMMARIES = ("文本生成", "Responses", "Messages")
+TEXT_LOG_ENDPOINTS = {"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"}
+TEXT_LOG_SUMMARIES = ("文本生成", "Responses", "Messages", "Embeddings")
 DEFAULT_LOG_RETENTION_MAX_ENTRIES = 5000
 LOG_RETENTION_CONFIG_KEY = "log_retention_max_entries"
 LOG_RETENTION_ENV_KEY = "CHATGPT2API_LOG_RETENTION_MAX_ENTRIES"

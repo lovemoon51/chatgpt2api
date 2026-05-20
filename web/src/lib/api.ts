@@ -1,3 +1,5 @@
+import webConfig from "@/constants/common-env";
+import { getStoredAuthKey } from "@/store/auth";
 import { httpRequest, request } from "@/lib/request";
 
 export type AccountType = string;
@@ -89,7 +91,16 @@ export type SettingsConfig = {
   log_levels?: string[];
   backup?: BackupSettings;
   backup_state?: BackupState;
+  auto_register?: AutoRegisterSettings;
   [key: string]: unknown;
+};
+
+export type AutoRegisterSettings = {
+  enabled: boolean;
+  min_available: number | string;
+  target_available: number | string;
+  check_interval_seconds: number | string;
+  cooldown_seconds: number | string;
 };
 
 export type BackupInclude = {
@@ -278,6 +289,10 @@ export type DashboardMetricGroup = {
   active?: number;
   normal?: number;
   available?: number;
+  image_available?: number;
+  limited?: number;
+  disabled?: number;
+  unavailable?: number;
   success?: number;
   failed?: number;
   fail?: number;
@@ -285,6 +300,12 @@ export type DashboardMetricGroup = {
   avg_duration_ms?: number;
   avg_latency_ms?: number;
   average_duration_ms?: number;
+  last_at?: string | null;
+  status_counts?: Record<string, number>;
+  image_quota?: {
+    total?: number | null;
+    unknown?: boolean;
+  };
   [key: string]: unknown;
 };
 
@@ -293,6 +314,13 @@ export type DashboardResponse = {
   calls?: DashboardMetricGroup & {
     today?: DashboardMetricGroup;
     recent?: DashboardMetricGroup;
+    image?: DashboardMetricGroup;
+    failure_reasons?: Array<{
+      reason?: string;
+      endpoint?: string;
+      count?: number;
+      last_at?: string | null;
+    }>;
   };
   backup?: DashboardMetricGroup & {
     enabled?: boolean;
@@ -316,6 +344,12 @@ export type DashboardResponse = {
     provider?: string;
     bucket?: string;
     status?: string;
+  };
+  auto_register?: AutoRegisterSettings;
+  health?: {
+    level?: "normal" | "warning" | "critical" | string;
+    reasons?: string[];
+    refreshed_at?: string;
   };
   [key: string]: unknown;
 };
@@ -471,6 +505,147 @@ export async function refreshAccounts(accessTokens: string[], options: AccountRe
     method: "POST",
     body: { access_tokens: accessTokens, ...(options.scope ? { scope: options.scope } : {}) },
   });
+}
+
+export type AccountRefreshStreamEvent =
+  | {
+      type: "start";
+      requested: number;
+      batches: number;
+      batch_size: number;
+      workers: number;
+      interval_seconds: number;
+    }
+  | {
+      type: "account";
+      token: string;
+      outcome: "succeeded" | "failed" | "invalid";
+      completed: number;
+      requested: number;
+      index: number;
+      total_batches: number;
+      error?: string;
+    }
+  | {
+      type: "batch";
+      index: number;
+      total_batches: number;
+      requested: number;
+      completed: number;
+      refreshed: number;
+      removed_failed: number;
+      removed_rate_limited: number;
+      removed_tokens: string[];
+      errors: Array<{ token?: string; error: string }>;
+      items: Account[];
+    }
+  | {
+      type: "done";
+      refreshed: number;
+      removed_failed: number;
+      removed_rate_limited: number;
+      errors: Array<{ token?: string; error: string }>;
+      items: Account[];
+      requested: number;
+      completed: number;
+      duration_ms: number;
+    }
+  | {
+      type: "error";
+      error: string;
+    };
+
+export type AccountRefreshStreamOptions = AccountRefreshOptions & {
+  signal?: AbortSignal;
+  onEvent?: (event: AccountRefreshStreamEvent) => void;
+};
+
+export async function refreshAccountsStream(
+  accessTokens: string[],
+  options: AccountRefreshStreamOptions = {},
+) {
+  const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
+  const authKey = await getStoredAuthKey();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/x-ndjson",
+  };
+  if (authKey) {
+    headers.Authorization = `Bearer ${authKey}`;
+  }
+
+  const response = await fetch(`${baseUrl}/api/accounts/refresh`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      access_tokens: accessTokens,
+      ...(options.scope ? { scope: options.scope } : {}),
+      stream: true,
+    }),
+    signal: options.signal,
+  });
+
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `刷新账号失败 (${response.status})`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  type DoneEvent = Extract<AccountRefreshStreamEvent, { type: "done" }>;
+  let lastDone: DoneEvent | null = null as DoneEvent | null;
+
+  const handleLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    let event: AccountRefreshStreamEvent;
+    try {
+      event = JSON.parse(trimmed) as AccountRefreshStreamEvent;
+    } catch {
+      return;
+    }
+    if (event.type === "done") {
+      lastDone = event;
+    }
+    if (event.type === "error") {
+      throw new Error(event.error || "刷新账号失败");
+    }
+    options.onEvent?.(event);
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) {
+        buffer += decoder.decode(value, { stream: true });
+        let newlineIndex = buffer.indexOf("\n");
+        while (newlineIndex >= 0) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          handleLine(line);
+          newlineIndex = buffer.indexOf("\n");
+        }
+      }
+      if (done) {
+        break;
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+
+  if (buffer.trim()) {
+    handleLine(buffer);
+  }
+
+  return lastDone;
 }
 
 export async function updateAccount(

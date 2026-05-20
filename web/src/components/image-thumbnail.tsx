@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { cn } from "@/lib/utils";
 
 type ImageThumbnailProps = {
@@ -29,8 +30,9 @@ export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageCl
 
   return (
     <span className={cn("block overflow-hidden bg-stone-100", className)}>
-      <img
+      <AuthenticatedImage
         src={currentSrc}
+        fallbackSrc={src}
         alt={alt}
         className={cn("h-full w-full object-cover", imageClassName)}
         loading="lazy"

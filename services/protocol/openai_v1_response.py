@@ -199,12 +199,14 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         images = encode_images([(image_data, "image.png", mime_type)])
     else:
         images = None
+    owner_identity = body.get("owner_identity") if isinstance(body.get("owner_identity"), dict) else None
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         size=None if images else "1:1",
         response_format="b64_json",
         images=images,
+        owner_identity=owner_identity,
     ))
     yield from stream_image_response(image_outputs, prompt, model)
 

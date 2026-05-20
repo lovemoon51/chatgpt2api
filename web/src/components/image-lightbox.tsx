@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, X } from "lucide-react";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
+import { downloadImageUrl } from "@/lib/image-fetch";
 import { cn } from "@/lib/utils";
 
 type LightboxImage = {
@@ -186,12 +188,9 @@ export function ImageLightbox({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, goPrev, goNext]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownload = useCallback(async () => {
     if (!current) return;
-    const link = document.createElement("a");
-    link.href = current.src;
-    link.download = `image-${current.id}.png`;
-    link.click();
+    await downloadImageUrl(current.src, `image-${current.id}.png`);
   }, [current]);
 
   const toggleZoom = useCallback(() => {
@@ -401,7 +400,7 @@ export function ImageLightbox({
             onTouchEnd={handleTouchEnd}
             onTouchCancel={handleTouchCancel}
           >
-            <img
+            <AuthenticatedImage
               src={current.src}
               alt=""
               className={cn(

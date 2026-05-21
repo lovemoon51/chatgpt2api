@@ -249,6 +249,11 @@ export type ImageTask = {
   size?: string;
   created_at: string;
   updated_at: string;
+  queued_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
+  queue_duration_ms?: number;
   data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
   error?: string;
 };
@@ -771,7 +776,7 @@ export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
 }
 
-export async function updateSettingsConfig(settings: SettingsConfig) {
+export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {
   return httpRequest<{ config: SettingsConfig }>("/api/settings", {
     method: "POST",
     body: settings,

@@ -20,6 +20,14 @@ export type StoredImage = {
   url?: string;
   revised_prompt?: string;
   error?: string;
+  queued_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
+  queue_duration_ms?: number;
+  reveal_started_at?: string;
+  reveal_finished_at?: string;
+  reveal_duration_ms?: number;
 };
 
 export type ImageTurnStatus = "queued" | "generating" | "success" | "error";
@@ -67,6 +75,14 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
     url: typeof image.url === "string" && image.url ? image.url : undefined,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
+    queued_at: typeof image.queued_at === "string" ? image.queued_at : undefined,
+    started_at: typeof image.started_at === "string" ? image.started_at : undefined,
+    finished_at: typeof image.finished_at === "string" ? image.finished_at : undefined,
+    duration_ms: typeof image.duration_ms === "number" ? Math.max(0, image.duration_ms) : undefined,
+    queue_duration_ms: typeof image.queue_duration_ms === "number" ? Math.max(0, image.queue_duration_ms) : undefined,
+    reveal_started_at: typeof image.reveal_started_at === "string" ? image.reveal_started_at : undefined,
+    reveal_finished_at: typeof image.reveal_finished_at === "string" ? image.reveal_finished_at : undefined,
+    reveal_duration_ms: typeof image.reveal_duration_ms === "number" ? Math.max(0, image.reveal_duration_ms) : undefined,
   };
   if (image.status === "loading" || image.status === "error" || image.status === "success") {
     return normalized;

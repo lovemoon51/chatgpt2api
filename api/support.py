@@ -18,6 +18,7 @@ from services.usage_limit_service import UsageLimitError, usage_limit_service
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+REFRESH_ALL_ACCOUNTS_LOG_TITLE = "一键刷新所有账号信息和额度"
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -293,6 +294,20 @@ def _add_account_log(summary: str, detail: dict) -> None:
         pass
 
 
+def refresh_all_accounts_for_watcher(account_pool=None) -> dict[str, object]:
+    if account_pool is None:
+        from services.account_service import account_service as account_pool
+    tokens = account_pool.list_tokens()
+    if not tokens:
+        list_accounts = getattr(account_pool, "list_accounts", None)
+        return {
+            "refreshed": 0,
+            "errors": [],
+            "items": list_accounts() if callable(list_accounts) else [],
+        }
+    return account_pool.refresh_accounts(tokens, REFRESH_ALL_ACCOUNTS_LOG_TITLE)
+
+
 def run_auto_register_check(
     last_triggered_at: float = 0.0,
     *,
@@ -309,8 +324,9 @@ def run_auto_register_check(
     if registrar is None:
         from services.register_service import register_service as registrar
 
+    refresh_result = refresh_all_accounts_for_watcher(account_pool)
     available = int(account_pool.available_account_count())
-    min_available = int(settings.get("min_available") or 100)
+    min_available = int(settings.get("min_available") or 50)
     target_available = max(min_available, int(settings.get("target_available") or min_available))
     register_state = registrar.get()
     current_time = time.time() if now is None else now
@@ -320,6 +336,10 @@ def run_auto_register_check(
         "target_available": target_available,
         "check_interval_seconds": int(settings.get("check_interval_seconds") or 30),
         "cooldown_seconds": int(settings.get("cooldown_seconds") or 300),
+        "refresh": {
+            "refreshed": int(refresh_result.get("refreshed") or 0) if isinstance(refresh_result, dict) else 0,
+            "errors": len(refresh_result.get("errors") or []) if isinstance(refresh_result, dict) else 0,
+        },
         "triggered": False,
         "reason": "",
     }

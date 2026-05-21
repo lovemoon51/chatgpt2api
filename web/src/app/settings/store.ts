@@ -31,20 +31,13 @@ import {
   type SettingsConfig,
 } from "@/lib/api";
 
+import { buildAutoRegisterSettingsPatch, normalizeAutoRegisterSettings } from "./auto-register-settings";
+
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
-  const autoRegister = typeof config.auto_register === "object" && config.auto_register
-    ? config.auto_register as AutoRegisterSettings
-    : {
-      enabled: true,
-      min_available: 100,
-      target_available: 100,
-      check_interval_seconds: 30,
-      cooldown_seconds: 300,
-    };
   const backup = typeof config.backup === "object" && config.backup
     ? config.backup as BackupSettings
     : {
@@ -115,13 +108,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         images: Boolean(backup.include?.images ?? false),
       },
     },
-    auto_register: {
-      enabled: Boolean(autoRegister.enabled),
-      min_available: Number(autoRegister.min_available || 100),
-      target_available: Number(autoRegister.target_available || 100),
-      check_interval_seconds: Number(autoRegister.check_interval_seconds || 30),
-      cooldown_seconds: Number(autoRegister.cooldown_seconds || 300),
-    },
+    auto_register: normalizeAutoRegisterSettings(config.auto_register),
   };
 }
 
@@ -175,6 +162,7 @@ type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
+  isSavingAutoRegister: boolean;
   backups: BackupItem[];
   backupState: BackupState | null;
   isLoadingBackups: boolean;
@@ -211,6 +199,7 @@ type SettingsStore = {
   initialize: () => Promise<void>;
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<boolean>;
+  saveAutoRegister: () => Promise<boolean>;
   loadBackups: (silent?: boolean) => Promise<void>;
   runBackup: () => Promise<void>;
   removeBackup: (key: string) => Promise<void>;
@@ -274,6 +263,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
+  isSavingAutoRegister: false,
   backups: [],
   backupState: null,
   isLoadingBackups: true,
@@ -367,8 +357,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         },
         auto_register: {
           enabled: Boolean(config.auto_register?.enabled),
-          min_available: Math.max(1, Number(config.auto_register?.min_available) || 100),
-          target_available: Math.max(1, Number(config.auto_register?.target_available) || 100),
+          min_available: Math.max(1, Number(config.auto_register?.min_available) || 50),
+          target_available: Math.max(1, Number(config.auto_register?.target_available) || 50),
           check_interval_seconds: Math.max(5, Number(config.auto_register?.check_interval_seconds) || 30),
           cooldown_seconds: Math.max(30, Number(config.auto_register?.cooldown_seconds) || 300),
         },
@@ -394,6 +384,32 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       return false;
     } finally {
       set({ isSavingConfig: false });
+    }
+  },
+
+  saveAutoRegister: async () => {
+    const { config } = get();
+    if (!config) {
+      return false;
+    }
+
+    set({ isSavingAutoRegister: true });
+    try {
+      const data = await updateSettingsConfig(buildAutoRegisterSettingsPatch(config.auto_register));
+      const savedAutoRegister = normalizeAutoRegisterSettings(data.config.auto_register);
+      set((state) => state.config ? {
+        config: {
+          ...state.config,
+          auto_register: savedAutoRegister,
+        },
+      } : { config: normalizeConfig(data.config) });
+      toast.success("巡检配置已保存");
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存巡检配置失败");
+      return false;
+    } finally {
+      set({ isSavingAutoRegister: false });
     }
   },
 
@@ -488,8 +504,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       }
       const current = state.config.auto_register || {
         enabled: true,
-        min_available: 100,
-        target_available: 100,
+        min_available: 50,
+        target_available: 50,
         check_interval_seconds: 30,
         cooldown_seconds: 300,
       };

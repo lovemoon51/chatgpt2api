@@ -29,8 +29,8 @@ DEFAULT_BACKUP_INCLUDE = {
 
 DEFAULT_AUTO_REGISTER_SETTINGS = {
     "enabled": True,
-    "min_available": 100,
-    "target_available": 100,
+    "min_available": 50,
+    "target_available": 50,
     "check_interval_seconds": 30,
     "cooldown_seconds": 300,
 }

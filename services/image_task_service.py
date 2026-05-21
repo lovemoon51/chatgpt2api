@@ -72,6 +72,9 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
     }
+    for key in ("queued_at", "started_at", "finished_at", "duration_ms", "queue_duration_ms"):
+        if task.get(key) is not None:
+            item[key] = task.get(key)
     if task.get("data") is not None:
         item["data"] = task.get("data")
     if task.get("error"):
@@ -201,6 +204,7 @@ class ImageTaskService:
                 "size": _clean(payload.get("size")),
                 "created_at": now,
                 "updated_at": now,
+                "queued_at": now,
             }
             self._tasks[key] = task
             self._save_locked()
@@ -225,7 +229,18 @@ class ImageTaskService:
         model: str,
     ) -> None:
         started = time.time()
-        self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+        started_at = _now_iso()
+        with self._lock:
+            task = self._tasks.get(key)
+            queued_timestamp = _timestamp(task.get("queued_at") or task.get("created_at")) if task else 0.0
+        queue_duration_ms = max(0, int((started - queued_timestamp) * 1000)) if queued_timestamp else 0
+        self._update_task(
+            key,
+            status=TASK_STATUS_RUNNING,
+            error="",
+            started_at=started_at,
+            queue_duration_ms=queue_duration_ms,
+        )
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             result = handler(payload)
@@ -235,7 +250,14 @@ class ImageTaskService:
             if not isinstance(data, list) or not data:
                 message = _clean(result.get("message")) or no_image_result_message()
                 raise RuntimeError(message)
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            self._update_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                data=data,
+                error="",
+                finished_at=_now_iso(),
+                duration_ms=max(0, int((time.time() - started) * 1000)),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -247,7 +269,14 @@ class ImageTaskService:
             )
         except Exception as exc:
             error_message = str(exc) or "image task failed"
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
+            self._update_task(
+                key,
+                status=TASK_STATUS_ERROR,
+                error=error_message,
+                data=[],
+                finished_at=_now_iso(),
+                duration_ms=max(0, int((time.time() - started) * 1000)),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -336,6 +365,14 @@ class ImageTaskService:
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
+            for key in ("queued_at", "started_at", "finished_at"):
+                value = _clean(item.get(key))
+                if value:
+                    task[key] = value
+            for key in ("duration_ms", "queue_duration_ms"):
+                value = item.get(key)
+                if isinstance(value, int):
+                    task[key] = max(0, value)
             data = item.get("data")
             if isinstance(data, list):
                 task["data"] = data

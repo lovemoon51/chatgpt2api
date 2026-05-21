@@ -256,8 +256,8 @@ def auto_register_summary(config: Any) -> dict[str, Any]:
         settings = {}
     return {
         "enabled": bool(settings.get("enabled")),
-        "min_available": int(settings.get("min_available") or 100),
-        "target_available": int(settings.get("target_available") or settings.get("min_available") or 100),
+        "min_available": int(settings.get("min_available") or 50),
+        "target_available": int(settings.get("target_available") or settings.get("min_available") or 50),
         "check_interval_seconds": int(settings.get("check_interval_seconds") or 30),
         "cooldown_seconds": int(settings.get("cooldown_seconds") or 300),
     }

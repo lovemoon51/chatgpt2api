@@ -68,6 +68,28 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(task["data"][0]["url"], "http://example.test/image.png")
             self.assertEqual(calls, 1)
 
+    def test_success_task_reports_timing_breakdown(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            service.submit_generation(
+                OWNER,
+                client_task_id="timed-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            task = wait_for_task(service, OWNER, "timed-task", "success")
+
+            self.assertIsInstance(task["duration_ms"], int)
+            self.assertGreaterEqual(task["duration_ms"], 0)
+            self.assertIsInstance(task["queue_duration_ms"], int)
+            self.assertGreaterEqual(task["queue_duration_ms"], 0)
+            self.assertTrue(task["queued_at"])
+            self.assertTrue(task["started_at"])
+            self.assertTrue(task["finished_at"])
+
     def test_different_owner_cannot_query_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json")

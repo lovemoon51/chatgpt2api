@@ -20,6 +20,7 @@ export function ConfigCard() {
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
+  const isSavingAutoRegister = useSettingsStore((state) => state.isSavingAutoRegister);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
@@ -34,6 +35,7 @@ export function ConfigCard() {
   const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
   const setAutoRegisterField = useSettingsStore((state) => state.setAutoRegisterField);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const saveAutoRegister = useSettingsStore((state) => state.saveAutoRegister);
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -190,13 +192,24 @@ export function ConfigCard() {
                   </p>
                 </div>
               </div>
-              <label className="flex h-9 items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 text-sm text-stone-700">
-                <Checkbox
-                  checked={Boolean(config?.auto_register?.enabled)}
-                  onCheckedChange={(checked) => setAutoRegisterField("enabled", Boolean(checked))}
-                />
-                启用
-              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex h-9 items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-3 text-sm text-stone-700">
+                  <Checkbox
+                    checked={Boolean(config?.auto_register?.enabled)}
+                    onCheckedChange={(checked) => setAutoRegisterField("enabled", Boolean(checked))}
+                  />
+                  启用
+                </label>
+                <Button
+                  type="button"
+                  className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+                  onClick={() => void saveAutoRegister()}
+                  disabled={isSavingAutoRegister}
+                >
+                  {isSavingAutoRegister ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+                  保存巡检
+                </Button>
+              </div>
             </div>
             <div className="grid gap-4 md:grid-cols-4">
               <div className="space-y-2">
@@ -204,7 +217,7 @@ export function ConfigCard() {
                 <Input
                   value={String(config?.auto_register?.min_available || "")}
                   onChange={(event) => setAutoRegisterField("min_available", event.target.value)}
-                  placeholder="100"
+                  placeholder="50"
                   className="h-10 rounded-xl border-stone-200 bg-white"
                 />
                 <p className="text-xs text-stone-500">低于该数量就补池。</p>
@@ -214,7 +227,7 @@ export function ConfigCard() {
                 <Input
                   value={String(config?.auto_register?.target_available || "")}
                   onChange={(event) => setAutoRegisterField("target_available", event.target.value)}
-                  placeholder="100"
+                  placeholder="50"
                   className="h-10 rounded-xl border-stone-200 bg-white"
                 />
                 <p className="text-xs text-stone-500">补池任务会补到该数量。</p>

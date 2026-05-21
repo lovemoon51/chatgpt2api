@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from services.auth_service import auth_service
 
 from api.support import (
+    REFRESH_ALL_ACCOUNTS_LOG_TITLE,
     require_admin,
     sanitize_cpa_pool,
     sanitize_cpa_pools,
@@ -236,7 +237,7 @@ def create_router() -> APIRouter:
             requested_all = True
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-        log_title = "一键刷新所有账号信息和额度" if requested_all else "批量刷新账号"
+        log_title = REFRESH_ALL_ACCOUNTS_LOG_TITLE if requested_all else "批量刷新账号"
         if body.stream:
             return StreamingResponse(
                 _stream_refresh_events(access_tokens, log_title),

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Clock3, Download, LoaderCircle, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { useState, type CSSProperties } from "react";
+import { Download, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,56 @@ function getStoredImageSrc(image: StoredImage) {
     return `data:image/png;base64,${image.b64_json}`;
   }
   return image.url || "";
+}
+
+function ImageGenerationPlaceholder({
+  className,
+  status,
+  index,
+}: {
+  className?: string;
+  status: ImageTurnStatus;
+  index: number;
+}) {
+  const isQueued = status === "queued";
+  const title = isQueued ? "排队中" : "正在生成";
+  const detail = isQueued ? "等待前序任务完成" : "正在构思画面";
+
+  return (
+    <div
+      aria-busy="true"
+      aria-label={`${title}，图片 ${index + 1}`}
+      className={cn("image-generation-loader relative block overflow-hidden bg-stone-100 text-stone-600", isQueued && "is-queued", className)}
+      role="img"
+      title={title}
+    >
+      <span className="image-generation-loader__wash" aria-hidden="true" />
+      <span className="image-generation-loader__grain" aria-hidden="true" />
+      <span className="image-generation-loader__tiles" aria-hidden="true">
+        {Array.from({ length: 12 }, (_, tileIndex) => (
+          <span key={tileIndex} style={{ "--tile-index": tileIndex } as CSSProperties} />
+        ))}
+      </span>
+      <span className="image-generation-loader__beam" aria-hidden="true" />
+      <span className="image-generation-loader__hud">
+        <span className="image-generation-loader__status">
+          <span className="image-generation-loader__dot" aria-hidden="true" />
+          {title}
+        </span>
+        <span className="image-generation-loader__steps" aria-hidden={isQueued ? "true" : undefined}>
+          {isQueued ? (
+            <span>{detail}</span>
+          ) : (
+            <>
+              <span>正在理解提示词</span>
+              <span>正在铺设构图</span>
+              <span>正在渲染细节</span>
+            </>
+          )}
+        </span>
+      </span>
+    </div>
+  );
 }
 
 async function downloadStoredImage(image: StoredImage, index: number) {
@@ -300,10 +350,12 @@ export function ImageResults({
                       }
 
                       return (
-                        <div
+                        <ImageGenerationPlaceholder
                           key={image.id}
+                          index={index}
+                          status={turn.status}
                           className={cn(
-                            "break-inside-avoid overflow-hidden rounded-xl border border-stone-200/80 bg-stone-100/80 sm:rounded-none",
+                            "break-inside-avoid rounded-xl border border-stone-200/80 sm:rounded-none",
                             turn.size === "1:1" && "aspect-square",
                             turn.size === "16:9" && "aspect-video",
                             turn.size === "9:16" && "aspect-[9/16]",
@@ -311,18 +363,7 @@ export function ImageResults({
                             turn.size === "3:4" && "aspect-[3/4]",
                             !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "aspect-square",
                           )}
-                        >
-                          <div className="flex h-full flex-col items-center justify-center gap-1.5 px-2 py-3 text-center text-stone-500 sm:gap-3 sm:px-6 sm:py-8">
-                            <div className="rounded-full bg-white p-2 shadow-sm sm:p-3">
-                              {turn.status === "queued" ? (
-                                <Clock3 className="size-4 sm:size-5" />
-                              ) : (
-                                <LoaderCircle className="size-4 animate-spin sm:size-5" />
-                              )}
-                            </div>
-                            <p className="text-[10px] leading-4 sm:text-sm">{turn.status === "queued" ? "排队中" : "处理中"}</p>
-                          </div>
-                        </div>
+                        />
                       );
                     })}
                   </div>

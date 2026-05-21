@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type ClipboardEvent } from "react";
 import {
   ArrowLeft,
   ArrowUp,
@@ -110,6 +110,8 @@ type StudioTaskQueueItem = {
     loading: number;
   };
 };
+
+type ImageGenerationPhase = "understanding" | "generating" | "revealing";
 
 const imageModelValues = new Set(["gpt-image-2", "codex-gpt-image-2"]);
 
@@ -296,11 +298,107 @@ function formatImageFileSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
 }
 
+function formatDuration(ms?: number) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) {
+    return "-";
+  }
+  const seconds = Math.max(0, ms) / 1000;
+  return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+}
+
+function averageDuration(values: Array<number | undefined>) {
+  const normalized = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (normalized.length === 0) {
+    return undefined;
+  }
+  return Math.round(normalized.reduce((sum, value) => sum + value, 0) / normalized.length);
+}
+
+function timestampFromIso(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function getTurnTimingStats(turn: ImageTurn) {
+  const queueMs = averageDuration(turn.images.map((image) => image.queue_duration_ms));
+  const upstreamMs = averageDuration(turn.images.map((image) => image.duration_ms));
+  const revealMs = averageDuration(turn.images.map((image) => image.reveal_duration_ms));
+  return { queueMs, upstreamMs, revealMs };
+}
+
+function getTurnElapsedMs(turn: ImageTurn, nowMs: number) {
+  const startedAtMs = timestampFromIso(turn.createdAt);
+  if (typeof startedAtMs !== "number") {
+    return undefined;
+  }
+  const finishedAtMs =
+    turn.status === "success"
+      ? averageDuration(
+          turn.images.map((image) => {
+            const imageFinishedAtMs = timestampFromIso(image.reveal_finished_at || image.finished_at);
+            return typeof imageFinishedAtMs === "number" ? imageFinishedAtMs - startedAtMs : undefined;
+          }),
+        )
+      : undefined;
+  return Math.max(0, typeof finishedAtMs === "number" ? finishedAtMs : nowMs - startedAtMs);
+}
+
 function getStoredImageSrc(image: StoredImage) {
   if (image.b64_json) {
     return `data:image/png;base64,${image.b64_json}`;
   }
   return image.url || "";
+}
+
+function ImageGenerationPlaceholder({
+  className,
+  phase,
+  index,
+}: {
+  className?: string;
+  phase: ImageGenerationPhase;
+  index: number;
+}) {
+  const phaseItems: Array<{ key: ImageGenerationPhase; label: string; detail: string }> = [
+    { key: "understanding", label: "正在理解提示词", detail: "分析主体、风格和构图要求" },
+    { key: "generating", label: "正在生图", detail: "生成画面并细化视觉细节" },
+    { key: "revealing", label: "正在回显", detail: "加载图片结果并准备展示" },
+  ];
+  const activePhase = phaseItems.find((item) => item.key === phase) || phaseItems[0];
+
+  return (
+    <div
+      aria-busy="true"
+      aria-label={`${activePhase.label}，图片 ${index + 1}`}
+      className={cn("image-generation-loader relative block overflow-hidden bg-stone-100 text-stone-600", `is-${phase}`, className)}
+      role="img"
+      title={activePhase.label}
+    >
+      <span className="image-generation-loader__wash" aria-hidden="true" />
+      <span className="image-generation-loader__grain" aria-hidden="true" />
+      <span className="image-generation-loader__tiles" aria-hidden="true">
+        {Array.from({ length: 12 }, (_, tileIndex) => (
+          <span key={tileIndex} style={{ "--tile-index": tileIndex } as CSSProperties} />
+        ))}
+      </span>
+      <span className="image-generation-loader__beam" aria-hidden="true" />
+      <span className="image-generation-loader__hud">
+        <span className="image-generation-loader__status">
+          <span className="image-generation-loader__dot" aria-hidden="true" />
+          {activePhase.label}
+        </span>
+        <span className="image-generation-loader__detail">{activePhase.detail}</span>
+        <span className="image-generation-loader__phase-list" aria-hidden="true">
+          {phaseItems.map((item) => (
+            <span key={item.key} className={cn(item.key === phase && "is-active")} />
+          ))}
+        </span>
+      </span>
+    </div>
+  );
 }
 
 async function fetchImageAsFile(url: string, fileName: string) {
@@ -331,27 +429,36 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
 }
 
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
+  const timing = {
+    queued_at: task.queued_at,
+    started_at: task.started_at,
+    finished_at: task.finished_at,
+    duration_ms: task.duration_ms,
+    queue_duration_ms: task.queue_duration_ms,
+  };
   if (task.status === "success") {
     const first = task.data?.[0];
     if (!first?.b64_json && !first?.url) {
-      return { ...image, taskId: task.id, status: "error", error: "未返回图片数据" };
+      return { ...image, ...timing, taskId: task.id, status: "error", error: "未返回图片数据" };
     }
     return {
       ...image,
+      ...timing,
       taskId: task.id,
       status: "success",
       b64_json: first.b64_json,
       url: first.url,
       revised_prompt: first.revised_prompt,
+      reveal_started_at: image.reveal_started_at || new Date().toISOString(),
       error: undefined,
     };
   }
 
   if (task.status === "error") {
-    return { ...image, taskId: task.id, status: "error", error: task.error || "生成失败" };
+    return { ...image, ...timing, taskId: task.id, status: "error", error: task.error || "生成失败" };
   }
 
-  return { ...image, taskId: task.id, status: "loading", error: undefined };
+  return { ...image, ...timing, taskId: task.id, status: "loading", error: undefined };
 }
 
 function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> {
@@ -571,6 +678,8 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const [isLoadingImageLibrary, setIsLoadingImageLibrary] = useState(false);
   const [hasLoadedImageLibrary, setHasLoadedImageLibrary] = useState(false);
   const [taskQueueOpen, setTaskQueueOpen] = useState(false);
+  const [revealedImageIds, setRevealedImageIds] = useState<Set<string>>(() => new Set());
+  const [elapsedNowMs, setElapsedNowMs] = useState(() => Date.now());
 
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
@@ -625,6 +734,42 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
 
   useEffect(() => {
     conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    const hasActiveImageTurn = conversations.some((conversation) =>
+      conversation.turns.some(
+        (turn) =>
+          turn.status === "queued" ||
+          turn.status === "generating" ||
+          turn.images.some((image) => image.status === "success" && !image.reveal_finished_at),
+      ),
+    );
+    if (!hasActiveImageTurn) {
+      setElapsedNowMs(Date.now());
+      return;
+    }
+    const interval = window.setInterval(() => setElapsedNowMs(Date.now()), 200);
+    return () => window.clearInterval(interval);
+  }, [conversations]);
+
+  useEffect(() => {
+    const currentSuccessKeys = new Set<string>();
+    for (const conversation of conversations) {
+      for (const turn of conversation.turns) {
+        for (const image of turn.images) {
+          const src = image.status === "success" ? getStoredImageSrc(image) : "";
+          if (src) {
+            currentSuccessKeys.add(`${image.id}:${src}`);
+          }
+        }
+      }
+    }
+
+    setRevealedImageIds((current) => {
+      const next = new Set([...current].filter((key) => currentSuccessKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
   }, [conversations]);
 
   useEffect(() => {
@@ -1598,7 +1743,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                       <div className="space-y-2">
                         {taskQueueItems.map((item) => {
                           const finishedCount = item.stats.success + item.stats.failed;
-                          const progress = Math.round((finishedCount / item.stats.total) * 100);
+                          const timing = getTurnTimingStats(item.turn);
                           return (
                             <div key={item.id} className="rounded-[18px] border border-slate-100 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/70">
                               <div className="flex items-start justify-between gap-3">
@@ -1644,23 +1789,34 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                   </button>
                                 </div>
                               </div>
-                              <div className="mt-3">
-                                <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500">
-                                  <span>成功 {item.stats.success} · 失败 {item.stats.failed} · 处理中 {item.stats.loading}</span>
-                                  <span>{finishedCount} / {item.stats.total}</span>
+                              <div className="mt-3 space-y-2">
+                                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                  <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    成功 {item.stats.success}
+                                  </span>
+                                  <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    失败 {item.stats.failed}
+                                  </span>
+                                  <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    处理中 {item.stats.loading}
+                                  </span>
+                                  <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    {finishedCount} / {item.stats.total}
+                                  </span>
                                 </div>
-                                <div className="h-1.5 overflow-hidden rounded-full bg-slate-200/70 dark:bg-slate-800">
-                                  <div
-                                    className={cn(
-                                      "h-full rounded-full transition-all",
-                                      item.turn.status === "error"
-                                        ? "bg-rose-400"
-                                        : item.turn.status === "success"
-                                          ? "bg-emerald-400"
-                                          : "bg-blue-400",
-                                    )}
-                                    style={{ width: `${Math.max(item.turn.status === "generating" ? 10 : 0, Math.min(100, progress))}%` }}
-                                  />
+                                <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+                                  <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    <div className="text-slate-400 dark:text-slate-500">排队</div>
+                                    <div className="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{formatDuration(timing.queueMs)}</div>
+                                  </div>
+                                  <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    <div className="text-slate-400 dark:text-slate-500">上游</div>
+                                    <div className="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{formatDuration(timing.upstreamMs)}</div>
+                                  </div>
+                                  <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    <div className="text-slate-400 dark:text-slate-500">回显</div>
+                                    <div className="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{formatDuration(timing.revealMs)}</div>
+                                  </div>
                                 </div>
                               </div>
                               {item.turn.error ? (
@@ -1702,6 +1858,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                 )
               ) : selectedConversation ? (
                 selectedConversation.turns.map((turn, turnIndex) => {
+                  const elapsedMs = getTurnElapsedMs(turn, elapsedNowMs);
                   const successfulImages = turn.images.flatMap((image) => {
                     const src = image.status === "success" ? getStoredImageSrc(image) : "";
                     return src ? [{ id: image.id, src }] : [];
@@ -1755,6 +1912,11 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                           <span className={cn("rounded-full px-3 py-1 text-xs", turn.status === "error" ? "bg-rose-50 text-rose-600" : "bg-slate-100 text-slate-500")}>
                             {formatResultSummary(turn)}
                           </span>
+                          {turn.status !== "error" ? (
+                            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/45 dark:text-emerald-200">
+                              本次耗时 {formatDuration(elapsedMs)}
+                            </span>
+                          ) : null}
                         </div>
 
                         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1762,14 +1924,72 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                             const imageSrc = image.status === "success" ? getStoredImageSrc(image) : "";
                             if (image.status === "success" && imageSrc) {
                               const lightboxIndexForImage = successfulImages.findIndex((item) => item.id === image.id);
+                              const revealKey = `${image.id}:${imageSrc}`;
+                              const isRevealed = revealedImageIds.has(revealKey);
                               return (
                                 <div key={image.id} className="overflow-hidden rounded-[18px] border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
                                   <button
                                     type="button"
-                                    className="block aspect-square w-full cursor-zoom-in overflow-hidden bg-slate-100 dark:bg-slate-800"
+                                    className="relative block aspect-square w-full cursor-zoom-in overflow-hidden bg-slate-100 dark:bg-slate-800"
                                     onClick={() => openLightbox(successfulImages, lightboxIndexForImage)}
                                   >
-                                    <AuthenticatedImage src={imageSrc} alt={`生成结果 ${index + 1}`} className="h-full w-full object-cover transition hover:scale-[1.02]" />
+                                    {!isRevealed ? (
+                                      <ImageGenerationPlaceholder
+                                        index={index}
+                                        phase="revealing"
+                                        className="absolute inset-0 rounded-none border-0 shadow-none"
+                                      />
+                                    ) : null}
+                                    <AuthenticatedImage
+                                      src={imageSrc}
+                                      alt={`生成结果 ${index + 1}`}
+                                      className={cn(
+                                        "h-full w-full object-cover transition duration-300 hover:scale-[1.02]",
+                                        isRevealed ? "opacity-100" : "opacity-0",
+                                      )}
+                                      onLoad={() => {
+                                        const now = new Date();
+                                        const revealStartedAt = image.reveal_started_at || image.finished_at;
+                                        const revealStartMs = revealStartedAt ? new Date(revealStartedAt).getTime() : Number.NaN;
+                                        const revealDurationMs = Number.isFinite(revealStartMs) ? Math.max(0, now.getTime() - revealStartMs) : undefined;
+                                        setRevealedImageIds((current) => {
+                                          if (current.has(revealKey)) {
+                                            return current;
+                                          }
+                                          const next = new Set(current);
+                                          next.add(revealKey);
+                                          return next;
+                                        });
+                                        if (!image.reveal_finished_at) {
+                                          void updateConversation(selectedConversation.id, (current) => {
+                                            const source = current ?? selectedConversation;
+                                            return {
+                                              ...source,
+                                              updatedAt: new Date().toISOString(),
+                                              turns: source.turns.map((sourceTurn) => {
+                                                if (sourceTurn.id !== turn.id) {
+                                                  return sourceTurn;
+                                                }
+                                                return {
+                                                  ...sourceTurn,
+                                                  images: sourceTurn.images.map((sourceImage) => {
+                                                    if (sourceImage.id !== image.id) {
+                                                      return sourceImage;
+                                                    }
+                                                    return {
+                                                      ...sourceImage,
+                                                      reveal_started_at: sourceImage.reveal_started_at || sourceImage.finished_at || now.toISOString(),
+                                                      reveal_finished_at: now.toISOString(),
+                                                      reveal_duration_ms: revealDurationMs,
+                                                    };
+                                                  }),
+                                                };
+                                              }),
+                                            };
+                                          });
+                                        }
+                                      }}
+                                    />
                                   </button>
                                   <div className="flex items-center justify-between gap-2 p-3">
                                     <span className="text-xs text-slate-500 dark:text-slate-400">结果 {index + 1}</span>
@@ -1814,12 +2034,12 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                             }
 
                             return (
-                              <div key={image.id} className="flex aspect-square flex-col items-center justify-center gap-4 rounded-[18px] border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
-                                <div className="grid size-12 place-items-center rounded-full bg-slate-100 dark:bg-slate-800">
-                                  {turn.status === "queued" ? <ClipboardList className="size-5" /> : <LoaderCircle className="size-5 animate-spin" />}
-                                </div>
-                                <div className="text-sm">{turn.status === "queued" ? "排队中" : "处理中"}</div>
-                              </div>
+                              <ImageGenerationPlaceholder
+                                key={image.id}
+                                index={index}
+                                phase={turn.status === "queued" ? "understanding" : "generating"}
+                                className="aspect-square rounded-[18px] border border-slate-200 shadow-sm dark:border-slate-800"
+                              />
                             );
                           })}
                         </div>

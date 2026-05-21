@@ -58,12 +58,12 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
-    def test_auto_register_settings_default_to_100_enabled(self) -> None:
+    def test_auto_register_settings_default_to_50_enabled(self) -> None:
         settings = self.config_module._normalize_auto_register_settings({})
 
         self.assertTrue(settings["enabled"])
-        self.assertEqual(settings["min_available"], 100)
-        self.assertEqual(settings["target_available"], 100)
+        self.assertEqual(settings["min_available"], 50)
+        self.assertEqual(settings["target_available"], 50)
         self.assertEqual(settings["check_interval_seconds"], 30)
         self.assertEqual(settings["cooldown_seconds"], 300)
 

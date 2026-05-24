@@ -1,6 +1,6 @@
 "use client";
 
-import { LoaderCircle, PlugZap, Save, ShieldCheck } from "lucide-react";
+import { ChevronDown, LoaderCircle, PlugZap, Save, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -66,6 +66,7 @@ function sortDiagnostics(items: SettingsDiagnosticItem[]) {
 
 export function ConfigCard() {
   const [isTestingProxy, setIsTestingProxy] = useState(false);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
   const logLevelOptions = ["debug", "info", "warning", "error"];
   const config = useSettingsStore((state) => state.config);
@@ -132,42 +133,56 @@ export function ConfigCard() {
         </div>
         {diagnosticItems.length > 0 ? (
           <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
               <div>
                 <div className="text-sm font-medium text-stone-800">配置来源诊断</div>
                 <div className="mt-1 text-xs text-stone-500">敏感项仅显示设置状态，不显示明文。</div>
               </div>
-              <Badge variant="outline" className="rounded-md border-stone-200 text-stone-500">
-                {configDiagnostics?.config_file ? "config.json" : "运行配置"}
-              </Badge>
-            </div>
-            <div className="overflow-x-auto">
-              <div className="min-w-[760px] divide-y divide-stone-100 text-sm">
-                <div className="grid grid-cols-[1.25fr_0.9fr_1fr_1.25fr] gap-3 bg-stone-50 px-4 py-2 text-xs font-medium text-stone-500">
-                  <span>配置项</span>
-                  <span>来源</span>
-                  <span>状态</span>
-                  <span>环境变量</span>
-                </div>
-                {diagnosticItems.map((item) => (
-                  <div key={item.key} className="grid grid-cols-[1.25fr_0.9fr_1fr_1.25fr] gap-3 px-4 py-2.5 text-stone-600">
-                    <div className="min-w-0">
-                      <div className="truncate font-medium text-stone-700">{item.label}</div>
-                      <div className="truncate text-xs text-stone-400">{item.key}</div>
-                    </div>
-                    <div>
-                      <Badge variant={sourceVariant(item.source)} className="rounded-md">
-                        {sourceLabel(item.source)}
-                      </Badge>
-                    </div>
-                    <div className={item.configured ? "font-medium text-emerald-700" : "font-medium text-stone-400"}>
-                      {diagnosticValue(item)}
-                    </div>
-                    <div className="truncate font-mono text-xs text-stone-400">{item.env || "-"}</div>
-                  </div>
-                ))}
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="rounded-md border-stone-200 text-stone-500">
+                  {configDiagnostics?.config_file ? "config.json" : "运行配置"}
+                </Badge>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-8 rounded-lg border-stone-200 bg-white px-3 text-xs text-stone-600"
+                  onClick={() => setIsDiagnosticsOpen((open) => !open)}
+                  aria-expanded={isDiagnosticsOpen}
+                >
+                  <ChevronDown className={`size-4 transition-transform ${isDiagnosticsOpen ? "rotate-180" : ""}`} />
+                  {isDiagnosticsOpen ? "收起诊断" : "展开诊断"}
+                </Button>
               </div>
             </div>
+            {isDiagnosticsOpen ? (
+              <div className="overflow-x-auto border-t border-stone-100">
+                <div className="min-w-[760px] divide-y divide-stone-100 text-sm">
+                  <div className="grid grid-cols-[1.25fr_0.9fr_1fr_1.25fr] gap-3 bg-stone-50 px-4 py-2 text-xs font-medium text-stone-500">
+                    <span>配置项</span>
+                    <span>来源</span>
+                    <span>状态</span>
+                    <span>环境变量</span>
+                  </div>
+                  {diagnosticItems.map((item) => (
+                    <div key={item.key} className="grid grid-cols-[1.25fr_0.9fr_1fr_1.25fr] gap-3 px-4 py-2.5 text-stone-600">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-stone-700">{item.label}</div>
+                        <div className="truncate text-xs text-stone-400">{item.key}</div>
+                      </div>
+                      <div>
+                        <Badge variant={sourceVariant(item.source)} className="rounded-md">
+                          {sourceLabel(item.source)}
+                        </Badge>
+                      </div>
+                      <div className={item.configured ? "font-medium text-emerald-700" : "font-medium text-stone-400"}>
+                        {diagnosticValue(item)}
+                      </div>
+                      <div className="truncate font-mono text-xs text-stone-400">{item.env || "-"}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
         <div className="grid gap-4 md:grid-cols-2">

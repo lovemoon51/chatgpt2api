@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -61,7 +63,193 @@ class FakeAccountService:
         self.usage_limited.append((access_token, resets_at, resets_in_seconds))
 
 
+class ReusableSingleAccountService(FakeAccountService):
+    def __init__(self) -> None:
+        super().__init__(["token-1"])
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self._first_checkouts = 0
+        self._first_checkout_barrier = threading.Barrier(2)
+
+    def get_available_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        excluded = set(excluded_tokens or set())
+        if "token-1" in excluded:
+            raise RuntimeError("no available image quota")
+        with self._lock:
+            if self._inflight >= 2:
+                raise RuntimeError("no available image quota")
+            self._inflight += 1
+            should_wait = self._first_checkouts < 2
+            if should_wait:
+                self._first_checkouts += 1
+        if should_wait:
+            self._first_checkout_barrier.wait(timeout=2)
+        return "token-1"
+
+    def release_image_slot(self, access_token: str) -> None:
+        if not access_token:
+            return
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    def mark_image_result(self, access_token: str, success: bool) -> None:
+        self.release_image_slot(access_token)
+        super().mark_image_result(access_token, success)
+
+
 class ImageEmptyResultRetryTests(unittest.TestCase):
+    def test_multi_image_request_runs_images_in_parallel(self) -> None:
+        fake_accounts = FakeAccountService(["token-1", "token-2", "token-3"])
+        stream_tokens: list[str] = []
+        stream_lock = threading.Lock()
+        stream_barrier = threading.Barrier(3)
+
+        def fake_stream(_backend, request, index, total):
+            with stream_lock:
+                stream_tokens.append(getattr(_backend, "access_token", ""))
+            stream_barrier.wait(timeout=2)
+            time.sleep(0.35 - (index * 0.08))
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": f"http://example.test/image-{index}.png"}],
+                )
+            ])
+
+        with (
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            started = time.perf_counter()
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=3)
+                )
+            )
+            elapsed = time.perf_counter() - started
+
+        result_outputs = [output for output in outputs if output.kind == "result"]
+        self.assertLess(elapsed, 0.45)
+        self.assertEqual([output.index for output in result_outputs], [1, 2, 3])
+        self.assertEqual(len(set(stream_tokens)), 3)
+        self.assertEqual(sorted(success for _, success in fake_accounts.marked), [True, True, True])
+
+    def test_parallel_request_can_reuse_single_account_when_concurrency_allows(self) -> None:
+        fake_accounts = ReusableSingleAccountService()
+
+        def fake_stream(_backend, request, index, total):
+            time.sleep(0.05)
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": f"http://example.test/reused-{index}.png"}],
+                )
+            ])
+
+        with (
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=2)
+                )
+            )
+
+        result_outputs = [output for output in outputs if output.kind == "result"]
+        self.assertEqual([output.index for output in result_outputs], [1, 2])
+        self.assertEqual(fake_accounts.marked, [("token-1", True), ("token-1", True)])
+
+    def test_parallel_request_returns_quickly_when_one_image_fails(self) -> None:
+        fake_accounts = FakeAccountService(["token-1", "token-2"])
+        slow_done = threading.Event()
+
+        def fake_stream(_backend, request, index, total):
+            if index == 1:
+                raise conversation.ImageGenerationError("boom")
+            time.sleep(0.6)
+            slow_done.set()
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": "http://example.test/slow.png"}],
+                )
+            ])
+
+        with (
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            started = time.perf_counter()
+            with self.assertRaisesRegex(conversation.ImageGenerationError, "boom"):
+                list(
+                    conversation.stream_image_outputs_with_pool(
+                        conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=2)
+                    )
+                )
+            elapsed = time.perf_counter() - started
+            slow_done.wait(timeout=2)
+
+        self.assertLess(elapsed, 0.3)
+
+    def test_parallel_request_message_stops_batch_like_serial_path(self) -> None:
+        fake_accounts = FakeAccountService(["token-1", "token-2"])
+        slow_done = threading.Event()
+
+        def fake_stream(_backend, request, index, total):
+            if index == 1:
+                time.sleep(0.05)
+                return iter([
+                    conversation.ImageOutput(
+                        kind="message",
+                        model=request.model,
+                        index=index,
+                        total=total,
+                        text="blocked",
+                    )
+                ])
+            time.sleep(0.6)
+            slow_done.set()
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": "http://example.test/slow.png"}],
+                )
+            ])
+
+        with (
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            started = time.perf_counter()
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=2)
+                )
+            )
+            elapsed = time.perf_counter() - started
+            slow_done.wait(timeout=2)
+
+        self.assertLess(elapsed, 0.3)
+        self.assertEqual([output.kind for output in outputs], ["message"])
+        self.assertEqual(outputs[0].text, "blocked")
+
     def test_empty_result_retries_next_account(self) -> None:
         fake_accounts = FakeAccountService(["token-1", "token-2"])
 

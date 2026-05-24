@@ -23,6 +23,7 @@ import {
   createImageGenerationTask,
   fetchAccounts,
   fetchImageTasks,
+  reportImageTaskTiming,
   type Account,
   type ImageTask,
 } from "@/lib/api";
@@ -47,11 +48,13 @@ import { getStoredAuthKey } from "@/store/auth";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
+const IMAGE_TASK_POLL_DELAYS_MS = [700, 1000, 1500, 2500, 4000];
 
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
 }
 const activeConversationQueueIds = new Set<string>();
+const imageTimingReportInFlight = new Set<string>();
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -217,38 +220,65 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
 }
 
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
+  const timings = task.timings || task.timing_ms;
+  const phase = task.phase || (task.status === "running" ? "generating" : task.status);
+  const timing = {
+    phase,
+    phase_label: task.phase_label,
+    phase_updated_at: task.phase_updated_at || task.updated_at,
+    timings,
+    timing_ms: task.timing_ms,
+    queued_at: task.queued_at,
+    submitted_at: task.submitted_at,
+    started_at: task.started_at,
+    downloading_at: task.downloading_at,
+    saving_at: task.saving_at,
+    finished_at: task.finished_at,
+    duration_ms: task.duration_ms,
+    queue_duration_ms: task.queue_duration_ms ?? timings?.queue_wait_ms ?? timings?.queue,
+    total_duration_ms: task.total_duration_ms ?? timings?.worker_total_ms ?? timings?.total,
+  };
+
   if (task.status === "success") {
     const first = task.data?.[0];
     if (!first?.b64_json && !first?.url) {
       return {
         ...image,
+        ...timing,
         taskId: task.id,
+        phase: "error",
         status: "error",
         error: "未返回图片数据",
       };
     }
     return {
       ...image,
+      ...timing,
       taskId: task.id,
+      phase: task.phase || "completed",
       status: "success",
       b64_json: first.b64_json,
       url: first.url,
       revised_prompt: first.revised_prompt,
+      reveal_started_at: image.reveal_started_at || new Date().toISOString(),
       error: undefined,
     };
   }
 
-  if (task.status === "error") {
+  if (task.status === "error" || task.status === "cancelled") {
     return {
       ...image,
+      ...timing,
       taskId: task.id,
+      phase: task.phase || "error",
       status: "error",
-      error: task.error || "生成失败",
+      error: task.error || (task.status === "cancelled" ? "任务已取消" : "生成失败"),
     };
   }
 
   return {
     ...image,
+    ...timing,
     taskId: task.id,
     status: "loading",
     error: undefined,
@@ -257,6 +287,10 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function getImageTaskPollDelay(attempt: number) {
+  return IMAGE_TASK_POLL_DELAYS_MS[Math.min(attempt, IMAGE_TASK_POLL_DELAYS_MS.length - 1)];
 }
 
 function pickFallbackConversationId(conversations: ImageConversation[]) {
@@ -876,10 +910,12 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         id: imageId,
         taskId: imageId,
         status: "loading" as const,
+        phase: "queued",
+        phase_label: "排队中",
+        phase_updated_at: new Date().toISOString(),
       };
     });
 
-  /* eslint-disable react-hooks/preserve-manual-memoization */
   const runConversationQueue = useCallback(
     async (conversationId: string) => {
       if (activeConversationQueueIds.has(conversationId)) {
@@ -938,7 +974,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                     status: "generating",
                     error: undefined,
                     images: turn.images.map((image) =>
-                      image.status === "loading" ? { ...image, taskId: image.taskId || image.id } : image,
+                      image.status === "loading"
+                        ? {
+                            ...image,
+                            taskId: image.taskId || image.id,
+                            phase: image.phase === "queued" ? "submitting" : image.phase,
+                            phase_label: image.phase === "queued" ? "提交中" : image.phase_label,
+                            phase_updated_at: new Date().toISOString(),
+                          }
+                        : image,
                     ),
                   }
                 : turn,
@@ -964,6 +1008,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         );
         await applyTasks(submitted);
 
+        let pollAttempt = 0;
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
           const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
@@ -975,7 +1020,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             break;
           }
 
-          await sleep(2000);
+          await sleep(getImageTaskPollDelay(pollAttempt));
+          pollAttempt += 1;
           const taskList = await fetchImageTasks(loadingTaskIds);
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
@@ -1038,8 +1084,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     },
     [loadQuota, updateConversation],
   );
-  /* eslint-enable react-hooks/preserve-manual-memoization */
-
   const handleRegenerateTurn = useCallback(
     async (conversationId: string, turnId: string) => {
       const conversation = conversationsRef.current.find((item) => item.id === conversationId);
@@ -1103,6 +1147,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                   id: retryImageId,
                   taskId: retryImageId,
                   status: "loading" as const,
+                  phase: "queued",
+                  phase_label: "排队中",
+                  phase_updated_at: now,
                 }
               : image,
           );
@@ -1120,6 +1167,105 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       void runConversationQueue(conversationId);
     },
     [runConversationQueue],
+  );
+
+  const handleImageRendered = useCallback(
+    async (conversationId: string, turnId: string, imageId: string, loadedAt: Date) => {
+      const fallbackConversation = conversationsRef.current.find((item) => item.id === conversationId);
+      if (!fallbackConversation) {
+        return;
+      }
+      const fallbackTurn = fallbackConversation.turns.find((turn) => turn.id === turnId);
+      const fallbackImage = fallbackTurn?.images.find((image) => image.id === imageId);
+      const revealStartedAt =
+        fallbackImage?.reveal_started_at || fallbackImage?.finished_at || loadedAt.toISOString();
+      const revealStartMs = new Date(revealStartedAt).getTime();
+      const revealDurationMs = Number.isFinite(revealStartMs)
+        ? Math.max(0, loadedAt.getTime() - revealStartMs)
+        : undefined;
+      const reportKey = "frontend_render_ms";
+      const taskId = fallbackImage?.taskId;
+      const shouldReportTiming =
+        Boolean(taskId) &&
+        typeof revealDurationMs === "number" &&
+        !fallbackImage?.reported_timings?.[reportKey];
+      await updateConversation(conversationId, (current) => {
+        const conversation = current ?? fallbackConversation;
+
+        let changed = false;
+        const turns = conversation.turns.map((turn) => {
+          if (turn.id !== turnId) {
+            return turn;
+          }
+          const images = turn.images.map((image) => {
+            if (image.id !== imageId || image.status !== "success" || image.reveal_finished_at) {
+              return image;
+            }
+            changed = true;
+            return {
+              ...image,
+              reveal_started_at: revealStartedAt,
+              reveal_finished_at: loadedAt.toISOString(),
+              reveal_duration_ms: revealDurationMs,
+            };
+          });
+          return images === turn.images ? turn : { ...turn, images };
+        });
+
+        if (!changed) {
+          return conversation;
+        }
+        return {
+          ...conversation,
+          updatedAt: loadedAt.toISOString(),
+          turns,
+        };
+      });
+      if (!taskId || typeof revealDurationMs !== "number" || !shouldReportTiming) {
+        return;
+      }
+
+      const inFlightKey = `${taskId}:${reportKey}`;
+      if (imageTimingReportInFlight.has(inFlightKey)) {
+        return;
+      }
+      imageTimingReportInFlight.add(inFlightKey);
+      try {
+        await reportImageTaskTiming(taskId, {
+          timing_key: reportKey,
+          duration_ms: Math.round(revealDurationMs),
+        });
+        await updateConversation(conversationId, (current) => {
+          const conversation = current ?? fallbackConversation;
+          return {
+            ...conversation,
+            turns: conversation.turns.map((turn) =>
+              turn.id === turnId
+                ? {
+                    ...turn,
+                    images: turn.images.map((image) =>
+                      image.id === imageId
+                        ? {
+                            ...image,
+                            reported_timings: {
+                              ...image.reported_timings,
+                              [reportKey]: true,
+                            },
+                          }
+                        : image,
+                    ),
+                  }
+                : turn,
+            ),
+          };
+        });
+      } catch {
+        // Timing reports are best-effort; keep the local reveal duration for display.
+      } finally {
+        imageTimingReportInFlight.delete(inFlightKey);
+      }
+    },
+    [updateConversation],
   );
 
   useEffect(() => {
@@ -1284,6 +1430,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               onReuseTurnConfig={handleReuseTurnConfig}
               onRegenerateTurn={handleRegenerateTurn}
               onRetryImage={handleRetryImage}
+              onImageRendered={handleImageRendered}
               formatConversationTime={formatConversationTime}
             />
           </div>

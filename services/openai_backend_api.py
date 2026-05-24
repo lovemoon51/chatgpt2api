@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import time
@@ -54,6 +55,11 @@ CHECKOUT_URL_PATTERNS = (
     "chatgpt.com/checkout/",
     "cs_live_",
 )
+IMAGE_POLL_FAST_ATTEMPTS = 4
+IMAGE_POLL_FAST_DELAY_SECS = 0.5
+IMAGE_POLL_EARLY_DELAY_SECS = 1.0
+IMAGE_POLL_STEADY_DELAY_SECS = 1.5
+IMAGE_POLL_BACKOFF_DELAY_SECS = 3.0
 
 
 def _walk_strings(value: Any) -> Iterator[str]:
@@ -82,6 +88,76 @@ def _find_plus_promo_text(*payloads: Any) -> str:
 def _is_checkout_url(value: object) -> bool:
     text = str(value or "").strip().lower()
     return bool(text) and any(pattern in text for pattern in CHECKOUT_URL_PATTERNS)
+
+
+def _response_charset(response: requests.Response) -> str:
+    content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "")
+    match = re.search(r"charset=([^;\s]+)", content_type, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip("\"'")
+    encoding = str(getattr(response, "encoding", "") or "").strip()
+    return encoding or "utf-8"
+
+
+def _decode_response_text(response: requests.Response) -> str:
+    try:
+        return str(response.text or "")
+    except UnicodeDecodeError:
+        data = getattr(response, "content", b"") or b""
+        if isinstance(data, str):
+            return data
+        return bytes(data).decode(_response_charset(response), errors="replace")
+
+
+def _json_response(response: requests.Response, context: str) -> Dict[str, Any]:
+    try:
+        payload = response.json()
+    except UnicodeDecodeError:
+        text = _decode_response_text(response)
+        try:
+            payload = json.loads(text)
+        except Exception as exc:
+            content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "unknown")
+            preview = " ".join(text[:300].split())
+            raise RuntimeError(
+                f"{context} returned undecodable or non-JSON response: "
+                f"status={getattr(response, 'status_code', 'unknown')}, "
+                f"content_type={content_type}, body={preview}"
+            ) from exc
+    except Exception as exc:
+        text = _decode_response_text(response)
+        content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "unknown")
+        preview = " ".join(text[:300].split())
+        raise RuntimeError(
+            f"{context} returned non-JSON response: "
+            f"status={getattr(response, 'status_code', 'unknown')}, "
+            f"content_type={content_type}, body={preview}"
+        ) from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _image_poll_delay(elapsed_secs: float, attempt: int, timeout_secs: float) -> float:
+    remaining = max(0.0, timeout_secs - elapsed_secs)
+    if remaining <= 0:
+        return 0.0
+    if attempt <= IMAGE_POLL_FAST_ATTEMPTS or elapsed_secs < 4:
+        delay = IMAGE_POLL_FAST_DELAY_SECS
+    elif elapsed_secs < 15:
+        delay = IMAGE_POLL_EARLY_DELAY_SECS
+    elif elapsed_secs < 45:
+        delay = IMAGE_POLL_STEADY_DELAY_SECS
+    else:
+        delay = IMAGE_POLL_BACKOFF_DELAY_SECS
+    return min(delay, remaining)
+
+
+def _emit_progress(progress_callback, event: Dict[str, Any]) -> None:
+    if not callable(progress_callback):
+        return
+    try:
+        progress_callback(event)
+    except Exception as exc:
+        logger.debug({"event": "progress_callback_failed", "error": repr(exc)})
 
 
 class OpenAIBackendAPI:
@@ -214,7 +290,7 @@ class OpenAIBackendAPI:
             if response.status_code == 401:
                 raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
             raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
-        return response.json()
+        return _json_response(response, path)
 
     def _get_conversation_init(self) -> Dict[str, Any]:
         path = "/backend-api/conversation/init"
@@ -233,7 +309,7 @@ class OpenAIBackendAPI:
             if response.status_code == 401:
                 raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
             raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
-        return response.json()
+        return _json_response(response, path)
 
     def _get_default_account(self) -> Dict[str, Any]:
         route = "/backend-api/accounts/check/v4-2023-04-27"
@@ -243,7 +319,7 @@ class OpenAIBackendAPI:
             if response.status_code == 401:
                 raise InvalidAccessTokenError(f"{route} failed: HTTP {response.status_code}")
             raise RuntimeError(f"/backend-api/accounts/check failed: HTTP {response.status_code}")
-        payload = response.json()
+        payload = _json_response(response, route)
         logger.debug({"event": "backend_user_info_account_payload", "account_payload": payload})
         return ((payload.get("accounts") or {}).get("default") or {}).get("account") or {}
 
@@ -514,7 +590,7 @@ class OpenAIBackendAPI:
         )
         self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
-        return response.json().get("conduit_token", "")
+        return _json_response(response, path).get("conduit_token", "")
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -556,7 +632,7 @@ class OpenAIBackendAPI:
             timeout=60,
         )
         ensure_ok(response, path)
-        upload_meta = response.json()
+        upload_meta = _json_response(response, path)
         time.sleep(0.5)
         response = self.session.put(
             upload_meta["upload_url"],
@@ -672,7 +748,7 @@ class OpenAIBackendAPI:
                                     timeout=60)
         self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
-        return response.json()
+        return _json_response(response, path)
 
     def _extract_image_tool_records(self, data: Dict[str, Any]) -> list[Dict[str, Any]]:
         """从 conversation 明细里提取图片工具输出记录。"""
@@ -706,11 +782,23 @@ class OpenAIBackendAPI:
                  "sediment_ids": sediment_ids})
         return sorted(records, key=lambda item: item["create_time"])
 
-    def _poll_image_results(self, conversation_id: str, timeout_secs: float = 120.0) -> tuple[list[str], list[str]]:
+    def _poll_image_results(
+            self,
+            conversation_id: str,
+            timeout_secs: float = 120.0,
+            progress_callback=None,
+    ) -> tuple[list[str], list[str]]:
         """轮询 conversation，直到拿到图片文件 id 或超时。"""
         start = time.time()
         attempt = 0
         logger.info({"event": "image_poll_start", "conversation_id": conversation_id, "timeout_secs": timeout_secs})
+        _emit_progress(progress_callback, {
+            "phase": "polling",
+            "label": "生成中",
+            "timing_key": "image_poll_ms",
+            "duration_ms": 0,
+            "metadata": {"conversation_id": conversation_id, "timeout_secs": timeout_secs},
+        })
         while time.time() - start < timeout_secs:
             attempt += 1
             conversation = self._get_conversation(conversation_id)
@@ -727,15 +815,62 @@ class OpenAIBackendAPI:
             if file_ids:
                 logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
                              "sediment_ids": sediment_ids})
+                _emit_progress(progress_callback, {
+                    "phase": "downloading",
+                    "label": "下载中",
+                    "timing_key": "image_poll_ms",
+                    "duration_ms": max(0, int((time.time() - start) * 1000)),
+                    "metadata": {
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "file_ids": file_ids,
+                        "sediment_ids": sediment_ids,
+                    },
+                })
                 return file_ids, sediment_ids
             if sediment_ids:
                 logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
                              "sediment_ids": sediment_ids})
+                _emit_progress(progress_callback, {
+                    "phase": "downloading",
+                    "label": "下载中",
+                    "timing_key": "image_poll_ms",
+                    "duration_ms": max(0, int((time.time() - start) * 1000)),
+                    "metadata": {
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "file_ids": [],
+                        "sediment_ids": sediment_ids,
+                    },
+                })
                 return [], sediment_ids
+            elapsed = time.time() - start
+            delay = _image_poll_delay(elapsed, attempt, timeout_secs)
+            if delay <= 0:
+                break
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
-                          "elapsed_secs": round(time.time() - start, 1)})
-            time.sleep(min(1.5, max(0.1, timeout_secs - (time.time() - start))))
+                          "elapsed_secs": round(elapsed, 1), "delay_secs": delay})
+            _emit_progress(progress_callback, {
+                "phase": "polling",
+                "label": "生成中",
+                "timing_key": "image_poll_ms",
+                "duration_ms": max(0, int(elapsed * 1000)),
+                "metadata": {
+                    "conversation_id": conversation_id,
+                    "attempt": attempt,
+                    "delay_secs": delay,
+                    "timeout_secs": timeout_secs,
+                },
+            })
+            time.sleep(delay)
         logger.info({"event": "image_poll_timeout", "conversation_id": conversation_id, "timeout_secs": timeout_secs})
+        _emit_progress(progress_callback, {
+            "phase": "polling",
+            "label": "生成中",
+            "timing_key": "image_poll_ms",
+            "duration_ms": max(0, int((time.time() - start) * 1000)),
+            "metadata": {"conversation_id": conversation_id, "attempt": attempt, "timeout_secs": timeout_secs},
+        })
         return [], []
 
     def _get_file_download_url(self, file_id: str) -> str:
@@ -745,7 +880,7 @@ class OpenAIBackendAPI:
                                     timeout=60)
         self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
-        data = response.json()
+        data = _json_response(response, path)
         return data.get("download_url") or data.get("url") or ""
 
     def _get_attachment_download_url(self, conversation_id: str, attachment_id: str) -> str:
@@ -755,7 +890,7 @@ class OpenAIBackendAPI:
                                     timeout=60)
         self._raise_if_checkout_response(response, path)
         ensure_ok(response, path)
-        data = response.json()
+        data = _json_response(response, path)
         return data.get("download_url") or data.get("url") or ""
 
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
@@ -836,13 +971,15 @@ class OpenAIBackendAPI:
             file_ids: list[str],
             sediment_ids: list[str],
             poll: bool = True,
+            progress_callback=None,
     ) -> list[str]:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
         if poll and conversation_id and not file_ids and not sediment_ids:
             logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
             polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
-                                                                            config.image_poll_timeout_secs)
+                                                                            config.image_poll_timeout_secs,
+                                                                            progress_callback=progress_callback)
             file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
             sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
@@ -928,7 +1065,7 @@ class OpenAIBackendAPI:
             timeout=30,
         )
         ensure_ok(response, context)
-        requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
+        requirements = self._build_requirements(_json_response(response, path), "" if self.access_token else body["p"])
         if not requirements.token:
             message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
             raise RuntimeError(f"{message}: {requirements.raw_finalize}")
@@ -955,7 +1092,7 @@ class OpenAIBackendAPI:
         ensure_ok(response, context)
         data = []
         seen = set()
-        for item in response.json().get("models", []):
+        for item in _json_response(response, route).get("models", []):
             if not isinstance(item, dict):
                 continue
             slug = str(item.get("slug", "")).strip()

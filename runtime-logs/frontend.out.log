@@ -1,0 +1,19 @@
+▲ Next.js 16.2.3 (webpack)
+- Local:         http://localhost:3000
+- Network:       http://0.0.0.0:3000
+✓ Ready in 563ms
+
+ GET /logs/ 200 in 1844ms (next.js: 1661ms, application-code: 183ms)
+ GET /dashboard/ 200 in 1002ms (next.js: 874ms, application-code: 128ms)
+ GET /login/ 200 in 1263ms (next.js: 1087ms, application-code: 176ms)
+ GET /logs/ 200 in 162ms (next.js: 19ms, application-code: 143ms)
+ GET /dashboard/ 200 in 502ms (next.js: 399ms, application-code: 103ms)
+ GET /login/ 200 in 29ms (next.js: 9ms, application-code: 21ms)
+ GET /accounts/ 200 in 654ms (next.js: 624ms, application-code: 30ms)
+ GET /dashboard/ 200 in 122ms (next.js: 13ms, application-code: 109ms)
+ GET /logs/ 200 in 84ms (next.js: 10ms, application-code: 74ms)
+ GET /image/ 200 in 1003ms (next.js: 809ms, application-code: 194ms)
+ GET /logs/ 200 in 187ms (next.js: 11ms, application-code: 176ms)
+ GET /studio/ 200 in 881ms (next.js: 726ms, application-code: 155ms)
+ GET /logs/ 200 in 83ms (next.js: 10ms, application-code: 73ms)
+ GET /studio/ 200 in 52ms (next.js: 4ms, application-code: 47ms)

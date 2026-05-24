@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest import mock
 
 from fastapi import HTTPException
 
+from services import image_asset_service
 from services import image_service
 from services.protocol import conversation
 
@@ -15,6 +17,8 @@ from services.protocol import conversation
 ADMIN = {"id": "admin", "name": "管理员", "role": "admin"}
 USER = {"id": "user-1", "name": "Alice", "role": "user"}
 OTHER_USER = {"id": "user-2", "name": "Bob", "role": "user"}
+PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+PNG_BYTES = base64.b64decode(PNG_B64)
 
 
 class ImageOwnershipTests(unittest.TestCase):
@@ -32,12 +36,19 @@ class ImageOwnershipTests(unittest.TestCase):
             base_url="",
             cleanup_old_images=lambda: 0,
         )
+        self.tags: dict[str, list[str]] = {}
+
+        def remove_tag(rel: str) -> None:
+            self.tags.pop(rel, None)
+
         patches = [
             mock.patch.object(image_service, "config", self.fake_config),
+            mock.patch.object(image_asset_service, "config", self.fake_config),
             mock.patch.object(conversation, "config", self.fake_config),
             mock.patch.object(image_service, "IMAGE_OWNERS_FILE", self.root / "image_owners.json"),
-            mock.patch.object(image_service, "load_tags", return_value={}),
-            mock.patch.object(image_service, "remove_tags", return_value=None),
+            mock.patch.object(image_asset_service, "IMAGE_ASSETS_FILE", self.root / "image_assets.json"),
+            mock.patch.object(image_service, "load_tags", side_effect=lambda: dict(self.tags)),
+            mock.patch.object(image_service, "remove_tags", side_effect=remove_tag),
         ]
         for patcher in patches:
             patcher.start()
@@ -84,6 +95,121 @@ class ImageOwnershipTests(unittest.TestCase):
         self.assertTrue((self.images_dir / rel).is_file())
         self.assertTrue(image_service.can_access_image(USER, rel))
         self.assertFalse(image_service.can_access_image(OTHER_USER, rel))
+
+    def test_saved_images_record_asset_metadata(self) -> None:
+        result = conversation.format_image_result(
+            [{"b64_json": PNG_B64, "revised_prompt": "a sharper cat"}],
+            "cat",
+            "url",
+            "http://testserver",
+            owner_identity=USER,
+            model="gpt-image-2",
+            size="1:1",
+            mode="generate",
+            source_task_id="task-1",
+        )
+        rel = result["data"][0]["url"].split("/images/", 1)[1]
+
+        assets = image_asset_service.load_assets()
+        asset = assets[rel]
+        self.assertEqual(asset["owner_id"], "user-1")
+        self.assertEqual(asset["prompt"], "cat")
+        self.assertEqual(asset["model"], "gpt-image-2")
+        self.assertEqual(asset["size"], "1:1")
+        self.assertEqual(asset["mode"], "generate")
+        self.assertEqual(asset["source_task_id"], "task-1")
+        self.assertEqual(asset["revised_prompt"], "a sharper cat")
+        self.assertEqual(asset["bytes"], len(PNG_BYTES))
+        self.assertEqual(asset["dimensions"], {"width": 1, "height": 1})
+
+    def test_list_images_filters_paginates_and_searches_metadata(self) -> None:
+        self.write_image("2026/05/20/cat.png", PNG_BYTES)
+        self.write_image("2026/05/20/dog.png", PNG_BYTES)
+        image_service.record_image_owner("2026/05/20/cat.png", USER)
+        image_service.record_image_owner("2026/05/20/dog.png", OTHER_USER)
+        self.tags["2026/05/20/cat.png"] = ["pet", "orange"]
+        self.tags["2026/05/20/dog.png"] = ["pet"]
+        image_asset_service.upsert_asset(
+            "2026/05/20/cat.png",
+            file_path=self.images_dir / "2026/05/20/cat.png",
+            owner_identity=USER,
+            prompt="orange cat on a sofa",
+            model="gpt-image-2",
+            size="1:1",
+            mode="generate",
+            tags=self.tags["2026/05/20/cat.png"],
+        )
+        image_asset_service.upsert_asset(
+            "2026/05/20/dog.png",
+            file_path=self.images_dir / "2026/05/20/dog.png",
+            owner_identity=OTHER_USER,
+            prompt="dog in a park",
+            model="gpt-image-2",
+            size="16:9",
+            mode="edit",
+            tags=self.tags["2026/05/20/dog.png"],
+        )
+
+        filtered = image_service.list_images(
+            "http://testserver",
+            identity=ADMIN,
+            page=1,
+            page_size=1,
+            search="orange",
+            tag="orange",
+            owner="user-1",
+            mode="generate",
+            model="gpt-image-2",
+        )
+
+        self.assertEqual(filtered["total"], 1)
+        self.assertFalse(filtered["has_more"])
+        self.assertEqual(filtered["pages"], 1)
+        self.assertEqual(filtered["items"][0]["rel"], "2026/05/20/cat.png")
+        self.assertEqual(filtered["items"][0]["prompt"], "orange cat on a sofa")
+        self.assertEqual(filtered["items"][0]["dimensions"], {"width": 1, "height": 1})
+
+    def test_list_images_requires_all_comma_separated_tags(self) -> None:
+        self.write_image("2026/05/20/cat.png", PNG_BYTES)
+        self.write_image("2026/05/20/dog.png", PNG_BYTES)
+        self.tags["2026/05/20/cat.png"] = ["pet", "orange"]
+        self.tags["2026/05/20/dog.png"] = ["pet"]
+        image_asset_service.upsert_asset(
+            "2026/05/20/cat.png",
+            file_path=self.images_dir / "2026/05/20/cat.png",
+            owner_identity=USER,
+            tags=self.tags["2026/05/20/cat.png"],
+        )
+        image_asset_service.upsert_asset(
+            "2026/05/20/dog.png",
+            file_path=self.images_dir / "2026/05/20/dog.png",
+            owner_identity=OTHER_USER,
+            tags=self.tags["2026/05/20/dog.png"],
+        )
+
+        filtered = image_service.list_images("http://testserver", identity=ADMIN, tag="pet,orange")
+
+        self.assertEqual([item["rel"] for item in filtered["items"]], ["2026/05/20/cat.png"])
+
+    def test_delete_images_marks_asset_deleted(self) -> None:
+        self.write_image("2026/05/20/remove.png", PNG_BYTES)
+        image_service.record_image_owner("2026/05/20/remove.png", USER)
+        self.tags["2026/05/20/remove.png"] = ["old"]
+        image_asset_service.upsert_asset(
+            "2026/05/20/remove.png",
+            file_path=self.images_dir / "2026/05/20/remove.png",
+            owner_identity=USER,
+            prompt="remove me",
+            tags=self.tags["2026/05/20/remove.png"],
+        )
+
+        result = image_service.delete_images(["2026/05/20/remove.png"])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse((self.images_dir / "2026/05/20/remove.png").exists())
+        self.assertEqual(self.tags, {})
+        asset = image_asset_service.load_assets(include_deleted=True)["2026/05/20/remove.png"]
+        self.assertTrue(asset["deleted_at"])
 
 
 if __name__ == "__main__":

@@ -9,8 +9,30 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { login } from "@/lib/api";
+import { getFriendlyErrorMessage } from "@/lib/error-messages";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
-import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
+import { getDefaultRouteForRole, setStoredAuthSession, type StoredAuthLimits } from "@/store/auth";
+
+type LoginLimitsPayload = {
+  requests_per_day?: number | null;
+  images_per_day?: number | null;
+  concurrency?: number | null;
+  models?: string[];
+};
+
+function normalizeLoginLimits(value: unknown): StoredAuthLimits | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const limits = value as LoginLimitsPayload;
+  return {
+    requestsPerDay: typeof limits.requests_per_day === "number" || limits.requests_per_day === null ? limits.requests_per_day : undefined,
+    imagesPerDay: typeof limits.images_per_day === "number" || limits.images_per_day === null ? limits.images_per_day : undefined,
+    concurrency: typeof limits.concurrency === "number" || limits.concurrency === null ? limits.concurrency : undefined,
+    models: Array.isArray(limits.models) ? limits.models : undefined,
+  };
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -21,7 +43,7 @@ export default function LoginPage() {
   const handleLogin = async () => {
     const normalizedLoginValue = authKey.trim();
     if (!normalizedLoginValue) {
-      toast.error("请输入密钥或用户名称");
+      toast.error("请输入用户密钥或访问码");
       return;
     }
 
@@ -33,11 +55,11 @@ export default function LoginPage() {
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
+        limits: normalizeLoginLimits((data as { limits?: unknown }).limits),
       });
       router.replace(getDefaultRouteForRole(data.role));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "登录失败";
-      toast.error(message);
+      toast.error(getFriendlyErrorMessage(error, "登录失败"));
     } finally {
       setIsSubmitting(false);
     }
@@ -61,13 +83,13 @@ export default function LoginPage() {
             </div>
             <div className="space-y-2">
               <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">管理员输入密钥；普通用户也可以输入管理员创建的用户名称进入创作台。</p>
+              <p className="text-sm leading-6 text-stone-500">请输入管理员分配的用户密钥，或使用已开通的访问码进入创作台。</p>
             </div>
           </div>
 
           <div className="space-y-3">
             <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
-              密钥或用户名称
+              用户密钥或访问码
             </label>
             <Input
               id="auth-key"
@@ -79,7 +101,7 @@ export default function LoginPage() {
                   void handleLogin();
                 }
               }}
-              placeholder="管理员密钥或用户名称"
+              placeholder="输入用户密钥或访问码"
               className="h-13 rounded-2xl border-stone-200 bg-white px-4"
             />
           </div>

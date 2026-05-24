@@ -1,6 +1,7 @@
 import axios, {AxiosError, type AxiosRequestConfig} from "axios";
 
 import webConfig from "@/constants/common-env";
+import {getFriendlyErrorMessage} from "@/lib/error-messages";
 import {clearStoredAuthSession, getStoredAuthKey} from "@/store/auth";
 
 type RequestConfig = AxiosRequestConfig & {
@@ -8,9 +9,11 @@ type RequestConfig = AxiosRequestConfig & {
 };
 
 type ErrorPayload = {
-    detail?: string | { error?: string | { message?: string } };
-    error?: string | { message?: string };
+    detail?: string | { error?: string | { message?: string; code?: string; type?: string } };
+    error?: string | { message?: string; code?: string; type?: string };
     message?: string;
+    code?: string;
+    type?: string;
 };
 
 function errorMessageFromValue(value: unknown): string {
@@ -62,12 +65,18 @@ request.interceptors.response.use(
         }
 
         const payload = error.response?.data;
-        const message =
+        const rawMessage =
             errorMessageFromValue(payload?.detail) ||
             errorMessageFromValue(payload?.error) ||
             payload?.message ||
             error.message ||
             `请求失败 (${status || 500})`;
+        const payloadError = typeof payload?.error === "object" && payload.error ? payload.error : undefined;
+        const message = getFriendlyErrorMessage(rawMessage, `请求失败 (${status || 500})`, {
+            status,
+            code: payload?.code || payloadError?.code,
+            type: payload?.type || payloadError?.type,
+        });
         return Promise.reject(new Error(message));
     },
 );

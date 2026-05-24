@@ -17,6 +17,11 @@ type AuthenticatedImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> 
   fallbackSrc?: string;
 };
 
+type ResolvedImageSource = {
+  candidate: string;
+  src: string;
+};
+
 const IMAGE_FETCH_RETRY_DELAYS_MS = [250, 750, 1500, 3000];
 
 function wait(ms: number) {
@@ -89,8 +94,8 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
     () => [src, fallbackSrc].filter((item): item is string => Boolean(item)),
     [src, fallbackSrc],
   );
-  const [resolvedSrc, setResolvedSrc] = useState<string | undefined>(() =>
-    shouldFetchImageWithAuth(src) ? undefined : src,
+  const [resolvedSource, setResolvedSource] = useState<ResolvedImageSource | undefined>(() =>
+    shouldFetchImageWithAuth(src) ? undefined : { candidate: src, src },
   );
 
   useEffect(() => {
@@ -101,7 +106,7 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
       for (const candidate of candidates) {
         if (!shouldFetchImageWithAuth(candidate)) {
           if (!cancelled) {
-            setResolvedSrc(candidate);
+            setResolvedSource({ candidate, src: candidate });
           }
           return;
         }
@@ -112,7 +117,7 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
             return;
           }
           objectUrl = nextObjectUrl;
-          setResolvedSrc(nextObjectUrl);
+          setResolvedSource({ candidate, src: nextObjectUrl });
           return;
         } catch {
           // Try the fallback candidate below.
@@ -121,11 +126,10 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
 
       if (!cancelled) {
         const plainFallback = candidates.find((candidate) => !shouldFetchImageWithAuth(candidate));
-        setResolvedSrc(plainFallback);
+        setResolvedSource(plainFallback ? { candidate: plainFallback, src: plainFallback } : undefined);
       }
     }
 
-    setResolvedSrc(shouldFetchImageWithAuth(src) ? undefined : src);
     void resolve();
     return () => {
       cancelled = true;
@@ -134,6 +138,9 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
       }
     };
   }, [candidates, src]);
+
+  const resolvedSrc =
+    resolvedSource && candidates.includes(resolvedSource.candidate) ? resolvedSource.src : undefined;
 
   if (!resolvedSrc) {
     return (
@@ -148,5 +155,6 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
     );
   }
 
+  // eslint-disable-next-line @next/next/no-img-element -- Supports authenticated blob URLs and native img props passthrough.
   return <img {...props} src={resolvedSrc} className={className} alt={alt} style={style} />;
 }

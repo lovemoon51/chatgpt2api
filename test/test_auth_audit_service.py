@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
+from copy import deepcopy
 from unittest import mock
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 import api.support as support_module
+import api.system as system_module
 from services.auth_audit_service import AuthAuditService, auth_audit_service, key_hint
 
 
@@ -43,6 +46,23 @@ class AuthAuditServiceTests(unittest.TestCase):
         self.assertGreater(second_retry_after, 0)
         self.assertEqual(len(service.list_events()), 2)
         self.assertTrue(service.list_events()[-1]["blocked"])
+
+    def test_records_non_failure_audit_event(self) -> None:
+        service = AuthAuditService()
+
+        service.record_event(
+            source="key:abc",
+            interface="management",
+            subject_role="admin",
+            reason="settings_changed",
+            key_hint="sk-...1234",
+            detail={"changes": [{"field": "account_pool.max_total_accounts"}]},
+        )
+
+        events = service.list_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["reason"], "settings_changed")
+        self.assertEqual(events[0]["detail"]["changes"][0]["field"], "account_pool.max_total_accounts")
 
 
 class RequireIdentityAuthAuditTests(unittest.TestCase):
@@ -116,6 +136,75 @@ class RequireIdentityAuthAuditTests(unittest.TestCase):
         self.assertEqual(events[0]["interface"], "management")
         self.assertEqual(events[0]["subject_role"], "admin")
         self.assertEqual(events[0]["reason"], "admin_required")
+
+
+class FakeSettingsConfig:
+    def __init__(self) -> None:
+        self.data = {
+            "proxy": "",
+            "auto_register": {
+                "enabled": True,
+                "min_available": 50,
+                "target_available": 50,
+                "check_interval_seconds": 30,
+                "cooldown_seconds": 300,
+            },
+            "account_pool": {"max_total_accounts": 50},
+            "auth": {"username_login_enabled": False},
+        }
+
+    def get(self) -> dict[str, object]:
+        return deepcopy(self.data)
+
+    def update(self, updates: dict[str, object]) -> dict[str, object]:
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(self.data.get(key), dict):
+                self.data[key] = {**self.data[key], **value}
+            else:
+                self.data[key] = value
+        return self.get()
+
+
+class SettingsApiAuditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        auth_audit_service.reset()
+        self.addCleanup(auth_audit_service.reset)
+
+    def test_settings_update_filters_unknown_fields_and_audits_sensitive_changes(self) -> None:
+        app = FastAPI()
+        app.include_router(system_module.create_router("test-version"))
+        fake_config = FakeSettingsConfig()
+
+        with (
+            mock.patch.object(system_module, "config", fake_config),
+            mock.patch.object(system_module, "require_admin", return_value={"id": "admin", "role": "admin"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/api/settings",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={
+                    "unknown_root": "should-not-persist",
+                    "account_pool": {"max_total_accounts": "120", "unknown_nested": "drop"},
+                    "auth": {"username_login_enabled": True, "unknown_nested": "drop"},
+                    "backup_state": {"running": True},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()["config"]
+        self.assertNotIn("unknown_root", payload)
+        self.assertNotIn("backup_state", payload)
+        self.assertNotIn("unknown_nested", payload["account_pool"])
+        self.assertEqual(payload["account_pool"]["max_total_accounts"], "120")
+        self.assertTrue(payload["auth"]["username_login_enabled"])
+
+        events = auth_audit_service.list_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["reason"], "settings_changed")
+        changed_fields = {item["field"] for item in events[0]["detail"]["changes"]}
+        self.assertIn("account_pool.max_total_accounts", changed_fields)
+        self.assertIn("auth.username_login_enabled", changed_fields)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
@@ -33,6 +34,27 @@ const typeLabels: Record<string, string> = {
 const textLogEndpoints = new Set(["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"]);
 const textLogSummaryPrefixes = ["文本生成", "Responses", "Messages", "Embeddings"];
 
+const statusOptions = [
+  { label: "全部状态", value: "all" },
+  { label: "成功", value: "success" },
+  { label: "失败", value: "failed" },
+] as const;
+
+function initialLogFilters() {
+  if (typeof window === "undefined") {
+    return { type: LogType.Call, startDate: "", endDate: "", status: "all", query: "" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const nextType = params.get("type") || params.get("log_type") || LogType.Call;
+  return {
+    type: Object.values(LogType).includes(nextType as (typeof LogType)[keyof typeof LogType]) ? nextType : LogType.Call,
+    startDate: params.get("start_date") || params.get("start") || "",
+    endDate: params.get("end_date") || params.get("end") || "",
+    status: params.get("status") || "all",
+    query: params.get("q") || params.get("query") || params.get("keyword") || "",
+  };
+}
+
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
   return typeof value === "string" || typeof value === "number" ? String(value) : "-";
@@ -51,6 +73,16 @@ function formatSummary(item: SystemLog) {
   return summary;
 }
 
+function formatValue(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
 function getUrls(item: SystemLog | null) {
   const urls = item?.detail?.urls;
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
@@ -61,6 +93,11 @@ function getStatus(item: SystemLog) {
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
   return "-";
+}
+
+function getStatusValue(item: SystemLog) {
+  const status = item.detail?.status;
+  return typeof status === "string" ? status : "";
 }
 
 function getLogType(item: SystemLog) {
@@ -87,17 +124,43 @@ function mergeLogs(...groups: SystemLog[][]) {
   });
 }
 
+function logMatchesQuery(item: SystemLog, query: string) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return true;
+  return [
+    item.time,
+    item.type,
+    item.summary,
+    item.detail?.endpoint,
+    item.detail?.model,
+    item.detail?.key_name,
+    item.detail?.error,
+    item.detail?.request_text,
+  ].some((value) => String(value || "").toLowerCase().includes(normalized));
+}
+
+function detailSectionEntries(item: SystemLog | null, keys: string[]) {
+  const detail = item?.detail || {};
+  return keys
+    .filter((key) => detail[key] !== undefined)
+    .map((key) => [key, detail[key]] as const);
+}
+
 function LogsContent() {
+  const initialFilters = useMemo(initialLogFilters, []);
   const [items, setItems] = useState<SystemLog[]>([]);
-  const [type, setType] = useState<string>(LogType.Call);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+  const [type, setType] = useState<string>(initialFilters.type);
+  const [startDate, setStartDate] = useState(initialFilters.startDate);
+  const [endDate, setEndDate] = useState(initialFilters.endDate);
+  const [statusFilter, setStatusFilter] = useState(initialFilters.status);
+  const [query, setQuery] = useState(initialFilters.query);
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
@@ -109,14 +172,28 @@ function LogsContent() {
   const showDuration = hasCallMeta || type === LogType.Account;
   const showImages = isCallLog;
   const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      const statusMatched = statusFilter === "all" || getStatusValue(item) === statusFilter;
+      return statusMatched && logMatchesQuery(item, query);
+    });
+  }, [items, query, statusFilter]);
+  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
-  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
+  const allSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedSet.has(item.id));
+  const detailCoreEntries = detailSectionEntries(detailLog, ["status", "endpoint", "model", "key_name", "role", "duration_ms"]);
+  const detailTimingEntries = detailSectionEntries(detailLog, ["started_at", "ended_at"]);
+  const detailErrorEntries = detailSectionEntries(detailLog, ["error", "request_text"]);
+  const detailOtherEntries = Object.entries(detailLog?.detail || {}).filter(
+    ([key, value]) =>
+      !["urls", "status", "endpoint", "model", "key_name", "role", "duration_ms", "started_at", "ended_at", "error", "request_text"].includes(key) &&
+      typeof value !== "object",
+  );
 
-  const loadLogs = async () => {
+  const loadLogs = useCallback(async () => {
     setIsLoading(true);
     try {
       const filters = { start_date: startDate, end_date: endDate };
@@ -128,18 +205,23 @@ function LogsContent() {
         : await fetchSystemLogs({ ...filters, type });
       const normalizedItems = data.items.map(normalizeLogItem).filter((item) => item.type === type);
       setItems(normalizedItems);
+      setLoadError("");
       setSelectedIds((current) => current.filter((id) => normalizedItems.some((item) => item.id === id)));
       setPage(1);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载日志失败");
+      const message = error instanceof Error ? error.message : "加载日志失败";
+      setLoadError(message);
+      toast.error(message);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [endDate, startDate, type]);
 
   const clearFilters = () => {
     setStartDate("");
     setEndDate("");
+    setStatusFilter("all");
+    setQuery("");
   };
 
   const openDetail = (item: SystemLog) => {
@@ -180,7 +262,7 @@ function LogsContent() {
 
   useEffect(() => {
     void loadLogs();
-  }, [type, startDate, endDate]);
+  }, [loadLogs]);
 
   return (
     <section className="space-y-5">
@@ -189,15 +271,35 @@ function LogsContent() {
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Logs</div>
           <h1 className="text-2xl font-semibold tracking-tight">日志管理</h1>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="grid gap-2 sm:grid-cols-2 lg:flex lg:flex-wrap">
           <Select value={type} onValueChange={setType}>
-            <SelectTrigger className="h-10 w-[150px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white lg:w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={LogType.Call}>图片调用日志</SelectItem>
               <SelectItem value={LogType.Text}>文本生成日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
             </SelectContent>
           </Select>
+          <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value); setPage(1); }}>
+            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white lg:w-[118px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {statusOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="relative min-w-0 sm:col-span-2 lg:min-w-[220px]">
+            <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+            <Input
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              placeholder="搜索摘要/模型/错误"
+              className="h-10 rounded-xl border-stone-200 bg-white pl-10"
+            />
+          </div>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
@@ -209,22 +311,41 @@ function LogsContent() {
         </div>
       </div>
 
+      {loadError ? (
+        <Card className="rounded-2xl border-rose-100 bg-rose-50/90 shadow-sm">
+          <CardContent className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 text-rose-700">
+              <AlertTriangle className="mt-0.5 size-5 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">日志加载失败</div>
+                <div className="mt-1 break-words text-xs leading-5 text-rose-600">{loadError}</div>
+              </div>
+            </div>
+            <Button variant="outline" className="h-9 shrink-0 rounded-xl border-rose-200 bg-white px-3 text-rose-700 hover:bg-rose-50" onClick={() => void loadLogs()} disabled={isLoading}>
+              <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
+              重试
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <span>共 {items.length} 条</span>
+              <span>共 {filteredItems.length} 条</span>
+              {filteredItems.length !== items.length ? <span className="text-stone-400">筛选自 {items.length} 条</span> : null}
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
                 本页全选
               </label>
               <label className="flex items-center gap-2">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(items.map((item) => item.id), Boolean(checked))} />
+                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(filteredItems.map((item) => item.id), Boolean(checked))} />
                 全选结果
               </label>
               {selectedIds.length > 0 ? <span>已选 {selectedIds.length} 条</span> : null}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
               <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs()} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
@@ -316,8 +437,8 @@ function LogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+            <span>第 {safePage} / {pageCount} 页，共 {filteredItems.length} 条</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
@@ -325,7 +446,7 @@ function LogsContent() {
               <ChevronRight className="size-4" />
             </Button>
           </div>
-          {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
+          {!isLoading && filteredItems.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
         </CardContent>
       </Card>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
@@ -335,16 +456,38 @@ function LogsContent() {
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5">
             <div className="space-y-4">
-              <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
-                {Object.entries(detailLog?.detail || {})
-                  .filter(([key, value]) => key !== "urls" && typeof value !== "object")
-                  .map(([key, value]) => (
-                    <div key={key} className="flex items-start justify-between gap-4">
-                      <span className="text-stone-400">{key}</span>
-                      <span className="text-right font-medium break-all text-stone-700">{String(value)}</span>
-                    </div>
-                  ))}
+              <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-3">
+                <div>
+                  <div className="text-xs text-stone-400">时间</div>
+                  <div className="mt-1 font-medium text-stone-700">{detailLog?.time || "-"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-stone-400">类型</div>
+                  <div className="mt-1 font-medium text-stone-700">{detailLog ? typeLabels[detailLog.type] || detailLog.type : "-"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-stone-400">摘要</div>
+                  <div className="mt-1 font-medium break-words text-stone-700">{detailLog ? formatSummary(detailLog) : "-"}</div>
+                </div>
               </div>
+              {[
+                { title: "调用信息", entries: detailCoreEntries },
+                { title: "时间线", entries: detailTimingEntries },
+                { title: "错误与请求", entries: detailErrorEntries },
+                { title: "其他字段", entries: detailOtherEntries },
+              ].filter((section) => section.entries.length > 0).map((section) => (
+                <div key={section.title} className="rounded-xl border border-stone-200 bg-white p-4">
+                  <div className="mb-3 text-sm font-medium text-stone-700">{section.title}</div>
+                  <div className="grid gap-3 text-sm text-stone-600 md:grid-cols-2">
+                    {section.entries.map(([key, value]) => (
+                      <div key={key} className="flex items-start justify-between gap-4">
+                        <span className="shrink-0 text-stone-400">{key}</span>
+                        <span className="text-right font-medium break-all text-stone-700">{formatValue(value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
               {detailUrls.length ? (
                 <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
                   {detailUrls.map((url, index) => (

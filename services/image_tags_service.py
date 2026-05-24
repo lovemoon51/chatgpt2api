@@ -40,6 +40,12 @@ def set_tags(image_rel: str, tags: list[str]) -> list[str]:
     else:
         data.pop(image_rel, None)
     save_tags(data)
+    try:
+        from services.image_asset_service import update_asset_tags
+
+        update_asset_tags(image_rel, cleaned)
+    except Exception:
+        pass
     return cleaned
 
 
@@ -47,6 +53,12 @@ def remove_tags(image_rel: str) -> None:
     data = load_tags()
     if data.pop(image_rel, None) is not None:
         save_tags(data)
+    try:
+        from services.image_asset_service import update_asset_tags
+
+        update_asset_tags(image_rel, [])
+    except Exception:
+        pass
 
 
 def delete_tag(tag: str) -> int:
@@ -61,6 +73,12 @@ def delete_tag(tag: str) -> int:
             count += 1
     if count > 0:
         save_tags(data)
+    try:
+        from services.image_asset_service import remove_asset_tag
+
+        remove_asset_tag(tag)
+    except Exception:
+        pass
     return count
 
 

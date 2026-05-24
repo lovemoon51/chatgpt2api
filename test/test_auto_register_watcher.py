@@ -49,17 +49,21 @@ class AutoRegisterWatcherTests(unittest.TestCase):
     def test_starts_register_when_available_accounts_below_threshold(self) -> None:
         registrar = FakeRegistrar(enabled=False)
         account_pool = FakeAccountPool(available=3, tokens=["token-a", "token-b"])
-        with mock.patch.object(
-            support_module.config,
-            "get_auto_register_settings",
-            return_value={
-                "enabled": True,
-                "min_available": 100,
-                "target_available": 100,
-                "check_interval_seconds": 30,
-                "cooldown_seconds": 300,
-            },
-        ), mock.patch.object(support_module.log_service, "add") as add_log:
+        with (
+            mock.patch.object(
+                support_module.config,
+                "get_auto_register_settings",
+                return_value={
+                    "enabled": True,
+                    "min_available": 100,
+                    "target_available": 100,
+                    "check_interval_seconds": 30,
+                    "cooldown_seconds": 300,
+                },
+            ),
+            mock.patch.object(support_module.config, "get_account_pool_settings", return_value={"max_total_accounts": 100}),
+            mock.patch.object(support_module.log_service, "add") as add_log,
+        ):
             last_triggered_at, triggered = support_module.run_auto_register_check(
                 0,
                 now=1000,
@@ -75,10 +79,43 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         self.assertEqual(registrar.started, 1)
         self.assertEqual(registrar.updates[0]["mode"], "available")
         self.assertEqual(registrar.updates[0]["target_available"], 100)
-        self.assertEqual(registrar.updates[0]["total"], 97)
+        self.assertEqual(registrar.updates[0]["total"], 98)
         self.assertEqual(add_log.call_args.args[0], support_module.LOG_TYPE_ACCOUNT)
         self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检触发补池")
         self.assertTrue(add_log.call_args.args[2]["triggered"])
+
+    def test_does_not_register_when_total_accounts_reach_cap(self) -> None:
+        registrar = FakeRegistrar(enabled=False)
+        account_pool = FakeAccountPool(available=0, tokens=[f"token-{index}" for index in range(50)])
+        with (
+            mock.patch.object(
+                support_module.config,
+                "get_auto_register_settings",
+                return_value={
+                    "enabled": True,
+                    "min_available": 50,
+                    "target_available": 50,
+                    "check_interval_seconds": 30,
+                    "cooldown_seconds": 300,
+                },
+            ),
+            mock.patch.object(support_module.config, "get_account_pool_settings", return_value={"max_total_accounts": 50}),
+            mock.patch.object(support_module.log_service, "add") as add_log,
+        ):
+            last_triggered_at, triggered = support_module.run_auto_register_check(
+                0,
+                now=1000,
+                account_pool=account_pool,
+                registrar=registrar,
+            )
+
+        self.assertFalse(triggered)
+        self.assertEqual(last_triggered_at, 0)
+        self.assertEqual(account_pool.refresh_calls, [])
+        self.assertEqual(registrar.started, 0)
+        self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检")
+        self.assertEqual(add_log.call_args.args[2]["reason"], "account_limit_reached")
+        self.assertEqual(add_log.call_args.args[2]["total_accounts"], 50)
 
     def test_refreshes_all_accounts_before_deciding_whether_to_register(self) -> None:
         settings = {
@@ -96,6 +133,7 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         registrar = FakeRegistrar(enabled=False)
         with (
             mock.patch.object(support_module.config, "get_auto_register_settings", return_value=settings),
+            mock.patch.object(support_module.config, "get_account_pool_settings", return_value={"max_total_accounts": 120}),
             mock.patch.object(support_module.log_service, "add") as add_log,
         ):
             last_triggered_at, triggered = support_module.run_auto_register_check(
@@ -125,6 +163,7 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         }
         with (
             mock.patch.object(support_module.config, "get_auto_register_settings", return_value=settings),
+            mock.patch.object(support_module.config, "get_account_pool_settings", return_value={"max_total_accounts": 100}),
             mock.patch.object(support_module.log_service, "add") as add_log,
         ):
             cooldown_registrar = FakeRegistrar(enabled=False)
@@ -161,6 +200,7 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         registrar = FakeRegistrar(enabled=False)
         with (
             mock.patch.object(support_module.config, "get_auto_register_settings", return_value=settings),
+            mock.patch.object(support_module.config, "get_account_pool_settings", return_value={"max_total_accounts": 120}),
             mock.patch.object(support_module.log_service, "add") as add_log,
         ):
             last_triggered_at, triggered = support_module.run_auto_register_check(

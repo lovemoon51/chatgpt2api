@@ -32,6 +32,7 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restore_at?: string | null;
+  image_blocked_reason?: string | null;
   can_activate_plus?: boolean;
   plus_promo_text?: string | null;
   tags?: string[];
@@ -92,7 +93,25 @@ export type SettingsConfig = {
   backup?: BackupSettings;
   backup_state?: BackupState;
   auto_register?: AutoRegisterSettings;
+  account_pool?: AccountPoolSettings;
+  auth?: AuthSettings;
   [key: string]: unknown;
+};
+
+export type SettingsDiagnosticItem = {
+  key: string;
+  label: string;
+  source: "env" | "config.json" | "default" | "missing" | string;
+  sensitive: boolean;
+  configured: boolean;
+  status: string;
+  env?: string;
+  value?: string;
+};
+
+export type SettingsDiagnostics = {
+  config_file?: string;
+  items: SettingsDiagnosticItem[];
 };
 
 export type AutoRegisterSettings = {
@@ -101,6 +120,14 @@ export type AutoRegisterSettings = {
   target_available: number | string;
   check_interval_seconds: number | string;
   cooldown_seconds: number | string;
+};
+
+export type AccountPoolSettings = {
+  max_total_accounts: number | string;
+};
+
+export type AuthSettings = {
+  username_login_enabled: boolean;
 };
 
 export type BackupInclude = {
@@ -227,6 +254,28 @@ export type ManagedImage = {
   tags?: string[];
 };
 
+export type ManagedImageListFilters = {
+  start_date?: string;
+  end_date?: string;
+  q?: string;
+  search?: string;
+  tags?: string[];
+  tag?: string;
+  sort?: string;
+  order?: "asc" | "desc" | string;
+  page?: number;
+  page_size?: number;
+};
+
+export type ManagedImageListResponse = {
+  items: ManagedImage[];
+  groups: Array<{ date: string; items: ManagedImage[] }>;
+  total?: number;
+  page?: number;
+  page_size?: number;
+  pages?: number;
+};
+
 export type SystemLog = {
   id: string;
   time: string;
@@ -243,17 +292,26 @@ export type ImageResponse = {
 
 export type ImageTask = {
   id: string;
-  status: "queued" | "running" | "success" | "error";
+  status: "queued" | "submitting" | "running" | "downloading" | "saving" | "success" | "error" | "cancelled";
+  phase?: "queued" | "submitting" | "generating" | "downloading" | "saving" | "completed" | "error" | string;
+  phase_label?: string;
+  phase_updated_at?: string;
+  timings?: Record<string, number | undefined>;
+  timing_ms?: Record<string, number | undefined>;
   mode: "generate" | "edit";
   model?: ImageModel;
   size?: string;
   created_at: string;
   updated_at: string;
   queued_at?: string;
+  submitted_at?: string;
   started_at?: string;
+  downloading_at?: string;
+  saving_at?: string;
   finished_at?: string;
   duration_ms?: number;
   queue_duration_ms?: number;
+  total_duration_ms?: number;
   data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
   error?: string;
 };
@@ -263,6 +321,12 @@ type ImageTaskListResponse = {
   missing_ids: string[];
 };
 
+export type ImageTaskTimingPayload = {
+  timing_key: string;
+  duration_ms: number;
+  phase?: string;
+};
+
 export type LoginResponse = {
   ok: boolean;
   version: string;
@@ -270,6 +334,7 @@ export type LoginResponse = {
   subject_id: string;
   name: string;
   access_token?: string;
+  limits?: UserKeyLimits | null;
 };
 
 export type UserKey = {
@@ -320,6 +385,7 @@ export type DashboardResponse = {
     today?: DashboardMetricGroup;
     recent?: DashboardMetricGroup;
     image?: DashboardMetricGroup;
+    queue?: DashboardMetricGroup;
     failure_reasons?: Array<{
       reason?: string;
       endpoint?: string;
@@ -350,11 +416,68 @@ export type DashboardResponse = {
     bucket?: string;
     status?: string;
   };
-  auto_register?: AutoRegisterSettings;
+  auto_register?: AutoRegisterSettings & {
+    max_total_accounts?: number | string;
+    current_available?: number;
+    current_accounts?: number;
+    running?: number;
+    in_flight?: number;
+    pending?: number;
+    failed?: number;
+    fail?: number;
+    total?: number;
+    failure_rate?: number;
+    last_error?: string | null;
+    last_checked_at?: string | null;
+  };
+  queue?: DashboardMetricGroup;
+  image_tasks?: DashboardMetricGroup & {
+    queued?: number;
+    checking_capacity?: number;
+    checking_out_account?: number;
+    submitting?: number;
+    polling?: number;
+    running?: number;
+    downloading?: number;
+    saving?: number;
+    phase_counts?: Record<string, number>;
+    pending?: number;
+    success?: number;
+    failed?: number;
+    avg_wait_ms?: number;
+    avg_duration_ms?: number;
+    p90_duration_ms?: number;
+    p99_duration_ms?: number;
+    duration_p90_ms?: number;
+    duration_p99_ms?: number;
+    p90_wait_ms?: number;
+    p99_wait_ms?: number;
+  };
   health?: {
     level?: "normal" | "warning" | "critical" | string;
     reasons?: string[];
     refreshed_at?: string;
+    threads?: Record<string, unknown>;
+    background_threads?: Record<string, unknown>;
+    workers?: Record<string, unknown>;
+  };
+  threads?: Record<string, unknown>;
+  background_threads?: Record<string, unknown>;
+  workers?: {
+    ok?: boolean;
+    status?: "ok" | "degraded" | "unhealthy" | string;
+    items?: Array<{
+      name?: string;
+      running?: boolean;
+      started_at?: string | null;
+      last_heartbeat?: string | null;
+      last_error?: string | null;
+      [key: string]: unknown;
+    }>;
+    missing?: string[];
+    stopped?: string[];
+    errors?: Array<{ name?: string; error?: string | null }>;
+    [key: string]: unknown;
   };
   [key: string]: unknown;
 };
@@ -396,6 +519,12 @@ export type RegisterConfig = {
     success_rate?: number;
     current_quota?: number;
     current_available?: number;
+    current_accounts?: number;
+    target_available?: number;
+    in_flight?: number;
+    pending?: number;
+    failure_rate?: number;
+    last_error?: string | null;
     started_at?: string;
     updated_at?: string;
     finished_at?: string;
@@ -772,12 +901,28 @@ export async function fetchImageTasks(ids: string[]) {
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+export async function cancelImageTask(id: string) {
+  return httpRequest<ImageTask>(`/api/image-tasks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function reportImageTaskTiming(taskId: string, payload: ImageTaskTimingPayload) {
+  return httpRequest<ImageTask>(
+    `/api/image-tasks/${encodeURIComponent(taskId)}/timings`,
+    {
+      method: "POST",
+      body: payload,
+    },
+  );
+}
+
 export async function fetchSettingsConfig() {
-  return httpRequest<{ config: SettingsConfig }>("/api/settings");
+  return httpRequest<{ config: SettingsConfig; diagnostics?: SettingsDiagnostics }>("/api/settings");
 }
 
 export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {
-  return httpRequest<{ config: SettingsConfig }>("/api/settings", {
+  return httpRequest<{ config: SettingsConfig; diagnostics?: SettingsDiagnostics }>("/api/settings", {
     method: "POST",
     body: settings,
   });
@@ -827,11 +972,17 @@ export function getBackupDownloadUrl(key: string) {
   return `/api/backups/download?${params.toString()}`;
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
+export async function fetchManagedImages(filters: ManagedImageListFilters) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }> }>(
+  if (filters.search || filters.q) params.set("search", filters.search || filters.q || "");
+  if (filters.tag || filters.tags?.length) params.set("tag", filters.tag || filters.tags?.join(",") || "");
+  if (filters.sort) params.set("sort", filters.sort);
+  if (filters.order) params.set("order", filters.order);
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  return httpRequest<ManagedImageListResponse>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
   );
 }

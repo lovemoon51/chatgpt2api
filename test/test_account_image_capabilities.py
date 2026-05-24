@@ -243,6 +243,67 @@ class AccountCapabilityTests(unittest.TestCase):
             with service._image_slot_condition:
                 service._image_pool_replenish_running = False
 
+    def test_request_register_respects_total_account_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts([f"token-{index}" for index in range(50)])
+
+            with (
+                mock.patch.object(account_module.config, "get_auto_register_settings", return_value={"target_available": 50}),
+                mock.patch("services.register.openai_register.worker", side_effect=AssertionError("should not register")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "account limit reached"):
+                    service.register_image_account_for_request(reason="test")
+
+    def test_request_register_times_out_and_releases_running_state(self) -> None:
+        old_timeout = account_module.config.data.get("image_pool_register_timeout_seconds")
+        account_module.config.data["image_pool_register_timeout_seconds"] = 0.05
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+
+                def slow_worker(_index: int) -> dict:
+                    time.sleep(0.3)
+                    return {"ok": True, "result": {"access_token": "late-token"}}
+
+                started = time.time()
+                with mock.patch("services.register.openai_register.worker", side_effect=slow_worker):
+                    with self.assertRaisesRegex(TimeoutError, "image pool register timed out"):
+                        service.register_image_account_for_request(reason="test")
+
+                self.assertLess(time.time() - started, 0.5)
+                with service._image_slot_condition:
+                    self.assertFalse(service._image_pool_register_running)
+            finally:
+                if old_timeout is None:
+                    account_module.config.data.pop("image_pool_register_timeout_seconds", None)
+                else:
+                    account_module.config.data["image_pool_register_timeout_seconds"] = old_timeout
+
+    def test_request_register_wait_for_running_job_has_timeout_boundary(self) -> None:
+        old_timeout = account_module.config.data.get("image_pool_register_timeout_seconds")
+        account_module.config.data["image_pool_register_timeout_seconds"] = 0.05
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                with service._image_slot_condition:
+                    service._image_pool_register_running = True
+                    service._image_pool_register_generation = 1
+
+                started = time.time()
+                with mock.patch("services.register.openai_register.worker", side_effect=AssertionError("should not start another worker")):
+                    with self.assertRaisesRegex(RuntimeError, "image pool register timed out"):
+                        service.register_image_account_for_request(reason="test")
+
+                self.assertLess(time.time() - started, 0.5)
+                with service._image_slot_condition:
+                    self.assertFalse(service._image_pool_register_running)
+            finally:
+                if old_timeout is None:
+                    account_module.config.data.pop("image_pool_register_timeout_seconds", None)
+                else:
+                    account_module.config.data["image_pool_register_timeout_seconds"] = old_timeout
+
 
 class TokenLogTests(unittest.TestCase):
     def test_anonymize_token_hides_raw_value(self) -> None:

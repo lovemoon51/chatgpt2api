@@ -4,7 +4,7 @@
   "image_retention_days": 15,
   "image_poll_timeout_secs": 300,
   "auto_remove_rate_limited_accounts": false,
-  "auto_remove_invalid_accounts": true,
+  "auto_remove_invalid_accounts": false,
   "log_levels": [
     "debug",
     "error",
@@ -53,6 +53,9 @@
     "target_available": 50,
     "check_interval_seconds": 30,
     "cooldown_seconds": 300
+  },
+  "account_pool": {
+    "max_total_accounts": 50
   },
   "refresh_account_workers": 4,
   "refresh_account_batch_size": 8,

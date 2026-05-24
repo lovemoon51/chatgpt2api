@@ -16,18 +16,28 @@ export type StoredImage = {
   id: string;
   taskId?: string;
   status?: "loading" | "success" | "error";
+  phase?: "queued" | "submitting" | "generating" | "downloading" | "saving" | "completed" | "error" | string;
+  phase_label?: string;
   b64_json?: string;
   url?: string;
   revised_prompt?: string;
   error?: string;
   queued_at?: string;
+  submitted_at?: string;
   started_at?: string;
+  downloading_at?: string;
+  saving_at?: string;
   finished_at?: string;
+  phase_updated_at?: string;
+  timings?: Record<string, number | undefined>;
+  timing_ms?: Record<string, number | undefined>;
   duration_ms?: number;
   queue_duration_ms?: number;
+  total_duration_ms?: number;
   reveal_started_at?: string;
   reveal_finished_at?: string;
   reveal_duration_ms?: number;
+  reported_timings?: Record<string, boolean | undefined>;
 };
 
 export type ImageTurnStatus = "queued" | "generating" | "success" | "error";
@@ -73,16 +83,26 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
   const normalized = {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
+    phase: typeof image.phase === "string" ? image.phase : undefined,
+    phase_label: typeof image.phase_label === "string" ? image.phase_label : undefined,
     url: typeof image.url === "string" && image.url ? image.url : undefined,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
     queued_at: typeof image.queued_at === "string" ? image.queued_at : undefined,
+    submitted_at: typeof image.submitted_at === "string" ? image.submitted_at : undefined,
     started_at: typeof image.started_at === "string" ? image.started_at : undefined,
+    downloading_at: typeof image.downloading_at === "string" ? image.downloading_at : undefined,
+    saving_at: typeof image.saving_at === "string" ? image.saving_at : undefined,
     finished_at: typeof image.finished_at === "string" ? image.finished_at : undefined,
+    phase_updated_at: typeof image.phase_updated_at === "string" ? image.phase_updated_at : undefined,
+    timings: normalizeTimingMap(image.timings),
+    timing_ms: normalizeTimingMap(image.timing_ms),
     duration_ms: typeof image.duration_ms === "number" ? Math.max(0, image.duration_ms) : undefined,
     queue_duration_ms: typeof image.queue_duration_ms === "number" ? Math.max(0, image.queue_duration_ms) : undefined,
+    total_duration_ms: typeof image.total_duration_ms === "number" ? Math.max(0, image.total_duration_ms) : undefined,
     reveal_started_at: typeof image.reveal_started_at === "string" ? image.reveal_started_at : undefined,
     reveal_finished_at: typeof image.reveal_finished_at === "string" ? image.reveal_finished_at : undefined,
     reveal_duration_ms: typeof image.reveal_duration_ms === "number" ? Math.max(0, image.reveal_duration_ms) : undefined,
+    reported_timings: normalizeReportedTimingMap(image.reported_timings),
   };
   if (image.status === "loading" || image.status === "error" || image.status === "success") {
     return normalized;
@@ -91,6 +111,24 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     ...normalized,
     status: image.b64_json || image.url ? "success" : "loading",
   };
+}
+
+function normalizeTimingMap(value: StoredImage["timings"]): StoredImage["timings"] {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const entries = Object.entries(value)
+    .map(([key, duration]) => [key, typeof duration === "number" && Number.isFinite(duration) ? Math.max(0, duration) : undefined] as const)
+    .filter(([, duration]) => duration !== undefined);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeReportedTimingMap(value: StoredImage["reported_timings"]): StoredImage["reported_timings"] {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const entries = Object.entries(value).filter(([, reported]) => reported === true);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function normalizeReferenceImage(image: StoredReferenceImage): StoredReferenceImage {

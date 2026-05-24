@@ -35,6 +35,14 @@ DEFAULT_AUTO_REGISTER_SETTINGS = {
     "cooldown_seconds": 300,
 }
 
+DEFAULT_ACCOUNT_POOL_SETTINGS = {
+    "max_total_accounts": 50,
+}
+
+DEFAULT_AUTH_SETTINGS = {
+    "username_login_enabled": False,
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -115,6 +123,75 @@ def _normalize_auto_register_settings(value: object) -> dict[str, object]:
             30,
         ),
     }
+
+
+def _normalize_account_pool_settings(value: object, legacy_auto_register: object = None) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    legacy = legacy_auto_register if isinstance(legacy_auto_register, dict) else {}
+    return {
+        "max_total_accounts": _normalize_positive_int(
+            source.get("max_total_accounts", legacy.get("target_available")),
+            int(DEFAULT_ACCOUNT_POOL_SETTINGS["max_total_accounts"]),
+            1,
+        ),
+    }
+
+
+def _normalize_auth_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "username_login_enabled": _normalize_bool(
+            source.get("username_login_enabled"),
+            bool(DEFAULT_AUTH_SETTINGS["username_login_enabled"]),
+        ),
+    }
+
+
+def _nested_get(source: dict[str, object], path: str) -> tuple[bool, object]:
+    current: object = source
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def _diagnostic_value_is_set(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _diagnostic_value_preview(value: object) -> str | None:
+    if not _diagnostic_value_is_set(value):
+        return None
+    if isinstance(value, bool):
+        return "启用" if value else "关闭"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if len(normalized) > 72:
+            return f"{normalized[:69]}..."
+        return normalized
+    if isinstance(value, (list, tuple, set)):
+        return f"{len(value)} 项"
+    if isinstance(value, dict):
+        return f"{len(value)} 项"
+    return str(value)
+
+
+def _merge_dicts(current: object, updates: object) -> object:
+    if not isinstance(current, dict) or not isinstance(updates, dict):
+        return updates
+    merged = dict(current)
+    for key, value in updates.items():
+        merged[key] = _merge_dicts(merged.get(key), value)
+    return merged
 
 
 def _normalize_backup_state(value: object) -> dict[str, object]:
@@ -242,6 +319,10 @@ class ConfigStore:
         return _normalize_positive_float(self.data.get("image_pool_preflight_wait_seconds"), 3.0, 0.0)
 
     @property
+    def image_pool_register_timeout_seconds(self) -> float:
+        return _normalize_positive_float(self.data.get("image_pool_register_timeout_seconds"), 60.0, 0.001)
+
+    @property
     def image_pool_replenish_debounce_seconds(self) -> float:
         return _normalize_positive_float(self.data.get("image_pool_replenish_debounce_seconds"), 15.0, 0.0)
 
@@ -329,6 +410,7 @@ class ConfigStore:
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_pool_register_timeout_seconds"] = self.image_pool_register_timeout_seconds
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
@@ -337,19 +419,137 @@ class ConfigStore:
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
         data["auto_register"] = self.get_auto_register_settings()
+        data["account_pool"] = self.get_account_pool_settings()
+        data["auth"] = self.get_auth_settings()
         data.pop("auth-key", None)
         return data
+
+    def diagnostics(self) -> dict[str, object]:
+        items: list[dict[str, object]] = []
+
+        def add_item(
+            key: str,
+            label: str,
+            *,
+            source: str,
+            value: object = None,
+            sensitive: bool = False,
+            env: str | None = None,
+            configured: bool | None = None,
+        ) -> None:
+            is_set = _diagnostic_value_is_set(value) if configured is None else configured
+            item: dict[str, object] = {
+                "key": key,
+                "label": label,
+                "source": source,
+                "sensitive": sensitive,
+                "configured": is_set,
+                "status": "已设置" if is_set else "未设置",
+            }
+            if env:
+                item["env"] = env
+            if not sensitive:
+                preview = _diagnostic_value_preview(value)
+                if preview is not None:
+                    item["value"] = preview
+            items.append(item)
+
+        def add_config_item(key: str, label: str, default_value: object = None, *, sensitive: bool = False) -> None:
+            exists, value = _nested_get(self.data, key)
+            source = "config.json" if exists else "default"
+            add_item(key, label, source=source, value=value if exists else default_value, sensitive=sensitive)
+
+        env_auth_key = os.getenv("CHATGPT2API_AUTH_KEY")
+        config_auth_key = self.data.get("auth-key")
+        add_item(
+            "auth-key",
+            "管理员登录密钥",
+            source="env" if _diagnostic_value_is_set(env_auth_key) else "config.json" if _diagnostic_value_is_set(config_auth_key) else "missing",
+            value=env_auth_key if _diagnostic_value_is_set(env_auth_key) else config_auth_key,
+            sensitive=True,
+            env="CHATGPT2API_AUTH_KEY",
+        )
+
+        env_base_url = os.getenv("CHATGPT2API_BASE_URL")
+        if _diagnostic_value_is_set(env_base_url):
+            add_item("base_url", "图片访问地址", source="env", value=self.base_url, env="CHATGPT2API_BASE_URL")
+        else:
+            add_config_item("base_url", "图片访问地址", "")
+
+        add_config_item("proxy", "全局代理", "")
+        add_config_item("log_levels", "控制台日志级别", [])
+        add_config_item("auto_register", "图片健康号池巡检", DEFAULT_AUTO_REGISTER_SETTINGS)
+        add_config_item("account_pool", "账号池总上限", DEFAULT_ACCOUNT_POOL_SETTINGS)
+        add_config_item("auth.username_login_enabled", "用户名登录开关", DEFAULT_AUTH_SETTINGS["username_login_enabled"])
+        add_config_item("backup.enabled", "云备份开关", False)
+        add_config_item("backup.account_id", "R2 Account ID", "")
+        add_config_item("backup.access_key_id", "R2 Access Key ID", "")
+        add_config_item("backup.secret_access_key", "R2 Secret Access Key", "", sensitive=True)
+        add_config_item("backup.bucket", "R2 Bucket", "")
+        add_config_item("backup.passphrase", "备份加密口令", "", sensitive=True)
+        add_config_item("ai_review.enabled", "AI 审核开关", False)
+        add_config_item("ai_review.base_url", "AI 审核 Base URL", "")
+        add_config_item("ai_review.api_key", "AI 审核 API Key", "", sensitive=True)
+        add_config_item("ai_review.model", "AI 审核模型", "")
+
+        storage_backend = os.getenv("STORAGE_BACKEND", "json").strip() or "json"
+        add_item(
+            "storage.backend",
+            "账号存储后端",
+            source="env" if os.getenv("STORAGE_BACKEND") else "default",
+            value=storage_backend,
+            env="STORAGE_BACKEND",
+        )
+        add_item(
+            "storage.database_url",
+            "数据库连接串",
+            source="env" if os.getenv("DATABASE_URL") else "default",
+            value=os.getenv("DATABASE_URL"),
+            sensitive=True,
+            env="DATABASE_URL",
+        )
+        add_item(
+            "storage.git_repo_url",
+            "Git 存储仓库",
+            source="env" if os.getenv("GIT_REPO_URL") else "default",
+            value=os.getenv("GIT_REPO_URL"),
+            env="GIT_REPO_URL",
+        )
+        add_item(
+            "storage.git_token",
+            "Git 存储令牌",
+            source="env" if os.getenv("GIT_TOKEN") else "default",
+            value=os.getenv("GIT_TOKEN"),
+            sensitive=True,
+            env="GIT_TOKEN",
+        )
+
+        return {
+            "config_file": str(self.path),
+            "items": items,
+        }
 
     def get_proxy_settings(self) -> str:
         return str(self.data.get("proxy") or "").strip()
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
-        next_data.update(dict(data or {}))
+        incoming = dict(data or {})
+        for key in ("backup", "auto_register", "account_pool", "auth"):
+            if key in incoming and isinstance(incoming.get(key), dict) and isinstance(next_data.get(key), dict):
+                incoming[key] = _merge_dicts(next_data.get(key), incoming.get(key))
+        next_data.update(incoming)
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "auto_register" in next_data:
             next_data["auto_register"] = _normalize_auto_register_settings(next_data.get("auto_register"))
+        if "account_pool" in next_data:
+            next_data["account_pool"] = _normalize_account_pool_settings(
+                next_data.get("account_pool"),
+                next_data.get("auto_register"),
+            )
+        if "auth" in next_data:
+            next_data["auth"] = _normalize_auth_settings(next_data.get("auth"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -360,6 +560,12 @@ class ConfigStore:
 
     def get_auto_register_settings(self) -> dict[str, object]:
         return _normalize_auto_register_settings(self.data.get("auto_register"))
+
+    def get_account_pool_settings(self) -> dict[str, object]:
+        return _normalize_account_pool_settings(self.data.get("account_pool"), self.data.get("auto_register"))
+
+    def get_auth_settings(self) -> dict[str, object]:
+        return _normalize_auth_settings(self.data.get("auth"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

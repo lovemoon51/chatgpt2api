@@ -4,10 +4,11 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from api.support import enforce_usage_limits, require_identity, resolve_image_base_url
+from api.support import openai_response_from_http_exception, openai_usage_limit_exception, require_identity, resolve_image_base_url
 from services.content_filter import check_request
-from services.image_task_service import image_task_service
+from services.image_task_service import ImageTaskCancelError, ImageTaskNotFound, ImageTaskQueueFull, image_task_service
 from services.log_service import LoggedCall
+from services.usage_limit_service import UsageLimitError, usage_limit_service
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -15,6 +16,12 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+
+
+class ImageTaskTimingRequest(BaseModel):
+    timing_key: str = Field(..., min_length=1)
+    duration_ms: float
+    phase: str | None = None
 
 
 def _parse_task_ids(value: str) -> list[str]:
@@ -40,6 +47,47 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids))
 
+    @router.get("/api/image-tasks/queue")
+    async def get_image_task_queue_overview(
+        authorization: str | None = Header(default=None),
+    ):
+        require_identity(authorization)
+        return await run_in_threadpool(image_task_service.queue_overview)
+
+    @router.delete("/api/image-tasks/{task_id}")
+    async def cancel_image_task(
+        task_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        try:
+            return await run_in_threadpool(image_task_service.cancel_task, identity, task_id)
+        except ImageTaskNotFound as exc:
+            raise HTTPException(status_code=404, detail={"error": "image task not found"}) from exc
+        except ImageTaskCancelError as exc:
+            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/image-tasks/{task_id}/timings")
+    async def report_image_task_timing(
+        task_id: str,
+        body: ImageTaskTimingRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        try:
+            return await run_in_threadpool(
+                image_task_service.report_timing,
+                identity,
+                task_id,
+                timing_key=body.timing_key,
+                duration_ms=body.duration_ms,
+                phase=body.phase,
+            )
+        except ImageTaskNotFound as exc:
+            raise HTTPException(status_code=404, detail={"error": "image task not found"}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
     @router.post("/api/image-tasks/generations")
     async def create_generation_task(
         body: ImageGenerationTaskRequest,
@@ -47,9 +95,8 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        with enforce_usage_limits(identity, "/api/image-tasks/generations", body.model, "image"):
-            await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
         try:
+            await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
             return await run_in_threadpool(
                 image_task_service.submit_generation,
                 identity,
@@ -58,7 +105,12 @@ def create_router() -> APIRouter:
                 model=body.model,
                 size=body.size,
                 base_url=resolve_image_base_url(request),
+                acquire_usage_limit=lambda: usage_limit_service.acquire(identity, model=body.model, kind="image"),
             )
+        except UsageLimitError as exc:
+            return openai_response_from_http_exception(openai_usage_limit_exception(exc))
+        except ImageTaskQueueFull as exc:
+            raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
@@ -74,18 +126,17 @@ def create_router() -> APIRouter:
         size: str | None = Form(default=None),
     ):
         identity = require_identity(authorization)
-        with enforce_usage_limits(identity, "/api/image-tasks/edits", model, "image"):
-            await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
-        uploads = [*(image or []), *(image_list or [])]
-        if not uploads:
-            raise HTTPException(status_code=400, detail={"error": "image file is required"})
-        images: list[tuple[bytes, str, str]] = []
-        for upload in uploads:
-            image_data = await upload.read()
-            if not image_data:
-                raise HTTPException(status_code=400, detail={"error": "image file is empty"})
-            images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
         try:
+            await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
+            uploads = [*(image or []), *(image_list or [])]
+            if not uploads:
+                raise HTTPException(status_code=400, detail={"error": "image file is required"})
+            images: list[tuple[bytes, str, str]] = []
+            for upload in uploads:
+                image_data = await upload.read()
+                if not image_data:
+                    raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+                images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
             return await run_in_threadpool(
                 image_task_service.submit_edit,
                 identity,
@@ -95,7 +146,12 @@ def create_router() -> APIRouter:
                 size=size,
                 base_url=resolve_image_base_url(request),
                 images=images,
+                acquire_usage_limit=lambda: usage_limit_service.acquire(identity, model=model, kind="image"),
             )
+        except UsageLimitError as exc:
+            return openai_response_from_http_exception(openai_usage_limit_exception(exc))
+        except ImageTaskQueueFull as exc:
+            raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

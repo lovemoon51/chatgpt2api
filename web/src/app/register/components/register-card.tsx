@@ -13,6 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { fetchRegisterClashOptions, selectRegisterClashProxy, type ClashGroup, type RegisterConfig } from "@/lib/api";
 
 import { useSettingsStore } from "../../settings/store";
+import type { RegisterSseStatus } from "../page";
 
 const DEFAULT_CLASH: RegisterConfig["clash"] = {
   enabled: false,
@@ -25,7 +26,58 @@ const DEFAULT_CLASH: RegisterConfig["clash"] = {
   timeout: 5,
 };
 
-export function RegisterCard() {
+function safeNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function formatNumber(value?: number) {
+  if (value === undefined) {
+    return "—";
+  }
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(value);
+}
+
+function formatPercent(value?: number) {
+  if (value === undefined) {
+    return "—";
+  }
+  return `${Math.round(value * 10) / 10}%`;
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function sseBadgeMeta(status?: RegisterSseStatus) {
+  if (status?.state === "connected") {
+    return { label: "SSE 已连接", variant: "success" as const };
+  }
+  if (status?.state === "connecting") {
+    return { label: "SSE 连接中", variant: "warning" as const };
+  }
+  if (status?.state === "error") {
+    return { label: "SSE 重连中", variant: "warning" as const };
+  }
+  if (status?.state === "unauthorized") {
+    return { label: "SSE 未授权", variant: "danger" as const };
+  }
+  return { label: "SSE 已关闭", variant: "secondary" as const };
+}
+
+export function RegisterCard({ sseStatus }: { sseStatus?: RegisterSseStatus }) {
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
   const isSaving = useSettingsStore((state) => state.isSavingRegister);
@@ -170,6 +222,15 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
+  const attempted = Number(stats.success || 0) + Number(stats.fail || 0);
+  const failureRate = safeNumber(stats.failure_rate) ?? (attempted > 0 ? (Number(stats.fail || 0) / attempted) * 100 : undefined);
+  const keepaliveTarget = config.mode === "quota"
+    ? safeNumber(stats.target_available) ?? safeNumber(config.target_quota)
+    : safeNumber(stats.target_available) ?? safeNumber(config.target_available);
+  const currentAccounts = safeNumber(stats.current_accounts) ?? safeNumber(stats.current_available);
+  const inFlight = safeNumber(stats.in_flight) ?? safeNumber(stats.pending) ?? safeNumber(stats.running);
+  const updatedAt = stats.updated_at || sseStatus?.lastEventAt || stats.finished_at || stats.started_at;
+  const sseMeta = sseBadgeMeta(sseStatus);
   const updateProviderType = (index: number, type: string) => {
     updateProvider(index, {
       type,
@@ -185,9 +246,9 @@ export function RegisterCard() {
   };
 
   return (
-    <div className="grid h-[calc(100vh-132px)] min-h-[640px] items-stretch gap-0 overflow-hidden rounded-xl border border-stone-200 bg-white/70 xl:grid-cols-2">
+    <div className="grid min-h-[640px] items-stretch gap-0 overflow-hidden rounded-xl border border-stone-200 bg-white/70 lg:h-[calc(100vh-132px)] xl:grid-cols-2">
       <section className="space-y-4 overflow-y-auto border-b border-stone-200 p-4 xl:border-r xl:border-b-0">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-md bg-stone-100">
                 <UserPlus className="size-5 text-stone-600" />
@@ -196,7 +257,7 @@ export function RegisterCard() {
                 <h2 className="text-lg font-semibold tracking-tight">注册配置</h2>
               </div>
             </div>
-            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => void save()} disabled={isSaving || config.enabled}>
+            <Button className="h-9 w-full rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800 sm:w-auto" onClick={() => void save()} disabled={isSaving || config.enabled}>
               {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
               保存配置
             </Button>
@@ -212,7 +273,7 @@ export function RegisterCard() {
                 <SelectContent>
                   <SelectItem value="total">注册总数</SelectItem>
                   <SelectItem value="quota">号池剩余额度</SelectItem>
-                  <SelectItem value="available">可用账号数量</SelectItem>
+                  <SelectItem value="available">账号总上限</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -233,7 +294,7 @@ export function RegisterCard() {
               <Input value={String(config.target_quota || "")} onChange={(event) => setTargetQuota(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode !== "quota"} />
             </div>
             <div className="space-y-2">
-              <label className="text-sm text-stone-700">目标可用账号</label>
+              <label className="text-sm text-stone-700">账号总上限</label>
               <Input value={String(config.target_available || "")} onChange={(event) => setTargetAvailable(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode !== "available"} />
             </div>
             <div className="space-y-2">
@@ -254,7 +315,7 @@ export function RegisterCard() {
                   {clashStatus ? <span className="block max-w-[520px] truncate text-xs text-stone-500">{clashStatus}</span> : null}
                 </span>
               </label>
-              <div className="flex items-center gap-2">
+              <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:items-center">
                 <Button type="button" variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void loadClashOptions()} disabled={config.enabled || !clash.enabled || isLoadingClashOptions}>
                   {isLoadingClashOptions ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
                   读取节点
@@ -435,16 +496,41 @@ export function RegisterCard() {
 
       <section className="flex min-h-0 flex-col p-4">
         <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">运行结果</h2>
                 <p className="mt-1 text-sm text-stone-500">SSE 实时推送当前状态。</p>
               </div>
-              <Badge variant={config.enabled ? "success" : "secondary"} className="rounded-md">
-                {config.enabled ? "运行中" : "已停止"}
-              </Badge>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant={sseMeta.variant} className="rounded-md">
+                  {sseMeta.label}
+                </Badge>
+                <Badge variant={config.enabled ? "success" : "secondary"} className="rounded-md">
+                  {config.enabled ? "运行中" : "已停止"}
+                </Badge>
+              </div>
             </div>
-            <div className="grid grid-cols-4 gap-2">
+            {sseStatus?.message ? (
+              <div className="rounded-lg border border-stone-200 bg-white/70 px-3 py-2 text-xs text-stone-500">
+                {sseStatus.message}
+              </div>
+            ) : null}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+              {[
+                ["最近更新时间", formatDateTime(updatedAt)],
+                ["保活目标", formatNumber(keepaliveTarget)],
+                ["当前账号", formatNumber(currentAccounts)],
+                ["在途注册", formatNumber(inFlight)],
+                ["失败率", formatPercent(failureRate)],
+                ["失败数", formatNumber(safeNumber(stats.fail))],
+              ].map(([label, value]) => (
+                <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
+                  <div className="text-xs text-stone-400">{label}</div>
+                  <div className="mt-1 truncate text-base font-semibold text-stone-800">{value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {[
                 ["成功 / 成功率", `${stats.success} / ${stats.success_rate || 0}%`],
                 ["失败", stats.fail],
@@ -457,11 +543,11 @@ export function RegisterCard() {
               ].map(([label, value]) => (
                 <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
                   <div className="text-xs text-stone-400">{label}</div>
-                  <div className="mt-1 text-base font-semibold text-stone-800">{value}</div>
+                  <div className="mt-1 truncate text-base font-semibold text-stone-800">{value}</div>
                 </div>
               ))}
             </div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid gap-2 sm:grid-cols-3">
               <Button className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void toggle()} disabled={isSaving}>
                 {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : config.enabled ? <Square className="size-4" /> : <Play className="size-4" />}
                 {config.enabled ? "停止" : "启动"}

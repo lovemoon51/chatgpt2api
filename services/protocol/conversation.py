@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import tiktoken
 
@@ -91,6 +94,14 @@ def image_empty_result_retry_limit() -> int:
     return max(1, value)
 
 
+def image_request_parallelism_limit() -> int:
+    try:
+        value = int(config.data.get("image_request_parallelism") or 3)
+    except (TypeError, ValueError):
+        value = 3
+    return max(1, min(8, value))
+
+
 def is_unusable_image_account_error(message: str) -> bool:
     text = str(message or "").lower()
     if is_usage_limit_error(text) or is_token_invalid_error(text):
@@ -133,6 +144,36 @@ def no_image_result_message() -> str:
     )
 
 
+def emit_image_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    phase: str,
+    label: str = "",
+    timing_key: str = "",
+    duration_ms: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    if not callable(progress_callback):
+        return
+    event: dict[str, Any] = {"phase": phase}
+    if label:
+        event["label"] = label
+    if timing_key:
+        event["timing_key"] = timing_key
+    if duration_ms is not None:
+        event["duration_ms"] = max(0, int(duration_ms))
+    if metadata:
+        event["metadata"] = metadata
+    try:
+        progress_callback(event)
+    except Exception:
+        pass
+
+
+def elapsed_ms(started: float) -> int:
+    return max(0, int((time.time() - started) * 1000))
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
@@ -141,6 +182,13 @@ def save_image_bytes(
     image_data: bytes,
     base_url: str | None = None,
     owner_identity: dict[str, object] | None = None,
+    *,
+    prompt: str = "",
+    model: str = "",
+    size: str | None = None,
+    mode: str = "",
+    source_task_id: str = "",
+    revised_prompt: str = "",
 ) -> str:
     config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
@@ -151,6 +199,22 @@ def save_image_bytes(
     file_path.write_bytes(image_data)
     relative_path = f"{relative_dir.as_posix()}/{filename}"
     record_image_owner(relative_path, owner_identity)
+    try:
+        from services.image_asset_service import upsert_asset
+
+        upsert_asset(
+            relative_path,
+            file_path=file_path,
+            owner_identity=owner_identity,
+            prompt=prompt,
+            model=model,
+            size=size,
+            mode=mode,
+            source_task_id=source_task_id,
+            revised_prompt=revised_prompt,
+        )
+    except Exception:
+        pass
     return f"{(base_url or config.base_url)}/images/{relative_path}"
 
 
@@ -269,6 +333,10 @@ def format_image_result(
     created: int | None = None,
     message: str = "",
     owner_identity: dict[str, object] | None = None,
+    model: str = "",
+    size: str | None = None,
+    mode: str = "",
+    source_task_id: str = "",
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
@@ -276,15 +344,26 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        url = save_image_bytes(
+            base64.b64decode(b64_json),
+            base_url,
+            owner_identity,
+            prompt=prompt,
+            model=model,
+            size=size,
+            mode=mode,
+            source_task_id=source_task_id,
+            revised_prompt=revised_prompt,
+        )
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url, owner_identity),
+                "url": url,
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url, owner_identity),
+                "url": url,
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -305,6 +384,9 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     owner_identity: dict[str, object] | None = None
+    mode: str = ""
+    source_task_id: str = ""
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
 
 
 @dataclass
@@ -604,6 +686,13 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    submit_started = time.time()
+    first_event_seen = False
+    emit_image_progress(
+        request.progress_callback,
+        phase="submitting",
+        label="提交中",
+    )
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -611,6 +700,15 @@ def stream_image_outputs(
             images=request.images or [],
             size=request.size,
     ):
+        if not first_event_seen:
+            first_event_seen = True
+            emit_image_progress(
+                request.progress_callback,
+                phase="polling",
+                label="生成中",
+                timing_key="upstream_submit_ms",
+                duration_ms=elapsed_ms(submit_started),
+            )
         last = event
         if event.get("type") == "conversation.delta":
             yield ImageOutput(
@@ -652,12 +750,39 @@ def stream_image_outputs(
     if message and not file_ids and not sediment_ids and is_text_response:
         raise TextOnlyImageResponseError(f"上游返回了文字而不是图片：{message[:240]}")
 
-    image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    resolve_started = time.time()
+    emit_image_progress(
+        request.progress_callback,
+        phase="polling",
+        label="生成中",
+    )
+    image_urls = backend.resolve_conversation_image_urls(
+        conversation_id,
+        file_ids,
+        sediment_ids,
+        progress_callback=request.progress_callback,
+    )
+    emit_image_progress(
+        request.progress_callback,
+        phase="downloading",
+        label="下载中",
+        timing_key="resolve_image_urls_ms",
+        duration_ms=elapsed_ms(resolve_started),
+    )
     if image_urls:
+        download_started = time.time()
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
             for image_data in backend.download_image_bytes(image_urls)
         ]
+        emit_image_progress(
+            request.progress_callback,
+            phase="saving",
+            label="保存中",
+            timing_key="download_image_ms",
+            duration_ms=elapsed_ms(download_started),
+        )
+        save_started = time.time()
         data = format_image_result(
             image_items,
             request.prompt,
@@ -665,7 +790,18 @@ def stream_image_outputs(
             request.base_url,
             int(time.time()),
             owner_identity=request.owner_identity,
+            model=request.model,
+            size=request.size,
+            mode=request.mode or ("edit" if request.images else "generate"),
+            source_task_id=request.source_task_id,
         )["data"]
+        emit_image_progress(
+            request.progress_callback,
+            phase="saving",
+            label="保存中",
+            timing_key="save_image_ms",
+            duration_ms=elapsed_ms(save_started),
+        )
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
@@ -674,12 +810,333 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
 
 
+@dataclass
+class _ImageBatchTokenScope:
+    tokens: set[str] = field(default_factory=set)
+    lock: Any = field(default_factory=threading.Lock)
+
+    def excluded(self, attempted_tokens: set[str] | None = None) -> set[str]:
+        with self.lock:
+            return set(attempted_tokens or set()) | set(self.tokens)
+
+    def remember(self, access_token: str) -> None:
+        if not access_token:
+            return
+        with self.lock:
+            self.tokens.add(access_token)
+
+    def acquire(self, attempted_tokens: set[str] | None = None) -> str:
+        attempted = set(attempted_tokens or set())
+        try:
+            token = account_service.get_available_access_token(self.excluded(attempted))
+        except RuntimeError:
+            token = account_service.get_available_access_token(attempted)
+        self.remember(token)
+        return token
+
+
+class _ImageBatchStopped(RuntimeError):
+    pass
+
+
+def _raise_if_batch_stopped(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise _ImageBatchStopped("image batch stopped")
+
+
+def _thread_safe_progress_callback(
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> Callable[[dict[str, Any]], None] | None:
+    if not callable(progress_callback):
+        return progress_callback
+    progress_lock = threading.Lock()
+
+    def wrapped(event: dict[str, Any]) -> None:
+        with progress_lock:
+            progress_callback(event)
+
+    return wrapped
+
+
+def _stream_single_image_outputs_with_pool(
+        request: ConversationRequest,
+        index: int,
+        total: int,
+        token_scope: _ImageBatchTokenScope | None = None,
+        cancel_event: threading.Event | None = None,
+) -> Iterator[ImageOutput]:
+    emitted = False
+    last_error = ""
+    attempted_tokens: set[str] = set()
+    empty_result_attempts = 0
+    empty_result_limit = image_empty_result_retry_limit()
+    registered_replacement_token = ""
+    triggered_first_failure_register = False
+
+    def try_register_after_first_failure(reason: str) -> bool:
+        nonlocal registered_replacement_token, triggered_first_failure_register
+        if triggered_first_failure_register or len(attempted_tokens) != 1:
+            return False
+        triggered_first_failure_register = True
+        try:
+            excluded_tokens = token_scope.excluded(attempted_tokens) if token_scope else attempted_tokens
+            registered_replacement_token = account_service.register_image_account_for_request(
+                excluded_tokens,
+                reason=reason,
+            )
+            if token_scope:
+                token_scope.remember(registered_replacement_token)
+            logger.info({
+                "event": "image_stream_first_failure_registered_account",
+                "reason": reason,
+                "attempted_tokens": len(attempted_tokens),
+            })
+            return bool(registered_replacement_token)
+        except Exception as exc:
+            logger.warning({
+                "event": "image_stream_first_failure_register_failed",
+                "reason": reason,
+                "error": str(exc),
+            })
+            return False
+
+    while True:
+        _raise_if_batch_stopped(cancel_event)
+        try:
+            checkout_started = time.time()
+            emit_image_progress(request.progress_callback, phase="checking_out_account", label="取账号")
+            if registered_replacement_token:
+                token = registered_replacement_token
+                registered_replacement_token = ""
+            elif token_scope:
+                token = token_scope.acquire(attempted_tokens)
+            else:
+                token = account_service.get_available_access_token(attempted_tokens)
+            if token_scope:
+                token_scope.remember(token)
+            emit_image_progress(
+                request.progress_callback,
+                phase="submitting",
+                label="提交中",
+                timing_key="account_checkout_ms",
+                duration_ms=elapsed_ms(checkout_started),
+                metadata={"attempted_tokens": len(attempted_tokens), "image_index": index, "image_total": total},
+            )
+        except RuntimeError as exc:
+            if emitted:
+                raise ImageGenerationError(image_stream_error_message(last_error or str(exc))) from exc
+            if last_error:
+                raise ImageGenerationError(image_stream_error_message(last_error)) from exc
+            raise ImageGenerationError(str(exc) or "image generation failed") from exc
+        attempted_tokens.add(token)
+
+        emitted_for_token = False
+        returned_message = False
+        returned_result = False
+        try:
+            backend = OpenAIBackendAPI(access_token=token)
+            for output in stream_image_outputs(backend, request, index, total):
+                _raise_if_batch_stopped(cancel_event)
+                if output.kind == "message" and request.message_as_error:
+                    raise ImageGenerationError(
+                        output.text or "Image generation was rejected by upstream policy.",
+                        status_code=400,
+                        error_type="invalid_request_error",
+                        code="content_policy_violation",
+                    )
+                emitted = True
+                emitted_for_token = True
+                returned_message = output.kind == "message"
+                returned_result = returned_result or output.kind == "result"
+                yield output
+            if returned_message:
+                account_service.mark_image_result(token, False)
+                return
+            if not returned_result:
+                empty_result_attempts += 1
+                last_error = no_image_result_message()
+                logger.warning({
+                    "event": "image_stream_empty_result",
+                    "request_token": token,
+                    "attempted_tokens": len(attempted_tokens),
+                    "timeout_secs": config.image_poll_timeout_secs,
+                })
+                if empty_result_attempts >= empty_result_limit:
+                    raise ImageGenerationError(image_stream_error_message(last_error))
+                account_service.mark_image_result(token, False)
+                try_register_after_first_failure("empty_image_result")
+                continue
+            account_service.mark_image_result(token, True)
+            break
+        except _ImageBatchStopped:
+            account_service.mark_image_result(token, False)
+            raise
+        except ImageUsageLimitReachedError as exc:
+            last_error = str(exc)
+            resets_at, resets_in_seconds = extract_usage_limit_reset(last_error)
+            account_service.mark_image_usage_limit(
+                token,
+                last_error,
+                resets_at=resets_at,
+                resets_in_seconds=resets_in_seconds,
+            )
+            logger.warning({
+                "event": "image_stream_usage_limit",
+                "request_token": token,
+                "attempted_tokens": len(attempted_tokens),
+            })
+            try_register_after_first_failure("usage_limit_reached")
+            continue
+        except ChatGPTCheckoutRequiredError as exc:
+            last_error = str(exc)
+            account_service.mark_image_checkout_required(token, last_error)
+            logger.warning({
+                "event": "image_stream_checkout_required",
+                "request_token": token,
+                "attempted_tokens": len(attempted_tokens),
+                "error": last_error,
+            })
+            try_register_after_first_failure("checkout_required")
+            continue
+        except TextOnlyImageResponseError as exc:
+            account_service.mark_image_result(token, False)
+            last_error = str(exc)
+            logger.warning({
+                "event": "image_stream_text_only_response",
+                "request_token": token,
+                "attempted_tokens": len(attempted_tokens),
+                "error": last_error,
+            })
+            try_register_after_first_failure("text_only_response")
+            continue
+        except ImageGenerationError:
+            account_service.mark_image_result(token, False)
+            raise
+        except Exception as exc:
+            last_error = str(exc)
+            if is_usage_limit_error(last_error):
+                resets_at, resets_in_seconds = extract_usage_limit_reset(last_error)
+                account_service.mark_image_usage_limit(
+                    token,
+                    last_error,
+                    resets_at=resets_at,
+                    resets_in_seconds=resets_in_seconds,
+                )
+                logger.warning({
+                    "event": "image_stream_usage_limit",
+                    "request_token": token,
+                    "attempted_tokens": len(attempted_tokens),
+                })
+                try_register_after_first_failure("usage_limit_error")
+                continue
+            logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
+            if not emitted_for_token and is_token_invalid_error(last_error):
+                account_service.remove_unusable_image_token(token, "image_stream_invalid_token", last_error)
+                try_register_after_first_failure("invalid_token")
+                continue
+            if not emitted_for_token and is_unusable_image_account_error(last_error):
+                account_service.remove_unusable_image_token(token, "image_unusable", last_error)
+                try_register_after_first_failure("unusable_image_account")
+                continue
+            account_service.mark_image_result(token, False)
+            if try_register_after_first_failure("image_stream_error"):
+                continue
+            raise ImageGenerationError(image_stream_error_message(last_error)) from exc
+
+    if not emitted:
+        raise ImageGenerationError(image_stream_error_message(last_error))
+
+
+def _collect_single_image_outputs_with_pool(
+        request: ConversationRequest,
+        index: int,
+        total: int,
+        token_scope: _ImageBatchTokenScope,
+        cancel_event: threading.Event,
+) -> list[ImageOutput]:
+    return list(_stream_single_image_outputs_with_pool(request, index, total, token_scope, cancel_event))
+
+
+def _stream_parallel_image_outputs_with_pool(request: ConversationRequest, total: int) -> Iterator[ImageOutput]:
+    parallelism = min(total, image_request_parallelism_limit())
+    token_scope = _ImageBatchTokenScope()
+    cancel_event = threading.Event()
+    worker_request = dataclasses.replace(
+        request,
+        progress_callback=_thread_safe_progress_callback(request.progress_callback),
+    )
+    logger.info({
+        "event": "image_stream_parallel_batch_start",
+        "image_count": total,
+        "parallelism": parallelism,
+    })
+    emit_image_progress(
+        request.progress_callback,
+        phase="submitting",
+        label="批量提交中",
+        metadata={"image_total": total, "parallelism": parallelism},
+    )
+    results: dict[int, list[ImageOutput]] = {}
+    executor = ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="image-batch")
+    shutdown_wait = True
+    try:
+        future_to_index = {
+            executor.submit(
+                _collect_single_image_outputs_with_pool,
+                worker_request,
+                index,
+                total,
+                token_scope,
+                cancel_event,
+            ): index
+            for index in range(1, total + 1)
+        }
+        try:
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    outputs = future.result()
+                except _ImageBatchStopped:
+                    continue
+                except Exception:
+                    cancel_event.set()
+                    for pending in future_to_index:
+                        if pending is not future:
+                            pending.cancel()
+                    shutdown_wait = False
+                    raise
+                message_output = next((output for output in outputs if output.kind == "message"), None)
+                if message_output is not None:
+                    cancel_event.set()
+                    for pending in future_to_index:
+                        if pending is not future:
+                            pending.cancel()
+                    shutdown_wait = False
+                    yield message_output
+                    return
+                results[index] = outputs
+        finally:
+            logger.info({
+                "event": "image_stream_parallel_batch_done",
+                "image_count": total,
+                "completed": len(results),
+            })
+    finally:
+        executor.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
+
+    for index in range(1, total + 1):
+        for output in results.get(index, []):
+            yield output
+
+
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     if str(request.model or "").strip() not in IMAGE_MODELS:
         raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(IMAGE_MODELS))
 
     account_service.begin_image_request()
     try:
+        capacity_started = time.time()
+        emit_image_progress(request.progress_callback, phase="checking_capacity", label="检查号池")
         if not account_service.ensure_image_capacity():
             raise ImageGenerationError(
                 "当前无可用图片账号，已尝试补充号池，请稍后重试。",
@@ -687,166 +1144,19 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 error_type="insufficient_quota",
                 code="insufficient_quota",
             )
+        emit_image_progress(
+            request.progress_callback,
+            phase="checking_out_account",
+            label="取账号",
+            timing_key="capacity_check_ms",
+            duration_ms=elapsed_ms(capacity_started),
+        )
 
-        emitted = False
-        last_error = ""
-        for index in range(1, request.n + 1):
-            attempted_tokens: set[str] = set()
-            empty_result_attempts = 0
-            empty_result_limit = image_empty_result_retry_limit()
-            registered_replacement_token = ""
-            triggered_first_failure_register = False
-
-            def try_register_after_first_failure(reason: str) -> bool:
-                nonlocal registered_replacement_token, triggered_first_failure_register
-                if triggered_first_failure_register or len(attempted_tokens) != 1:
-                    return False
-                triggered_first_failure_register = True
-                try:
-                    registered_replacement_token = account_service.register_image_account_for_request(
-                        attempted_tokens,
-                        reason=reason,
-                    )
-                    logger.info({
-                        "event": "image_stream_first_failure_registered_account",
-                        "reason": reason,
-                        "attempted_tokens": len(attempted_tokens),
-                    })
-                    return bool(registered_replacement_token)
-                except Exception as exc:
-                    logger.warning({
-                        "event": "image_stream_first_failure_register_failed",
-                        "reason": reason,
-                        "error": str(exc),
-                    })
-                    return False
-
-            while True:
-                try:
-                    if registered_replacement_token:
-                        token = registered_replacement_token
-                        registered_replacement_token = ""
-                    else:
-                        token = account_service.get_available_access_token(attempted_tokens)
-                except RuntimeError as exc:
-                    if emitted:
-                        raise ImageGenerationError(image_stream_error_message(last_error or str(exc))) from exc
-                    if last_error:
-                        raise ImageGenerationError(image_stream_error_message(last_error)) from exc
-                    raise ImageGenerationError(str(exc) or "image generation failed") from exc
-                attempted_tokens.add(token)
-
-                emitted_for_token = False
-                returned_message = False
-                returned_result = False
-                try:
-                    backend = OpenAIBackendAPI(access_token=token)
-                    for output in stream_image_outputs(backend, request, index, request.n):
-                        if output.kind == "message" and request.message_as_error:
-                            raise ImageGenerationError(
-                                output.text or "Image generation was rejected by upstream policy.",
-                                status_code=400,
-                                error_type="invalid_request_error",
-                                code="content_policy_violation",
-                            )
-                        emitted = True
-                        emitted_for_token = True
-                        returned_message = output.kind == "message"
-                        returned_result = returned_result or output.kind == "result"
-                        yield output
-                    if returned_message:
-                        account_service.mark_image_result(token, False)
-                        return
-                    if not returned_result:
-                        empty_result_attempts += 1
-                        last_error = no_image_result_message()
-                        logger.warning({
-                            "event": "image_stream_empty_result",
-                            "request_token": token,
-                            "attempted_tokens": len(attempted_tokens),
-                            "timeout_secs": config.image_poll_timeout_secs,
-                        })
-                        if empty_result_attempts >= empty_result_limit:
-                            raise ImageGenerationError(image_stream_error_message(last_error))
-                        account_service.mark_image_result(token, False)
-                        try_register_after_first_failure("empty_image_result")
-                        continue
-                    account_service.mark_image_result(token, True)
-                    break
-                except ImageUsageLimitReachedError as exc:
-                    last_error = str(exc)
-                    resets_at, resets_in_seconds = extract_usage_limit_reset(last_error)
-                    account_service.mark_image_usage_limit(
-                        token,
-                        last_error,
-                        resets_at=resets_at,
-                        resets_in_seconds=resets_in_seconds,
-                    )
-                    logger.warning({
-                        "event": "image_stream_usage_limit",
-                        "request_token": token,
-                        "attempted_tokens": len(attempted_tokens),
-                    })
-                    try_register_after_first_failure("usage_limit_reached")
-                    continue
-                except ChatGPTCheckoutRequiredError as exc:
-                    last_error = str(exc)
-                    account_service.mark_image_checkout_required(token, last_error)
-                    logger.warning({
-                        "event": "image_stream_checkout_required",
-                        "request_token": token,
-                        "attempted_tokens": len(attempted_tokens),
-                        "error": last_error,
-                    })
-                    try_register_after_first_failure("checkout_required")
-                    continue
-                except TextOnlyImageResponseError as exc:
-                    account_service.mark_image_result(token, False)
-                    last_error = str(exc)
-                    logger.warning({
-                        "event": "image_stream_text_only_response",
-                        "request_token": token,
-                        "attempted_tokens": len(attempted_tokens),
-                        "error": last_error,
-                    })
-                    try_register_after_first_failure("text_only_response")
-                    continue
-                except ImageGenerationError:
-                    account_service.mark_image_result(token, False)
-                    raise
-                except Exception as exc:
-                    last_error = str(exc)
-                    if is_usage_limit_error(last_error):
-                        resets_at, resets_in_seconds = extract_usage_limit_reset(last_error)
-                        account_service.mark_image_usage_limit(
-                            token,
-                            last_error,
-                            resets_at=resets_at,
-                            resets_in_seconds=resets_in_seconds,
-                        )
-                        logger.warning({
-                            "event": "image_stream_usage_limit",
-                            "request_token": token,
-                            "attempted_tokens": len(attempted_tokens),
-                        })
-                        try_register_after_first_failure("usage_limit_error")
-                        continue
-                    logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
-                    if not emitted_for_token and is_token_invalid_error(last_error):
-                        account_service.remove_unusable_image_token(token, "image_stream_invalid_token", last_error)
-                        try_register_after_first_failure("invalid_token")
-                        continue
-                    if not emitted_for_token and is_unusable_image_account_error(last_error):
-                        account_service.remove_unusable_image_token(token, "image_unusable", last_error)
-                        try_register_after_first_failure("unusable_image_account")
-                        continue
-                    account_service.mark_image_result(token, False)
-                    if try_register_after_first_failure("image_stream_error"):
-                        continue
-                    raise ImageGenerationError(image_stream_error_message(last_error)) from exc
-
-        if not emitted:
-            raise ImageGenerationError(image_stream_error_message(last_error))
+        total = max(1, int(request.n or 1))
+        if total == 1:
+            yield from _stream_single_image_outputs_with_pool(request, 1, 1)
+        else:
+            yield from _stream_parallel_image_outputs_with_pool(request, total)
     finally:
         account_service.end_image_request()
 

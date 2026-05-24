@@ -25,6 +25,7 @@ type ImageResultsProps = {
   onReuseTurnConfig: (conversationId: string, turnId: string) => void | Promise<void>;
   onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRetryImage: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
+  onImageRendered: (conversationId: string, turnId: string, imageId: string, loadedAt: Date) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
 };
 
@@ -35,18 +36,130 @@ function getStoredImageSrc(image: StoredImage) {
   return image.url || "";
 }
 
+function formatDuration(ms?: number) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) {
+    return "";
+  }
+  const seconds = Math.max(0, ms) / 1000;
+  return `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒`;
+}
+
+function formatPhaseTime(value?: string) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function getTimingValue(image: StoredImage, keys: string[]) {
+  const timings = image.timings || image.timing_ms;
+  for (const key of keys) {
+    const value = timings?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function getImagePhase(image: StoredImage, turnStatus: ImageTurnStatus) {
+  if (image.status === "success") {
+    return image.phase || "completed";
+  }
+  if (image.status === "error") {
+    return image.phase || "error";
+  }
+  if (image.phase) {
+    return image.phase;
+  }
+  return turnStatus === "queued" ? "queued" : "generating";
+}
+
+function getPhaseLabel(image: StoredImage, turnStatus: ImageTurnStatus) {
+  if (image.phase_label) {
+    return image.phase_label;
+  }
+  const phase = getImagePhase(image, turnStatus);
+  if (phase === "queued") return "排队中";
+  if (phase === "checking_capacity") return "检查号池";
+  if (phase === "checking_out_account") return "取账号";
+  if (phase === "submitting") return "提交中";
+  if (phase === "generating" || phase === "running" || phase === "polling") return "生成中";
+  if (phase === "downloading") return "下载中";
+  if (phase === "saving") return "保存中";
+  if (phase === "completed" || phase === "success") return "已完成";
+  if (phase === "error" || phase === "cancelled") return "失败";
+  return String(phase || getTurnStatusLabel(turnStatus));
+}
+
+function getPhaseDuration(image: StoredImage, turnStatus: ImageTurnStatus) {
+  const phase = getImagePhase(image, turnStatus);
+  const lookup: Record<string, string[]> = {
+    queued: ["queue_wait_ms", "queue", "queued", "wait", "waiting", "queue_duration_ms"],
+    checking_capacity: ["capacity_check_ms"],
+    checking_out_account: ["account_checkout_ms"],
+    submitting: ["upstream_submit_ms", "submitting", "submit"],
+    generating: ["image_poll_ms", "resolve_image_urls_ms", "generating", "generation", "running", "duration_ms"],
+    polling: ["image_poll_ms", "resolve_image_urls_ms", "generating", "generation", "running", "duration_ms"],
+    running: ["image_poll_ms", "resolve_image_urls_ms", "generating", "generation", "running", "duration_ms"],
+    downloading: ["download_image_ms", "downloading", "download"],
+    saving: ["save_image_ms", "saving", "save"],
+    completed: ["worker_total_ms", "total", "total_duration_ms"],
+    success: ["worker_total_ms", "total", "total_duration_ms"],
+  };
+  return getTimingValue(image, lookup[phase] || [phase]) ?? image.total_duration_ms ?? image.duration_ms;
+}
+
+function getTurnTimingSummary(images: StoredImage[]) {
+  const values = images.flatMap((image) => {
+    const items: Array<[string, number]> = [];
+    const total = image.total_duration_ms ?? getTimingValue(image, ["worker_total_ms", "total", "total_duration_ms"]);
+    const queue = image.queue_duration_ms ?? getTimingValue(image, ["queue_wait_ms", "queue", "queued", "wait", "waiting"]);
+    const generate = getTimingValue(image, ["image_poll_ms", "resolve_image_urls_ms", "generating", "generation", "running", "duration_ms"]) ?? image.duration_ms;
+    const reveal = image.reveal_duration_ms ?? getTimingValue(image, ["revealing", "render", "render_ms", "frontend_render_ms"]);
+    if (total) items.push(["总耗时", total]);
+    if (queue) items.push(["排队", queue]);
+    if (generate) items.push(["生成", generate]);
+    if (reveal) items.push(["回显", reveal]);
+    return items;
+  });
+  const grouped = new Map<string, number[]>();
+  for (const [label, value] of values) {
+    grouped.set(label, [...(grouped.get(label) || []), value]);
+  }
+  return Array.from(grouped.entries()).map(([label, durations]) => {
+    const average = durations.reduce((sum, value) => sum + value, 0) / durations.length;
+    return `${label} ${formatDuration(average)}`;
+  });
+}
+
 function ImageGenerationPlaceholder({
   className,
   status,
+  image,
   index,
 }: {
   className?: string;
   status: ImageTurnStatus;
+  image: StoredImage;
   index: number;
 }) {
-  const isQueued = status === "queued";
-  const title = isQueued ? "排队中" : "正在生成";
-  const detail = isQueued ? "等待前序任务完成" : "正在构思画面";
+  const phase = getImagePhase(image, status);
+  const isQueued = phase === "queued" || status === "queued";
+  const title = getPhaseLabel(image, status);
+  const phaseUpdatedAt = formatPhaseTime(image.phase_updated_at);
+  const phaseDuration = formatDuration(getPhaseDuration(image, status));
+  const detail = [phaseUpdatedAt ? `更新 ${phaseUpdatedAt}` : "", phaseDuration ? `阶段 ${phaseDuration}` : ""]
+    .filter(Boolean)
+    .join(" · ") || (isQueued ? "等待前序任务完成" : "正在构思画面");
 
   return (
     <div
@@ -69,14 +182,15 @@ function ImageGenerationPlaceholder({
           <span className="image-generation-loader__dot" aria-hidden="true" />
           {title}
         </span>
+        <span className="image-generation-loader__detail">{detail}</span>
         <span className="image-generation-loader__steps" aria-hidden={isQueued ? "true" : undefined}>
           {isQueued ? (
-            <span>{detail}</span>
+            <span>等待调度</span>
           ) : (
             <>
-              <span>正在理解提示词</span>
-              <span>正在铺设构图</span>
-              <span>正在渲染细节</span>
+              <span>提交</span>
+              <span>生成</span>
+              <span>保存</span>
             </>
           )}
         </span>
@@ -117,6 +231,7 @@ export function ImageResults({
   onReuseTurnConfig,
   onRegenerateTurn,
   onRetryImage,
+  onImageRendered,
   formatConversationTime,
 }: ImageResultsProps) {
   const [imageDimensions, setImageDimensions] = useState<Record<string, string>>({});
@@ -176,6 +291,12 @@ export function ImageResults({
               ]
             : [];
         });
+        const timingSummary = getTurnTimingSummary(turn.images);
+        const latestPhaseUpdatedAt = turn.images
+          .map((image) => image.phase_updated_at || image.finished_at || image.started_at || image.queued_at)
+          .filter((value): value is string => Boolean(value))
+          .sort()
+          .at(-1);
 
         return (
           <div key={turn.id} className="flex flex-col gap-3 sm:gap-4">
@@ -189,6 +310,7 @@ export function ImageResults({
                     </span>
                     <span>{getTurnStatusLabel(turn.status)}</span>
                     <span>{formatConversationTime(turn.createdAt)}</span>
+                    {latestPhaseUpdatedAt ? <span>阶段更新 {formatPhaseTime(latestPhaseUpdatedAt)}</span> : null}
                   </div>
                   <div className="text-right">{turn.prompt}</div>
                   <div className="mt-2 flex flex-wrap justify-end gap-1.5">
@@ -227,6 +349,7 @@ export function ImageResults({
                               className="group relative h-24 w-24 overflow-hidden border border-stone-200/80 bg-stone-100/60 text-left transition hover:border-stone-300"
                               aria-label={`预览参考图 ${image.name || index + 1}`}
                             >
+                              {/* eslint-disable-next-line @next/next/no-img-element -- Local data URL previews are not served through Next image optimization. */}
                               <img
                                 src={image.dataUrl}
                                 alt={image.name || `参考图 ${index + 1}`}
@@ -254,6 +377,11 @@ export function ImageResults({
                     {turn.status === "queued" ? (
                       <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">等待当前对话中的前序任务完成</span>
                     ) : null}
+                    {timingSummary.map((item) => (
+                      <span key={item} className="rounded-full bg-white px-3 py-1 text-stone-500 shadow-sm">
+                        {item}
+                      </span>
+                    ))}
                   </div>
 
                   <div className="grid grid-cols-3 gap-2 sm:block sm:columns-2 sm:gap-4 sm:space-y-4 xl:columns-3">
@@ -285,6 +413,7 @@ export function ImageResults({
                                     event.currentTarget.naturalWidth,
                                     event.currentTarget.naturalHeight,
                                   );
+                                  void onImageRendered(selectedConversation.id, turn.id, image.id, new Date());
                                 }}
                               />
                             </button>
@@ -292,6 +421,11 @@ export function ImageResults({
                               <div className="min-w-0 text-stone-500">
                                 <span>结果 {index + 1}</span>
                                 {imageMeta ? <span className="block text-stone-400 sm:ml-2 sm:inline">{imageMeta}</span> : null}
+                                {image.total_duration_ms || image.duration_ms ? (
+                                  <span className="block text-stone-400 sm:ml-2 sm:inline">
+                                    耗时 {formatDuration(image.total_duration_ms ?? image.duration_ms)}
+                                  </span>
+                                ) : null}
                               </div>
                               <div className="flex items-center gap-1.5">
                                 <Button
@@ -354,6 +488,7 @@ export function ImageResults({
                           key={image.id}
                           index={index}
                           status={turn.status}
+                          image={image}
                           className={cn(
                             "break-inside-avoid rounded-xl border border-stone-200/80 sm:rounded-none",
                             turn.size === "1:1" && "aspect-square",

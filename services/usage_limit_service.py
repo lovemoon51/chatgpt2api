@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from threading import Lock
@@ -59,16 +60,13 @@ class UsageLimitService:
         if allowed_models and str(model or "").strip() not in allowed_models:
             raise UsageLimitError("model is not allowed", status_code=403)
 
-    @contextmanager
-    def reserve(self, identity: dict[str, object], *, model: str, kind: str) -> Iterator[None]:
+    def acquire(self, identity: dict[str, object], *, model: str, kind: str) -> Callable[[], None]:
         if self._is_admin(identity):
-            yield
-            return
+            return lambda: None
 
         key_id = self._key_id(identity)
         if not key_id:
-            yield
-            return
+            return lambda: None
 
         count_name = "images_per_day" if kind == "image" else "requests_per_day"
         counter_kind = "image" if kind == "image" else "request"
@@ -87,15 +85,29 @@ class UsageLimitService:
             self._active[key_id] = active + 1
             self._counts[count_key] = used + 1
 
-        try:
-            yield
-        finally:
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
             with self._lock:
                 active = self._active.get(key_id, 0)
                 if active <= 1:
                     self._active.pop(key_id, None)
                 else:
                     self._active[key_id] = active - 1
+
+        return release
+
+    @contextmanager
+    def reserve(self, identity: dict[str, object], *, model: str, kind: str) -> Iterator[None]:
+        release = self.acquire(identity, model=model, kind=kind)
+        try:
+            yield
+        finally:
+            release()
 
     def reset(self) -> None:
         with self._lock:

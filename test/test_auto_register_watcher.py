@@ -7,10 +7,18 @@ import api.support as support_module
 
 
 class FakeAccountPool:
-    def __init__(self, available: int, *, tokens: list[str] | None = None, refreshed_available: int | None = None):
+    def __init__(
+            self,
+            available: int,
+            *,
+            tokens: list[str] | None = None,
+            refreshed_available: int | None = None,
+            refreshed_tokens: list[str] | None = None,
+    ):
         self.available = available
         self.tokens = tokens or []
         self.refreshed_available = refreshed_available
+        self.refreshed_tokens = refreshed_tokens
         self.refresh_calls: list[tuple[list[str], str]] = []
 
     def list_tokens(self) -> list[str]:
@@ -20,6 +28,8 @@ class FakeAccountPool:
         self.refresh_calls.append((list(access_tokens), log_title))
         if self.refreshed_available is not None:
             self.available = self.refreshed_available
+        if self.refreshed_tokens is not None:
+            self.tokens = list(self.refreshed_tokens)
         return {"refreshed": len(access_tokens), "errors": [], "items": []}
 
     def available_account_count(self) -> int:
@@ -84,9 +94,10 @@ class AutoRegisterWatcherTests(unittest.TestCase):
         self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检触发补池")
         self.assertTrue(add_log.call_args.args[2]["triggered"])
 
-    def test_does_not_register_when_total_accounts_reach_cap(self) -> None:
+    def test_refreshes_but_does_not_register_when_total_accounts_remain_at_cap(self) -> None:
         registrar = FakeRegistrar(enabled=False)
-        account_pool = FakeAccountPool(available=0, tokens=[f"token-{index}" for index in range(50)])
+        tokens = [f"token-{index}" for index in range(50)]
+        account_pool = FakeAccountPool(available=0, tokens=tokens)
         with (
             mock.patch.object(
                 support_module.config,
@@ -111,11 +122,57 @@ class AutoRegisterWatcherTests(unittest.TestCase):
 
         self.assertFalse(triggered)
         self.assertEqual(last_triggered_at, 0)
-        self.assertEqual(account_pool.refresh_calls, [])
+        self.assertEqual(account_pool.refresh_calls, [(tokens, "一键刷新所有账号信息和额度")])
         self.assertEqual(registrar.started, 0)
         self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检")
         self.assertEqual(add_log.call_args.args[2]["reason"], "account_limit_reached")
         self.assertEqual(add_log.call_args.args[2]["total_accounts"], 50)
+        self.assertEqual(add_log.call_args.args[2]["refresh"], {"refreshed": 50, "errors": 0})
+
+    def test_registers_when_refresh_removes_invalid_accounts_below_cap_and_min(self) -> None:
+        registrar = FakeRegistrar(enabled=False)
+        original_tokens = [f"token-{index}" for index in range(50)]
+        remaining_tokens = [f"token-{index}" for index in range(45)]
+        account_pool = FakeAccountPool(
+            available=0,
+            tokens=original_tokens,
+            refreshed_available=0,
+            refreshed_tokens=remaining_tokens,
+        )
+        with (
+            mock.patch.object(
+                support_module.config,
+                "get_auto_register_settings",
+                return_value={
+                    "enabled": True,
+                    "min_available": 50,
+                    "target_available": 50,
+                    "check_interval_seconds": 30,
+                    "cooldown_seconds": 300,
+                },
+            ),
+            mock.patch.object(support_module.config, "get_account_pool_settings", return_value={"max_total_accounts": 50}),
+            mock.patch.object(support_module.log_service, "add") as add_log,
+        ):
+            last_triggered_at, triggered = support_module.run_auto_register_check(
+                0,
+                now=1000,
+                account_pool=account_pool,
+                registrar=registrar,
+            )
+
+        self.assertTrue(triggered)
+        self.assertEqual(last_triggered_at, 1000)
+        self.assertEqual(account_pool.refresh_calls, [(original_tokens, "一键刷新所有账号信息和额度")])
+        self.assertEqual(registrar.started, 1)
+        self.assertEqual(registrar.updates[0]["mode"], "available")
+        self.assertEqual(registrar.updates[0]["target_available"], 50)
+        self.assertEqual(registrar.updates[0]["total"], 5)
+        self.assertEqual(add_log.call_args.args[1], "图片健康号池巡检触发补池")
+        self.assertEqual(add_log.call_args.args[2]["reason"], "below_min_available")
+        self.assertEqual(add_log.call_args.args[2]["total_accounts"], 45)
+        self.assertEqual(add_log.call_args.args[2]["available"], 0)
+        self.assertTrue(add_log.call_args.args[2]["triggered"])
 
     def test_refreshes_all_accounts_before_deciding_whether_to_register(self) -> None:
         settings = {

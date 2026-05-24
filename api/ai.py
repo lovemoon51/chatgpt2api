@@ -15,6 +15,7 @@ from api.support import (
 )
 from services.content_filter import check_request, request_text
 from services.log_service import LoggedCall
+from services.prompt_optimizer import optimize_image_prompt
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -85,6 +86,22 @@ class EmbeddingRequest(BaseModel):
     user: str | None = None
 
 
+class PromptOptimizeRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    model: str = "auto"
+
+
+class PromptOptimizeResponse(BaseModel):
+    optimized_prompt: str
+    model: str
+
+
+def handle_prompt_optimize(payload: dict[str, str]) -> dict[str, str]:
+    prompt = payload["prompt"]
+    model = payload.get("model") or "auto"
+    return {"optimized_prompt": optimize_image_prompt(prompt, model=model), "model": model}
+
+
 async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
@@ -116,6 +133,19 @@ def create_router() -> APIRouter:
             except HTTPException as exc:
                 release_limit()
                 raise
+            return release_usage_limit_after_response(response, release_limit)
+
+    @router.post("/api/prompts/optimize", response_model=PromptOptimizeResponse)
+    async def optimize_prompt(body: PromptOptimizeRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        prompt = body.prompt.strip()
+        if not prompt:
+            raise openai_http_exception("prompt is required", status_code=400, param="prompt", code="missing_required_parameter")
+        model = str(body.model or "auto")
+        call = LoggedCall(identity, "/api/prompts/optimize", model, "提示词优化", request_text=prompt)
+        with usage_limited_call(identity, "/api/prompts/optimize", model, "text") as release_limit:
+            await filter_or_log(call, prompt)
+            response = await call.run(handle_prompt_optimize, {"prompt": prompt, "model": model})
             return release_usage_limit_after_response(response, release_limit)
 
     @router.post("/v1/images/generations")

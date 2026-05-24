@@ -46,6 +46,7 @@ import {
   fetchManagedImages,
   fetchImageTasks,
   fetchModels,
+  optimizePrompt,
   reportImageTaskTiming,
   type ImageModel,
   type ManagedImage,
@@ -726,6 +727,10 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const taskQueueBellRef = useRef<HTMLButtonElement>(null);
 
   const [prompt, setPrompt] = useState("");
+  const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
+  const [promptOptimizeDialogOpen, setPromptOptimizeDialogOpen] = useState(false);
+  const [promptOptimizeOriginal, setPromptOptimizeOriginal] = useState("");
+  const [promptOptimizeResult, setPromptOptimizeResult] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatStreaming, setIsChatStreaming] = useState(false);
   const [imageSize, setImageSize] = useState("1:1");
@@ -1484,6 +1489,30 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     }
   };
 
+  const handleOptimizePrompt = useCallback(async () => {
+    const originalPrompt = prompt.trim();
+    if (!isImageMode || !originalPrompt || isOptimizingPrompt) {
+      return;
+    }
+
+    setIsOptimizingPrompt(true);
+    setPromptOptimizeOriginal(originalPrompt);
+    setPromptOptimizeResult("");
+    try {
+      const response = await optimizePrompt(originalPrompt);
+      const optimizedPrompt = response.optimized_prompt.trim();
+      if (!optimizedPrompt) {
+        throw new Error("优化结果为空");
+      }
+      setPromptOptimizeResult(optimizedPrompt);
+      setPromptOptimizeDialogOpen(true);
+    } catch (error) {
+      toast.error(getFriendlyErrorMessage(error, "提示词优化失败，请稍后重试"));
+    } finally {
+      setIsOptimizingPrompt(false);
+    }
+  }, [isImageMode, isOptimizingPrompt, prompt]);
+
   const handleSubmit = async () => {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
@@ -1653,6 +1682,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   };
 
   const canSubmit = Boolean(prompt.trim()) && (isImageMode || !isChatStreaming);
+  const canOptimizePrompt = isImageMode && Boolean(prompt.trim()) && !isOptimizingPrompt;
 
   return (
     <>
@@ -2557,6 +2587,24 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                   </button>
                   {isImageMode ? (
                     <button
+                      type="button"
+                      className={cn(
+                        "inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-medium ring-1 transition max-[520px]:px-3",
+                        canOptimizePrompt
+                          ? "bg-white text-slate-600 ring-slate-200 hover:bg-slate-50 hover:text-slate-900 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700 dark:hover:bg-slate-700 dark:hover:text-white"
+                          : "cursor-not-allowed bg-slate-50 text-slate-300 ring-slate-200 dark:bg-slate-900 dark:text-slate-600 dark:ring-slate-800",
+                      )}
+                      onClick={() => void handleOptimizePrompt()}
+                      disabled={!canOptimizePrompt}
+                      aria-label="优化提示词"
+                      title={prompt.trim() ? "优化当前提示词" : "请输入提示词后再优化"}
+                    >
+                      {isOptimizingPrompt ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+                      <span className="hidden sm:inline">{isOptimizingPrompt ? "优化中" : "优化"}</span>
+                    </button>
+                  ) : null}
+                  {isImageMode ? (
+                    <button
                       ref={paramsButtonRef}
                       type="button"
                       className={cn(
@@ -2623,6 +2671,70 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+      <Dialog open={promptOptimizeDialogOpen} onOpenChange={setPromptOptimizeDialogOpen}>
+        <DialogContent
+          className={cn(
+            "w-[min(94vw,760px)] gap-0 overflow-hidden rounded-[28px] p-0",
+            isDarkTheme ? "border-slate-800 bg-slate-950 text-slate-100" : "border-white/80 bg-white",
+          )}
+        >
+          <DialogHeader className={cn("border-b px-6 py-5", isDarkTheme ? "border-slate-800" : "border-slate-100")}>
+            <DialogTitle className="flex items-center gap-2 text-lg">
+              <Sparkles className="size-5 text-blue-500" />
+              提示词优化结果
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 px-6 py-5">
+            <div>
+              <div className={cn("mb-2 text-sm font-semibold", isDarkTheme ? "text-slate-200" : "text-slate-700")}>原始提示词</div>
+              <div className={cn("max-h-36 overflow-y-auto rounded-2xl p-4 text-sm leading-6", isDarkTheme ? "bg-slate-900 text-slate-300" : "bg-slate-50 text-slate-600")}>
+                {promptOptimizeOriginal}
+              </div>
+            </div>
+            <div>
+              <div className={cn("mb-2 text-sm font-semibold", isDarkTheme ? "text-slate-200" : "text-slate-700")}>优化结果</div>
+              <div className={cn("max-h-56 overflow-y-auto rounded-2xl border p-4 text-sm leading-6", isDarkTheme ? "border-blue-900/50 bg-blue-950/30 text-slate-100" : "border-blue-100 bg-blue-50/60 text-slate-800")}>
+                {promptOptimizeResult}
+              </div>
+            </div>
+          </div>
+          <div className={cn("flex flex-wrap justify-end gap-2 border-t px-6 py-4", isDarkTheme ? "border-slate-800" : "border-slate-100")}>
+            <Button
+              type="button"
+              variant="outline"
+              className={cn("rounded-full", isDarkTheme ? "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-600")}
+              onClick={() => {
+                void navigator.clipboard.writeText(promptOptimizeResult).then(
+                  () => toast.success("已复制优化结果"),
+                  () => toast.error("复制失败，请手动复制"),
+                );
+              }}
+            >
+              <Copy className="size-4" />
+              复制
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className={cn("rounded-full", isDarkTheme ? "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-600")}
+              onClick={() => setPromptOptimizeDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              className="rounded-full"
+              onClick={() => {
+                setPrompt(promptOptimizeResult);
+                setPromptOptimizeDialogOpen(false);
+                window.requestAnimationFrame(() => textareaRef.current?.focus());
+              }}
+            >
+              使用优化结果
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={imageLibraryOpen} onOpenChange={setImageLibraryOpen}>
         <DialogContent
           className={cn(

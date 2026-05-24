@@ -812,6 +812,18 @@ export async function downloadCpaAccounts(accessTokens: string[] = []) {
   URL.revokeObjectURL(url);
 }
 
+export type PromptOptimizeResponse = {
+  optimized_prompt: string;
+  model: string;
+};
+
+export async function optimizePrompt(prompt: string) {
+  return httpRequest<PromptOptimizeResponse>("/api/prompts/optimize", {
+    method: "POST",
+    body: { prompt },
+  });
+}
+
 export async function generateImage(prompt: string, model?: ImageModel, size?: string) {
   return httpRequest<ImageResponse>(
     "/v1/images/generations",

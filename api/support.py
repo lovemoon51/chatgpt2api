@@ -376,11 +376,6 @@ def run_auto_register_check(
         "triggered": False,
         "reason": "",
     }
-    if total_accounts >= max_total_accounts:
-        detail["reason"] = "account_limit_reached"
-        _add_account_log("图片健康号池巡检", detail)
-        return last_triggered_at, False
-
     refresh_result = refresh_all_accounts_for_watcher(account_pool)
     available = int(account_pool.available_account_count())
     total_accounts = _account_pool_total_count(account_pool)

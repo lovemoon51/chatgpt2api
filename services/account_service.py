@@ -64,6 +64,14 @@ def _config_float(key: str, default: float, minimum: float = 0.0) -> float:
     return max(minimum, value)
 
 
+def _auto_register_account_cap() -> int:
+    try:
+        settings = config.get_account_pool_settings()
+        return max(1, int(settings.get("max_total_accounts") or 0))
+    except Exception:
+        return 0
+
+
 def _normalize_account_tags(value: object) -> list[str]:
     if isinstance(value, str):
         candidates = [value]
@@ -133,6 +141,7 @@ class AccountService:
         self._image_pool_replenish_last_started_at = 0.0
         self._image_pool_replenish_thread: threading.Thread | None = None
         self._image_pool_register_running = False
+        self._image_pool_register_generation = 0
 
     def _load_accounts(self) -> dict[str, dict]:
         accounts = self.storage.load_accounts()
@@ -447,14 +456,28 @@ class AccountService:
 
     def register_image_account_for_request(self, excluded_tokens: set[str] | None = None, reason: str = "image_first_failure") -> str:
         excluded = set(excluded_tokens or set())
+        timeout_seconds = max(0.001, float(config.image_pool_register_timeout_seconds))
+        deadline = time.time() + timeout_seconds
+        generation = 0
         with self._image_slot_condition:
+            account_cap = _auto_register_account_cap()
+            if account_cap and len(self._accounts) >= account_cap:
+                raise RuntimeError(f"account limit reached ({len(self._accounts)}/{account_cap})")
             if self._image_pool_register_running:
                 while self._image_pool_register_running:
-                    self._image_slot_condition.wait(timeout=0.5)
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        self._image_pool_register_running = False
+                        self._image_pool_register_generation += 1
+                        self._image_slot_condition.notify_all()
+                        raise RuntimeError(f"image pool register timed out after {timeout_seconds:g} seconds")
+                    self._image_slot_condition.wait(timeout=min(0.5, remaining))
                 registered_by_other = True
             else:
                 registered_by_other = False
                 self._image_pool_register_running = True
+                self._image_pool_register_generation += 1
+                generation = self._image_pool_register_generation
         if registered_by_other:
             return self._acquire_next_candidate_token(excluded_tokens=excluded)
 
@@ -464,10 +487,33 @@ class AccountService:
         try:
             from services.register import openai_register
 
-            with openai_register.stats_lock:
-                if not openai_register.stats.get("start_time"):
-                    openai_register.stats["start_time"] = time.time()
-            result = openai_register.worker(int(started * 1000) % 1_000_000)
+            result_queue: _queue.Queue[tuple[bool, object]] = _queue.Queue(maxsize=1)
+
+            def run_worker() -> None:
+                try:
+                    with openai_register.stats_lock:
+                        if not openai_register.stats.get("start_time"):
+                            openai_register.stats["start_time"] = time.time()
+                    result_queue.put((True, openai_register.worker(int(started * 1000) % 1_000_000)))
+                except Exception as exc:
+                    result_queue.put((False, exc))
+
+            worker_thread = threading.Thread(
+                target=run_worker,
+                name="image-pool-register-request",
+                daemon=True,
+            )
+            worker_thread.start()
+            worker_thread.join(timeout=timeout_seconds)
+            if worker_thread.is_alive():
+                raise TimeoutError(f"image pool register timed out after {timeout_seconds:g} seconds")
+            try:
+                ok, result_or_error = result_queue.get_nowait()
+            except _queue.Empty as exc:
+                raise RuntimeError("image pool register finished without result") from exc
+            if not ok:
+                raise result_or_error
+            result = result_or_error
             if not isinstance(result, dict) or not result.get("ok"):
                 raise RuntimeError(str((result or {}).get("error") or "register failed"))
             raw_result = result.get("result") if isinstance(result.get("result"), dict) else {}
@@ -500,8 +546,9 @@ class AccountService:
             except Exception:
                 pass
             with self._image_slot_condition:
-                self._image_pool_register_running = False
-                self._image_slot_condition.notify_all()
+                if self._image_pool_register_generation == generation:
+                    self._image_pool_register_running = False
+                    self._image_slot_condition.notify_all()
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         with self._lock:

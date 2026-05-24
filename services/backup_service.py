@@ -18,6 +18,7 @@ from curl_cffi import requests
 
 from services.config import BASE_DIR, CONFIG_FILE, DATA_DIR, config, load_backup_state, save_backup_state
 from services.image_tags_service import TAGS_FILE
+from services.system_status_service import worker_error, worker_heartbeat, worker_started, worker_stopped
 
 
 def _utc_now() -> datetime:
@@ -323,6 +324,9 @@ class BackupService:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
+        self._worker_started_at: str | None = None
+        self._worker_last_heartbeat: str | None = None
+        self._worker_last_error: str | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -341,12 +345,34 @@ class BackupService:
             thread.join(timeout=2)
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.run_scheduled_backup_if_needed()
-            except Exception:
-                pass
-            self._stop_event.wait(30)
+        now = _iso_now()
+        worker_started("backup")
+        with self._lock:
+            self._worker_started_at = self._worker_started_at or now
+            self._worker_last_heartbeat = now
+        try:
+            while not self._stop_event.is_set():
+                now = _iso_now()
+                worker_heartbeat("backup")
+                with self._lock:
+                    self._worker_last_heartbeat = now
+                try:
+                    self.run_scheduled_backup_if_needed()
+                except Exception as exc:
+                    worker_error("backup", exc)
+                    with self._lock:
+                        self._worker_last_error = str(exc) or exc.__class__.__name__
+                self._stop_event.wait(30)
+        except Exception as exc:
+            worker_stopped("backup", exc)
+            with self._lock:
+                self._worker_last_error = str(exc) or exc.__class__.__name__
+            raise
+        finally:
+            if self._stop_event.is_set():
+                worker_stopped("backup")
+                with self._lock:
+                    self._worker_last_heartbeat = _iso_now()
 
     def run_scheduled_backup_if_needed(self) -> None:
         settings = config.get_backup_settings()
@@ -372,6 +398,20 @@ class BackupService:
             **load_backup_state(),
             "running": self._running,
         }
+
+    def _snapshot_worker_status_locked(self) -> dict[str, object]:
+        thread = self._thread
+        return {
+            "name": "backup",
+            "running": bool(thread and thread.is_alive()),
+            "started_at": self._worker_started_at,
+            "last_heartbeat": self._worker_last_heartbeat,
+            "last_error": self._worker_last_error,
+        }
+
+    def get_worker_status(self) -> dict[str, object]:
+        with self._lock:
+            return self._snapshot_worker_status_locked()
 
     def is_configured(self) -> bool:
         settings = config.get_backup_settings()

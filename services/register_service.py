@@ -196,11 +196,12 @@ class RegisterService:
         items = account_service.list_accounts()
         normal = [item for item in items if item.get("status") == "正常"]
         return {
+            "current_total": len(items),
             "current_quota": sum(int(item.get("quota") or 0) for item in normal if not item.get("image_quota_unknown")),
             "current_available": account_service.available_account_count(),
         }
 
-    def _target_reached(self, cfg: dict, submitted: int) -> bool:
+    def _target_reached(self, cfg: dict, submitted: int, pending: int = 0) -> bool:
         mode = str(cfg.get("mode") or "total")
         metrics = self._pool_metrics()
         self._bump(**metrics)
@@ -209,8 +210,15 @@ class RegisterService:
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，当前剩余额度={metrics['current_quota']}，目标额度={cfg.get('target_quota')}，{'跳过注册' if reached else '继续注册'}", "yellow")
             return reached
         if mode == "available":
-            reached = metrics["current_available"] >= int(cfg.get("target_available") or 1)
-            self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
+            target_total = int(cfg.get("target_available") or 1)
+            projected_total = metrics["current_total"] + max(0, pending)
+            reached = projected_total >= target_total
+            self._append_log(
+                f"检查号池：当前总账号={metrics['current_total']}，在途注册={max(0, pending)}，"
+                f"账号上限={target_total}，当前健康账号={metrics['current_available']}，"
+                f"当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}",
+                "yellow",
+            )
             return reached
         return submitted >= int(cfg.get("total") or 1)
 
@@ -240,7 +248,7 @@ class RegisterService:
             futures = set()
             while True:
                 cfg = self.get()
-                while self.get()["enabled"] and not self._target_reached(cfg, submitted) and len(futures) < threads:
+                while self.get()["enabled"] and not self._target_reached(cfg, submitted, pending=len(futures)) and len(futures) < threads:
                     submitted += 1
                     futures.add(executor.submit(openai_register.worker, submitted))
                 self._bump(running=len(futures), done=done, success=success, fail=fail)

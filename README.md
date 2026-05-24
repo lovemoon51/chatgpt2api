@@ -73,6 +73,29 @@ bun run dev
 - 前端：`http://127.0.0.1:3000`
 - 前端开发环境会把接口请求指向 `http://127.0.0.1:8000`
 
+常用工程化检查：
+
+```bash
+# 后端核心 CI 测试
+CHATGPT2API_AUTH_KEY=dev-test-key uv run python -m unittest test.test_config test.test_backup_integrity test.test_system_status_api
+
+# 后端全量测试（部分用例可能需要额外环境或更长时间）
+CHATGPT2API_AUTH_KEY=dev-test-key uv run python -m unittest discover -s test -p "test*.py"
+
+# 前端类型检查、Lint 和生产构建
+cd web
+bun run typecheck
+bun run lint
+bun run build
+```
+
+### 测试分层
+
+- Unit test：位于 `test/`，覆盖配置解析、服务层逻辑、协议转换和错误格式等纯逻辑路径，默认不依赖真实账号、真实密钥或外部网络。
+- Integration test：同样位于 `test/`，通过 FastAPI `TestClient`、mock 后端或临时存储验证 API 路由、OpenAI 兼容接口、账号池和图片任务等跨模块行为。
+- Manual storage test：用于本地手动验证存储后端读写和迁移，先准备隔离的临时目录/测试数据库，再运行 `python scripts/test_storage.py` 或 `python scripts/migrate_storage.py`。不要指向生产 `data/`、生产 PostgreSQL 或真实 Git 存储仓库。
+- Frontend check：在 `web/` 下运行 `bun run typecheck`、`bun run lint`、`bun run build`，CI 会对 push 和 PR 执行这些门禁。
+
 ### 存储后端配置
 
 支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
@@ -89,6 +112,26 @@ environment:
   - STORAGE_BACKEND=postgres
   - DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
+
+### 健康检查与备份恢复演练
+
+- 健康检查端点是 `/healthz`。本地后端可用 `curl http://127.0.0.1:8000/healthz`，Docker Compose 默认端口可用 `curl http://127.0.0.1:3000/healthz`。
+- 备份配置建议使用 Cloudflare R2 专用最小权限 Access Key，并开启备份加密口令；不要把真实 `auth-key`、R2 Secret、上游账号 token 或数据库密码提交到仓库。
+- 可从 `config.example.json` 复制出本地 `config.json`，再手动填入真实值；示例文件只保留占位符。
+- 备份恢复演练先下载备份包到本地隔离目录，再运行 dry-run：
+
+```bash
+python scripts/backup_restore_dry_run.py /path/to/backup.tar.gz
+```
+
+该脚本只读取指定备份包，并解压到系统临时目录校验文件路径、JSON/JSONL 可读性和基础内容；默认会删除临时目录，不会覆盖生产 `data/`。需要人工查看解压结果时可加 `--keep-temp`，确认后再手动清理输出目录。加密备份请先在隔离环境解密成临时文件后再演练。
+
+### 安全配置建议
+
+- 优先通过环境变量 `CHATGPT2API_AUTH_KEY`、`DATABASE_URL`、`GIT_TOKEN` 等注入敏感配置，避免把真实密钥写入仓库文件。
+- 公网部署时把 Web 面板放在反向代理、VPN 或可信网络后面，并限制管理端入口访问来源。
+- 账号池、备份包、日志和图片缓存都可能包含敏感数据，迁移、排障和演练时使用临时目录，完成后及时清理。
+- 开启自动备份后定期做 dry-run 恢复演练，并记录备份时间、包大小、校验结果和演练人员。
 
 ## 功能
 

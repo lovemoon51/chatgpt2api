@@ -209,6 +209,32 @@ class ClashPartyServiceTests(unittest.TestCase):
         self.assertEqual(cfg["proxy"], "http://127.0.0.1:7890")
         self.assertTrue(cfg["clash"]["enabled"])
 
+    def test_register_available_mode_uses_total_account_cap(self):
+        service = RegisterService.__new__(RegisterService)
+        service._lock = threading.RLock()
+        service._logs = []
+        service._config = _normalize({"mode": "available", "target_available": 50})
+        service._bump = mock.Mock()
+
+        with (
+            mock.patch("services.register_service.account_service.list_accounts", return_value=[{"status": "正常", "quota": 0}] * 50),
+            mock.patch("services.register_service.account_service.available_account_count", return_value=0),
+        ):
+            self.assertTrue(service._target_reached({"mode": "available", "target_available": 50}, 0, pending=0))
+
+        with (
+            mock.patch("services.register_service.account_service.list_accounts", return_value=[{"status": "正常", "quota": 0}] * 48),
+            mock.patch("services.register_service.account_service.available_account_count", return_value=0),
+        ):
+            self.assertFalse(service._target_reached({"mode": "available", "target_available": 50}, 36, pending=0))
+            self.assertTrue(service._target_reached({"mode": "available", "target_available": 50}, 36, pending=2))
+
+        with (
+            mock.patch("services.register_service.account_service.list_accounts", return_value=[{"status": "正常", "quota": 0}] * 48),
+            mock.patch("services.register_service.account_service.available_account_count", return_value=0),
+        ):
+            self.assertFalse(service._target_reached({"mode": "available", "target_available": 50}, 36, pending=1))
+
     def test_prepare_clash_route_reads_current_selection_and_logs(self):
         service = RegisterService.__new__(RegisterService)
         service._lock = threading.RLock()

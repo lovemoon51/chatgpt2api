@@ -39,17 +39,20 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import webConfig from "@/constants/common-env";
 import {
+  cancelImageTask,
   createImageEditTask,
   createImageGenerationTask,
   downloadSingleImage,
   fetchManagedImages,
   fetchImageTasks,
   fetchModels,
+  reportImageTaskTiming,
   type ImageModel,
   type ManagedImage,
   type ImageTask,
   type OpenAIModel,
 } from "@/lib/api";
+import { getFailureNextStep, getFriendlyErrorMessage } from "@/lib/error-messages";
 import { downloadImageUrl, fetchImageFile } from "@/lib/image-fetch";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -74,7 +77,9 @@ const STUDIO_MODE_STORAGE_KEY = "chatgpt2api:studio_last_mode";
 const STUDIO_IMAGE_MODEL_STORAGE_KEY = "chatgpt2api:studio_last_model";
 const STUDIO_CHAT_MODEL_STORAGE_KEY = "chatgpt2api:studio_last_chat_model";
 const STUDIO_THEME_STORAGE_KEY = "chatgpt2api:studio_theme";
+const IMAGE_TASK_POLL_DELAYS_MS = [700, 1000, 1500, 2500, 4000];
 const activeQueueIds = new Set<string>();
+const studioTimingReportInFlight = new Set<string>();
 
 type StudioMode = "chat" | "image";
 type StudioTheme = "light" | "dark";
@@ -306,6 +311,13 @@ function formatDuration(ms?: number) {
   return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
 }
 
+function formatLimitValue(value?: number | null) {
+  if (value == null) {
+    return "不限";
+  }
+  return String(value);
+}
+
 function averageDuration(values: Array<number | undefined>) {
   const normalized = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (normalized.length === 0) {
@@ -323,9 +335,29 @@ function timestampFromIso(value?: string) {
 }
 
 function getTurnTimingStats(turn: ImageTurn) {
-  const queueMs = averageDuration(turn.images.map((image) => image.queue_duration_ms));
-  const upstreamMs = averageDuration(turn.images.map((image) => image.duration_ms));
-  const revealMs = averageDuration(turn.images.map((image) => image.reveal_duration_ms));
+  const queueMs = averageDuration(
+    turn.images.map((image) =>
+      image.queue_duration_ms ??
+      image.timings?.queue_wait_ms ??
+      image.timing_ms?.queue_wait_ms ??
+      image.timings?.queue ??
+      image.timing_ms?.queue,
+    ),
+  );
+  const upstreamMs = averageDuration(
+    turn.images.map((image) =>
+      image.duration_ms ??
+      image.timings?.worker_total_ms ??
+      image.timing_ms?.worker_total_ms ??
+      image.timings?.image_poll_ms ??
+      image.timing_ms?.image_poll_ms ??
+      image.timings?.generating ??
+      image.timings?.running ??
+      image.timing_ms?.generating ??
+      image.timing_ms?.running,
+    ),
+  );
+  const revealMs = averageDuration(turn.images.map((image) => image.reveal_duration_ms ?? image.timings?.revealing ?? image.timing_ms?.revealing));
   return { queueMs, upstreamMs, revealMs };
 }
 
@@ -344,6 +376,26 @@ function getTurnElapsedMs(turn: ImageTurn, nowMs: number) {
         )
       : undefined;
   return Math.max(0, typeof finishedAtMs === "number" ? finishedAtMs : nowMs - startedAtMs);
+}
+
+function getTurnWaitingMs(turn: ImageTurn, nowMs: number) {
+  const createdAtMs = timestampFromIso(turn.createdAt);
+  if (typeof createdAtMs !== "number") {
+    return undefined;
+  }
+  const startedAtMs = averageDuration(
+    turn.images.map((image) => {
+      const imageStartedAtMs = timestampFromIso(image.started_at || image.finished_at);
+      return typeof imageStartedAtMs === "number" ? imageStartedAtMs - createdAtMs : undefined;
+    }),
+  );
+  if (typeof startedAtMs === "number") {
+    return Math.max(0, startedAtMs);
+  }
+  if (turn.status === "queued" || turn.status === "generating") {
+    return Math.max(0, nowMs - createdAtMs);
+  }
+  return undefined;
 }
 
 function getStoredImageSrc(image: StoredImage) {
@@ -429,12 +481,22 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
 }
 
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
+  const timings = task.timings || task.timing_ms;
   const timing = {
+    phase: task.phase || (task.status === "running" ? "generating" : task.status),
+    phase_label: task.phase_label,
+    phase_updated_at: task.phase_updated_at || task.updated_at,
+    timings,
+    timing_ms: task.timing_ms,
     queued_at: task.queued_at,
+    submitted_at: task.submitted_at,
     started_at: task.started_at,
+    downloading_at: task.downloading_at,
+    saving_at: task.saving_at,
     finished_at: task.finished_at,
     duration_ms: task.duration_ms,
-    queue_duration_ms: task.queue_duration_ms,
+    queue_duration_ms: task.queue_duration_ms ?? timings?.queue_wait_ms ?? timings?.queue,
+    total_duration_ms: task.total_duration_ms ?? timings?.worker_total_ms ?? timings?.total,
   };
   if (task.status === "success") {
     const first = task.data?.[0];
@@ -445,6 +507,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       ...image,
       ...timing,
       taskId: task.id,
+      phase: task.phase || "completed",
       status: "success",
       b64_json: first.b64_json,
       url: first.url,
@@ -454,8 +517,9 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
     };
   }
 
-  if (task.status === "error") {
-    return { ...image, ...timing, taskId: task.id, status: "error", error: task.error || "生成失败" };
+  if (task.status === "error" || task.status === "cancelled") {
+    const fallback = task.status === "cancelled" ? "任务已取消" : "生成失败";
+    return { ...image, ...timing, taskId: task.id, phase: task.phase || "error", status: "error", error: getFriendlyErrorMessage(task.error, fallback) };
   }
 
   return { ...image, ...timing, taskId: task.id, status: "loading", error: undefined };
@@ -480,12 +544,23 @@ function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> 
 function createLoadingImages(turnId: string, count: number) {
   return Array.from({ length: count }, (_, index) => {
     const imageId = `${turnId}-${index}`;
-    return { id: imageId, taskId: imageId, status: "loading" as const };
+    return {
+      id: imageId,
+      taskId: imageId,
+      status: "loading" as const,
+      phase: "queued",
+      phase_label: "排队中",
+      phase_updated_at: new Date().toISOString(),
+    };
   });
 }
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function getImageTaskPollDelay(attempt: number) {
+  return IMAGE_TASK_POLL_DELAYS_MS[Math.min(attempt, IMAGE_TASK_POLL_DELAYS_MS.length - 1)];
 }
 
 function sortImageConversations(conversations: ImageConversation[]) {
@@ -623,6 +698,7 @@ function StudioChatBubble({ message }: { message: ChatMessage }) {
           <div className="flex justify-end gap-2">
             {message.referenceImages.map((image, index) => (
               <div key={`${message.id}-${image.name}-${index}`} className="size-16 overflow-hidden rounded-2xl bg-slate-100 shadow-sm">
+                {/* eslint-disable-next-line @next/next/no-img-element -- Local data URL previews are not served through Next image optimization. */}
                 <img src={image.dataUrl} alt={image.name || `附件 ${index + 1}`} className="h-full w-full object-cover" />
               </div>
             ))}
@@ -703,6 +779,14 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const composerPlaceholder = isImageMode ? "输入你想要生成的画面，也可直接粘贴图片" : "输入消息与AI聊天";
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
   const displayName = session.name.trim() || roleLabel;
+  const sessionLimits = session.limits ?? null;
+  const dailyLimitLabel = sessionLimits
+    ? `请求 ${formatLimitValue(sessionLimits.requestsPerDay)} / 图片 ${formatLimitValue(sessionLimits.imagesPerDay)}`
+    : "待同步";
+  const quotaLabel = sessionLimits ? formatLimitValue(sessionLimits.imagesPerDay) : "待同步";
+  const concurrencyLabel = sessionLimits
+    ? `${activeTaskCount}${sessionLimits.concurrency == null ? "" : ` / ${sessionLimits.concurrency}`}`
+    : `${activeTaskCount} / 待同步`;
   const imageLibraryLightboxItems = useMemo(
     () =>
       imageLibraryItems.map((item) => ({
@@ -1185,7 +1269,15 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                     status: "generating",
                     error: undefined,
                     images: turn.images.map((image) =>
-                      image.status === "loading" ? { ...image, taskId: image.taskId || image.id } : image,
+                      image.status === "loading"
+                        ? {
+                            ...image,
+                            taskId: image.taskId || image.id,
+                            phase: image.phase === "queued" ? "submitting" : image.phase,
+                            phase_label: image.phase === "queued" ? "提交中" : image.phase_label,
+                            phase_updated_at: new Date().toISOString(),
+                          }
+                        : image,
                     ),
                   }
                 : turn,
@@ -1211,6 +1303,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
         );
         await applyTasks(submitted);
 
+        let pollAttempt = 0;
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
           const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
@@ -1220,14 +1313,15 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
             break;
           }
 
-          await sleep(2000);
+          await sleep(getImageTaskPollDelay(pollAttempt));
+          pollAttempt += 1;
           const taskList = await fetchImageTasks(loadingTaskIds);
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
           }
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : "生成图片失败";
+        const message = getFriendlyErrorMessage(error, "生成图片失败");
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
           return {
@@ -1371,7 +1465,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
         ),
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "对话请求失败";
+      const message = getFriendlyErrorMessage(error, "对话请求失败");
       if ((error as Error).name === "AbortError") {
         setChatMessages((current) =>
           current.map((item) =>
@@ -1471,6 +1565,49 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
       toast.success("已重新加入任务队列");
     },
     [runConversationQueue],
+  );
+
+  const handleCancelTurn = useCallback(
+    async (conversationId: string, turnId: string) => {
+      const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+      const turn = conversation?.turns.find((item) => item.id === turnId);
+      const loadingTaskIds = turn?.images.flatMap((image) => (image.status === "loading" ? [image.taskId || image.id] : [])) || [];
+      if (!conversation || !turn || loadingTaskIds.length === 0) {
+        return;
+      }
+
+      const results = await Promise.allSettled(loadingTaskIds.map((taskId) => cancelImageTask(taskId)));
+      const cancelledIds = new Set(
+        results.flatMap((result, index) => (result.status === "fulfilled" ? [loadingTaskIds[index]] : [])),
+      );
+      await updateConversation(conversationId, (current) => {
+        const source = current ?? conversation;
+        return {
+          ...source,
+          updatedAt: new Date().toISOString(),
+          turns: source.turns.map((sourceTurn) => {
+            if (sourceTurn.id !== turnId) {
+              return sourceTurn;
+            }
+            const images = sourceTurn.images.map((image) => {
+              const taskId = image.taskId || image.id;
+              if (image.status !== "loading" || !loadingTaskIds.includes(taskId)) {
+                return image;
+              }
+              return {
+                ...image,
+                taskId,
+                status: "error" as const,
+                error: cancelledIds.has(taskId) ? "任务已取消" : "任务已在本地取消，服务端可能已结束",
+              };
+            });
+            return { ...sourceTurn, ...deriveTurnStatus({ ...sourceTurn, images }), images };
+          }),
+        };
+      });
+      toast.success("已取消队列中的任务");
+    },
+    [updateConversation],
   );
 
   const openQueueItem = (item: StudioTaskQueueItem) => {
@@ -1744,6 +1881,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                         {taskQueueItems.map((item) => {
                           const finishedCount = item.stats.success + item.stats.failed;
                           const timing = getTurnTimingStats(item.turn);
+                          const waitingMs = getTurnWaitingMs(item.turn, elapsedNowMs);
                           return (
                             <div key={item.id} className="rounded-[18px] border border-slate-100 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/70">
                               <div className="flex items-start justify-between gap-3">
@@ -1769,6 +1907,17 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                   </div>
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
+                                  {item.turn.status === "queued" || item.turn.status === "generating" ? (
+                                    <button
+                                      type="button"
+                                      className="grid size-8 place-items-center rounded-full bg-white text-slate-500 ring-1 ring-slate-200 transition hover:bg-rose-50 hover:text-rose-600 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700 dark:hover:bg-rose-950/40 dark:hover:text-rose-200"
+                                      onClick={() => void handleCancelTurn(item.conversationId, item.turn.id)}
+                                      aria-label="取消任务"
+                                      title="取消"
+                                    >
+                                      <X className="size-4" />
+                                    </button>
+                                  ) : null}
                                   {item.turn.status === "error" ? (
                                     <button
                                       type="button"
@@ -1804,13 +1953,17 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                     {finishedCount} / {item.stats.total}
                                   </span>
                                 </div>
-                                <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+                                <div className="grid grid-cols-2 gap-1.5 text-[11px] sm:grid-cols-4">
                                   <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
-                                    <div className="text-slate-400 dark:text-slate-500">排队</div>
+                                    <div className="text-slate-400 dark:text-slate-500">已等待</div>
+                                    <div className="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{formatDuration(waitingMs)}</div>
+                                  </div>
+                                  <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
+                                    <div className="text-slate-400 dark:text-slate-500">排队耗时</div>
                                     <div className="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{formatDuration(timing.queueMs)}</div>
                                   </div>
                                   <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
-                                    <div className="text-slate-400 dark:text-slate-500">上游</div>
+                                    <div className="text-slate-400 dark:text-slate-500">生成耗时</div>
                                     <div className="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{formatDuration(timing.upstreamMs)}</div>
                                   </div>
                                   <div className="rounded-xl bg-white px-2.5 py-2 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-slate-700">
@@ -1820,8 +1973,9 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                 </div>
                               </div>
                               {item.turn.error ? (
-                                <div className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-600 dark:bg-rose-950/45 dark:text-rose-200">
-                                  {item.turn.error}
+                                <div className="mt-2 space-y-1 rounded-xl bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-600 dark:bg-rose-950/45 dark:text-rose-200">
+                                  <div>{item.turn.error}</div>
+                                  <div className="font-medium">{getFailureNextStep(item.turn.error)}</div>
                                 </div>
                               ) : null}
                             </div>
@@ -1834,6 +1988,25 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
               ) : null}
             </div>
           </header>
+
+          <div className="border-b border-white/70 px-4 py-3 dark:border-slate-800 sm:px-8">
+            <div className="mx-auto flex w-full max-w-[1060px] flex-wrap items-center gap-2 text-xs">
+              <span className="rounded-full bg-white px-3 py-1.5 font-medium text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                我的额度：{quotaLabel}
+              </span>
+              <span className="rounded-full bg-white px-3 py-1.5 font-medium text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                今日限制：{dailyLimitLabel}
+              </span>
+              <span className="rounded-full bg-white px-3 py-1.5 font-medium text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                并发：{concurrencyLabel}
+              </span>
+              {!sessionLimits ? (
+                <span className="rounded-full bg-amber-50 px-3 py-1.5 font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+                  限制信息等待后端登录响应提供
+                </span>
+              ) : null}
+            </div>
+          </div>
 
           <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
             <div className="mx-auto flex w-full max-w-[1060px] flex-col gap-7">
@@ -1859,6 +2032,8 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
               ) : selectedConversation ? (
                 selectedConversation.turns.map((turn, turnIndex) => {
                   const elapsedMs = getTurnElapsedMs(turn, elapsedNowMs);
+                  const waitingMs = getTurnWaitingMs(turn, elapsedNowMs);
+                  const timing = getTurnTimingStats(turn);
                   const successfulImages = turn.images.flatMap((image) => {
                     const src = image.status === "success" ? getStoredImageSrc(image) : "";
                     return src ? [{ id: image.id, src }] : [];
@@ -1917,6 +2092,15 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                               本次耗时 {formatDuration(elapsedMs)}
                             </span>
                           ) : null}
+                          <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm dark:bg-slate-800 dark:text-slate-400">
+                            已等待 {formatDuration(waitingMs)}
+                          </span>
+                          <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm dark:bg-slate-800 dark:text-slate-400">
+                            排队耗时 {formatDuration(timing.queueMs)}
+                          </span>
+                          <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm dark:bg-slate-800 dark:text-slate-400">
+                            生成耗时 {formatDuration(timing.upstreamMs)}
+                          </span>
                         </div>
 
                         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1949,9 +2133,15 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                       )}
                                       onLoad={() => {
                                         const now = new Date();
-                                        const revealStartedAt = image.reveal_started_at || image.finished_at;
+                                        const reportKey = "reveal_duration_ms";
+                                        const revealStartedAt = image.reveal_started_at || image.finished_at || now.toISOString();
                                         const revealStartMs = revealStartedAt ? new Date(revealStartedAt).getTime() : Number.NaN;
                                         const revealDurationMs = Number.isFinite(revealStartMs) ? Math.max(0, now.getTime() - revealStartMs) : undefined;
+                                        const taskId = image.taskId;
+                                        const shouldReportTiming =
+                                          Boolean(taskId) &&
+                                          typeof revealDurationMs === "number" &&
+                                          !image.reported_timings?.[reportKey];
                                         setRevealedImageIds((current) => {
                                           if (current.has(revealKey)) {
                                             return current;
@@ -1988,6 +2178,51 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                             };
                                           });
                                         }
+                                        if (!taskId || typeof revealDurationMs !== "number" || !shouldReportTiming) {
+                                          return;
+                                        }
+                                        const inFlightKey = `${taskId}:${reportKey}`;
+                                        if (studioTimingReportInFlight.has(inFlightKey)) {
+                                          return;
+                                        }
+                                        studioTimingReportInFlight.add(inFlightKey);
+                                        void (async () => {
+                                          try {
+                                            await reportImageTaskTiming(taskId, {
+                                              timing_key: reportKey,
+                                              duration_ms: Math.round(revealDurationMs),
+                                            });
+                                            await updateConversation(selectedConversation.id, (current) => {
+                                              const source = current ?? selectedConversation;
+                                              return {
+                                                ...source,
+                                                turns: source.turns.map((sourceTurn) => {
+                                                  if (sourceTurn.id !== turn.id) {
+                                                    return sourceTurn;
+                                                  }
+                                                  return {
+                                                    ...sourceTurn,
+                                                    images: sourceTurn.images.map((sourceImage) =>
+                                                      sourceImage.id === image.id
+                                                        ? {
+                                                            ...sourceImage,
+                                                            reported_timings: {
+                                                              ...sourceImage.reported_timings,
+                                                              [reportKey]: true,
+                                                            },
+                                                          }
+                                                        : sourceImage,
+                                                    ),
+                                                  };
+                                                }),
+                                              };
+                                            });
+                                          } catch {
+                                            // Timing reports are best-effort; keep the local reveal duration for display.
+                                          } finally {
+                                            studioTimingReportInFlight.delete(inFlightKey);
+                                          }
+                                        })();
                                       }}
                                     />
                                   </button>
@@ -2019,8 +2254,13 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
 
                             if (image.status === "error") {
                               return (
-                                <div key={image.id} className="flex aspect-square flex-col items-center justify-center gap-5 rounded-[18px] border border-rose-200 bg-rose-50 px-6 text-center text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/35 dark:text-rose-200">
-                                  <div className="text-sm leading-6">{image.error || "生成失败"}</div>
+                                <div key={image.id} className="flex aspect-square flex-col items-center justify-center gap-4 rounded-[18px] border border-rose-200 bg-rose-50 px-6 text-center text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/35 dark:text-rose-200">
+                                  <div>
+                                    <div className="text-sm leading-6">{image.error || "生成失败"}</div>
+                                    <div className="mt-2 text-xs leading-5 text-rose-500 dark:text-rose-200/80">
+                                      {getFailureNextStep(image.error || "生成失败")}
+                                    </div>
+                                  </div>
                                   <Button
                                     variant="outline"
                                     className="rounded-full border-rose-200 bg-white text-rose-600 hover:bg-rose-100 dark:border-rose-900/60 dark:bg-slate-900 dark:text-rose-200 dark:hover:bg-rose-950/50"
@@ -2044,7 +2284,12 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                           })}
                         </div>
 
-                        {turn.error ? <div className="rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200">{turn.error}</div> : null}
+                        {turn.error ? (
+                          <div className="rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+                            <div>{turn.error}</div>
+                            <div className="mt-1 font-medium">{getFailureNextStep(turn.error)}</div>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   );
@@ -2070,6 +2315,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                 <div className="flex gap-2 overflow-x-auto px-5 pt-4">
                   {referenceImages.map((image, index) => (
                     <div key={`${image.name}-${index}`} className="relative size-14 shrink-0 overflow-hidden rounded-2xl bg-slate-100 dark:bg-slate-800">
+                      {/* eslint-disable-next-line @next/next/no-img-element -- Local data URL previews are not served through Next image optimization. */}
                       <img src={image.dataUrl} alt={image.name || `参考图 ${index + 1}`} className="h-full w-full object-cover" />
                       <button
                         type="button"

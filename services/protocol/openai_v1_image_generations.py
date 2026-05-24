@@ -18,6 +18,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
     owner_identity = body.get("owner_identity") if isinstance(body.get("owner_identity"), dict) else None
+    source_task_id = str(body.get("source_task_id") or "").strip()
+    progress_callback = body.get("progress_callback") if callable(body.get("progress_callback")) else None
     outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
@@ -27,6 +29,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         base_url=base_url,
         message_as_error=True,
         owner_identity=owner_identity,
+        source_task_id=source_task_id,
+        progress_callback=progress_callback,
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

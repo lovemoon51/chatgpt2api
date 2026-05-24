@@ -5,10 +5,11 @@ from urllib.parse import quote
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import extract_bearer_token, require_admin, require_identity, resolve_image_base_url
 from services.account_service import account_service
+from services.auth_audit_service import auth_audit_service, key_hint, source_hint
 from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
@@ -16,11 +17,92 @@ from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 from services.auth_service import auth_service
-from services.system_status_service import dashboard_payload, healthz_payload
+from services.register_service import register_service
+from services.system_status_service import dashboard_payload, healthz_payload, livez_payload, readyz_payload
+
+
+class AIReviewSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+    prompt: str | None = None
+
+
+class BackupIncludeRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    config: bool | None = None
+    register_: bool | None = Field(default=None, alias="register")
+    cpa: bool | None = None
+    sub2api: bool | None = None
+    logs: bool | None = None
+    image_tasks: bool | None = None
+    accounts_snapshot: bool | None = None
+    auth_keys_snapshot: bool | None = None
+    images: bool | None = None
+
+
+class BackupSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool | None = None
+    provider: str | None = None
+    account_id: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+    bucket: str | None = None
+    prefix: str | None = None
+    interval_minutes: int | str | None = None
+    rotation_keep: int | str | None = None
+    encrypt: bool | None = None
+    passphrase: str | None = None
+    include: BackupIncludeRequest | None = None
+
+
+class AutoRegisterSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool | None = None
+    min_available: int | str | None = None
+    target_available: int | str | None = None
+    check_interval_seconds: int | str | None = None
+    cooldown_seconds: int | str | None = None
+
+
+class AccountPoolSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    max_total_accounts: int | str | None = None
+
+
+class AuthSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    username_login_enabled: bool | None = None
 
 
 class SettingsUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
+
+    proxy: str | None = None
+    base_url: str | None = None
+    global_system_prompt: str | None = None
+    sensitive_words: list[str] | None = None
+    ai_review: AIReviewSettingsRequest | None = None
+    refresh_account_interval_minute: int | str | None = None
+    image_retention_days: int | str | None = None
+    image_poll_timeout_secs: int | str | None = None
+    image_account_concurrency: int | str | None = None
+    auto_remove_invalid_accounts: bool | None = None
+    auto_remove_rate_limited_accounts: bool | None = None
+    log_levels: list[str] | None = None
+    backup: BackupSettingsRequest | None = None
+    auto_register: AutoRegisterSettingsRequest | None = None
+    account_pool: AccountPoolSettingsRequest | None = None
+    auth: AuthSettingsRequest | None = None
 
 
 class ProxyTestRequest(BaseModel):
@@ -50,6 +132,86 @@ class BackupDeleteRequest(BaseModel):
     key: str = ""
 
 
+AUDITED_SETTING_FIELDS = {
+    "proxy",
+    "base_url",
+    "global_system_prompt",
+    "sensitive_words",
+    "ai_review.enabled",
+    "ai_review.base_url",
+    "ai_review.api_key",
+    "ai_review.model",
+    "ai_review.prompt",
+    "auto_remove_invalid_accounts",
+    "auto_remove_rate_limited_accounts",
+    "backup.enabled",
+    "backup.account_id",
+    "backup.access_key_id",
+    "backup.secret_access_key",
+    "backup.bucket",
+    "backup.prefix",
+    "backup.encrypt",
+    "backup.passphrase",
+    "auto_register.enabled",
+    "auto_register.min_available",
+    "auto_register.target_available",
+    "account_pool.max_total_accounts",
+    "auth.username_login_enabled",
+}
+
+SECRET_SETTING_FIELDS = {
+    "ai_review.api_key",
+    "backup.secret_access_key",
+    "backup.passphrase",
+}
+
+
+def _flatten_settings(value: object, prefix: str = "") -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    flattened: dict[str, object] = {}
+    for key, item in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, dict):
+            flattened.update(_flatten_settings(item, path))
+        else:
+            flattened[path] = item
+    return flattened
+
+
+def _audit_setting_changes(before: dict[str, object], after: dict[str, object], authorization: str | None) -> None:
+    before_flat = _flatten_settings(before)
+    after_flat = _flatten_settings(after)
+    changed: list[dict[str, object]] = []
+    for field in sorted(AUDITED_SETTING_FIELDS):
+        if before_flat.get(field) == after_flat.get(field):
+            continue
+        item: dict[str, object] = {"field": field}
+        if field in SECRET_SETTING_FIELDS:
+            item["secret_changed"] = True
+        else:
+            item["before"] = before_flat.get(field)
+            item["after"] = after_flat.get(field)
+        changed.append(item)
+    if not changed:
+        return
+    token = extract_bearer_token(authorization)
+    auth_audit_service.record_event(
+        source=source_hint(token),
+        interface="management",
+        subject_role="admin",
+        reason="settings_changed",
+        key_hint=key_hint(token),
+        detail={"changes": changed},
+    )
+
+
+def _image_task_service():
+    from services.image_task_service import image_task_service
+
+    return image_task_service
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
@@ -65,7 +227,7 @@ def create_router(app_version: str) -> APIRouter:
                 identity = auth_service.authenticate(login_value)
             if identity is None:
                 identity = auth_service.authenticate_session_token(login_value)
-            if identity is None:
+            if identity is None and bool(config.get_auth_settings().get("username_login_enabled")):
                 identity = auth_service.authenticate_user_name(login_value)
             if identity is None:
                 raise HTTPException(status_code=401, detail={"error": "密钥或用户名称无效，请重新输入"})
@@ -75,7 +237,7 @@ def create_router(app_version: str) -> APIRouter:
         access_token = credential
         if identity.get("role") == "user":
             access_token = auth_service.create_session_token(identity)
-        return {
+        payload = {
             "ok": True,
             "version": app_version,
             "role": identity.get("role"),
@@ -83,10 +245,29 @@ def create_router(app_version: str) -> APIRouter:
             "name": identity.get("name"),
             "access_token": access_token,
         }
+        if identity.get("role") == "user":
+            payload["limits"] = identity.get("limits") or {}
+        return payload
 
     @router.get("/version")
     async def get_version():
         return {"version": app_version}
+
+    @router.get("/livez")
+    async def livez():
+        return livez_payload(app_version)
+
+    @router.get("/readyz")
+    async def readyz():
+        payload = readyz_payload(
+            app_version,
+            config,
+            backup_service=backup_service,
+            image_task_service=_image_task_service(),
+        )
+        if payload["status"] == "unhealthy":
+            return JSONResponse(content=payload, status_code=503)
+        return payload
 
     @router.get("/healthz")
     async def healthz():
@@ -104,22 +285,69 @@ def create_router(app_version: str) -> APIRouter:
             log_service=log_service,
             backup_service=backup_service,
             config=config,
+            image_task_service=_image_task_service(),
+            register_service=register_service,
         )
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"config": config.get()}
+        diagnostics = config.diagnostics() if hasattr(config, "diagnostics") else {"items": []}
+        return {"config": config.get(), "diagnostics": diagnostics}
 
     @router.post("/api/settings")
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"config": config.update(body.model_dump(mode="python"))}
+        before = config.get()
+        updates = body.model_dump(mode="python", exclude_unset=True, by_alias=True)
+        updated = config.update(updates)
+        _audit_setting_changes(before, updated, authorization)
+        diagnostics = config.diagnostics() if hasattr(config, "diagnostics") else {"items": []}
+        return {"config": updated, "diagnostics": diagnostics}
 
     @router.get("/api/images")
-    async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_images(
+        request: Request,
+        start_date: str = "",
+        end_date: str = "",
+        page: int = 1,
+        page_size: int = 0,
+        search: str = "",
+        q: str = "",
+        tag: str = "",
+        tags: str = "",
+        owner: str = "",
+        mode: str = "",
+        model: str = "",
+        sort: str = "",
+        order: str = "",
+        authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip(), identity=identity)
+        search_value = search.strip() or q.strip()
+        tag_values = [
+            item.strip()
+            for item in ",".join(part for part in (tag, tags) if part).split(",")
+            if item.strip()
+        ]
+        sort_value = sort.strip()
+        order_value = order.strip().lower()
+        if sort_value and not sort_value.startswith(("+", "-")) and order_value in {"asc", "desc"}:
+            sort_value = f"+{sort_value}" if order_value == "asc" else f"-{sort_value}"
+        return list_images(
+            resolve_image_base_url(request),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            identity=identity,
+            page=page,
+            page_size=page_size,
+            search=search_value,
+            tag=",".join(dict.fromkeys(tag_values)),
+            owner=owner.strip(),
+            mode=mode.strip(),
+            model=model.strip(),
+            sort=sort_value,
+        )
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str, authorization: str | None = Header(default=None)):

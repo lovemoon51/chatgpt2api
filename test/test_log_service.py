@@ -129,6 +129,27 @@ class LogServiceSecurityTests(unittest.TestCase):
             self.assertEqual(text_items[0]["type"], LOG_TYPE_TEXT)
             self.assertEqual(text_items[0]["detail"]["model"], "text-embedding-3-small")
 
+    def test_corrupt_utf8_log_bytes_do_not_break_listing_or_append(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            valid = json.dumps(
+                {
+                    "id": "valid",
+                    "time": "2026-05-20 10:00:00",
+                    "type": LOG_TYPE_CALL,
+                    "summary": "ok",
+                    "detail": {},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            path.write_bytes(b"\x9b\xbe not utf8\n" + valid + b"\n")
+
+            service = self._service(path)
+
+            self.assertEqual([item["id"] for item in service.list(limit=10)], ["valid"])
+            service.add(LOG_TYPE_CALL, "after-corrupt-log", {})
+            self.assertEqual(service.list()[0]["summary"], "after-corrupt-log")
+
 
 if __name__ == "__main__":
     unittest.main()

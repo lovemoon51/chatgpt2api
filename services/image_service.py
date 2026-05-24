@@ -12,6 +12,13 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
 from services.config import DATA_DIR, config
+from services.image_asset_service import (
+    load_assets,
+    mark_asset_deleted,
+    mark_missing_assets_deleted,
+    safe_relative_path,
+    upsert_asset,
+)
 from services.image_tags_service import load_tags, remove_tags
 
 THUMBNAIL_SIZE = (320, 320)
@@ -28,13 +35,10 @@ def _cleanup_empty_dirs(root: Path) -> None:
 
 
 def _safe_relative_path(path: str) -> str:
-    value = str(path or "").strip().replace("\\", "/").lstrip("/")
-    if not value:
-        raise HTTPException(status_code=404, detail="image not found")
-    parts = Path(value).parts
-    if any(part in {"", ".", ".."} for part in parts):
-        raise HTTPException(status_code=404, detail="image not found")
-    return Path(*parts).as_posix()
+    try:
+        return safe_relative_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="image not found") from exc
 
 
 def _safe_image_path(relative_path: str) -> Path:
@@ -51,18 +55,18 @@ def _safe_image_path(relative_path: str) -> Path:
 
 
 def _is_admin(identity: dict[str, object] | None) -> bool:
-    return str((identity or {}).get("role") or "").strip().lower() == "admin"
+    return str((identity or {}).get("role") or (identity or {}).get("owner_role") or "").strip().lower() == "admin"
 
 
 def _identity_owner_id(identity: dict[str, object] | None) -> str:
-    return str((identity or {}).get("id") or "").strip()
+    return str((identity or {}).get("id") or (identity or {}).get("owner_id") or "").strip()
 
 
 def _owner_payload(identity: dict[str, object] | None) -> dict[str, object]:
     return {
         "owner_id": _identity_owner_id(identity),
-        "owner_name": str((identity or {}).get("name") or "").strip(),
-        "owner_role": str((identity or {}).get("role") or "").strip().lower(),
+        "owner_name": str((identity or {}).get("name") or (identity or {}).get("owner_name") or "").strip(),
+        "owner_role": str((identity or {}).get("role") or (identity or {}).get("owner_role") or "").strip().lower(),
         "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -115,6 +119,10 @@ def record_image_owner(relative_path: str, identity: dict[str, object] | None) -
         owners = _load_image_owners_locked()
         owners[rel] = {"path": rel, **owner}
         _save_image_owners_locked(owners)
+    try:
+        upsert_asset(rel, owner_identity=identity)
+    except Exception:
+        pass
 
 
 def forget_image_owner(relative_path: str) -> None:
@@ -240,40 +248,186 @@ def _image_items(start_date: str = "", end_date: str = "") -> list[dict[str, obj
     return items
 
 
+def _all_image_paths() -> set[str]:
+    root = config.images_dir
+    return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+
+
+def _asset_list_item(asset: dict[str, object], disk_item: dict[str, object], base_url: str) -> dict[str, object]:
+    path = str(disk_item.get("path") or asset.get("path") or "")
+    dimensions = asset.get("dimensions") if isinstance(asset.get("dimensions"), dict) else {}
+    width = dimensions.get("width") if isinstance(dimensions, dict) else None
+    height = dimensions.get("height") if isinstance(dimensions, dict) else None
+    normalized_dimensions = {"width": int(width), "height": int(height)} if width and height else {}
+    created_at = str(asset.get("created_at") or disk_item.get("created_at") or "")
+    return {
+        **disk_item,
+        "size": int(asset.get("bytes") or disk_item.get("size") or 0),
+        "bytes": int(asset.get("bytes") or disk_item.get("size") or 0),
+        "dimensions": normalized_dimensions,
+        "created_at": created_at,
+        "folder": str(asset.get("folder") or "/".join(path.split("/")[:-1])),
+        "prompt": str(asset.get("prompt") or ""),
+        "model": str(asset.get("model") or ""),
+        "mode": str(asset.get("mode") or ""),
+        "source_task_id": str(asset.get("source_task_id") or ""),
+        "revised_prompt": str(asset.get("revised_prompt") or ""),
+        "deleted_at": str(asset.get("deleted_at") or ""),
+        **normalized_dimensions,
+        "url": f"{base_url.rstrip('/')}/images/{path}",
+        "thumbnail_url": thumbnail_url(base_url, path),
+    }
+
+
+def _normalize_sort(sort: str) -> tuple[str, bool]:
+    value = str(sort or "").strip()
+    descending = True
+    if value.startswith("-"):
+        field = value[1:]
+    elif value.startswith("+"):
+        field = value[1:]
+        descending = False
+    else:
+        field = value
+    if field in {"created_at", "date", "name", "size", "bytes", "model", "mode", "owner_id", "folder"}:
+        return field, descending
+    if field == "oldest":
+        return "created_at", False
+    if field == "name_asc":
+        return "name", False
+    if field == "size_desc":
+        return "bytes", True
+    if field == "size_asc":
+        return "bytes", False
+    return "created_at", True
+
+
+def _matches_query(item: dict[str, object], query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join(
+        str(item.get(key) or "")
+        for key in ("path", "name", "prompt", "revised_prompt", "model", "mode", "source_task_id", "folder", "owner_name", "owner_id")
+    )
+    tags = item.get("tags")
+    if isinstance(tags, list):
+        haystack += " " + " ".join(str(tag) for tag in tags)
+    return query.lower() in haystack.lower()
+
+
+def _cleanup_missing_image_records(existing_paths: set[str]) -> None:
+    with _owners_lock:
+        owners = _load_image_owners_locked()
+        removed_owner = False
+        for path in list(owners):
+            if path in existing_paths:
+                continue
+            owners.pop(path, None)
+            removed_owner = True
+        if removed_owner:
+            _save_image_owners_locked(owners)
+    all_tags = load_tags()
+    for path in list(all_tags):
+        if path not in existing_paths:
+            remove_tags(path)
+    mark_missing_assets_deleted(existing_paths)
+
+
 def list_images(
     base_url: str,
     start_date: str = "",
     end_date: str = "",
     identity: dict[str, object] | None = None,
+    page: int = 1,
+    page_size: int = 0,
+    search: str = "",
+    tag: str = "",
+    owner: str = "",
+    mode: str = "",
+    model: str = "",
+    sort: str = "",
 ) -> dict[str, object]:
     config.cleanup_old_images()
     cleanup_image_thumbnails()
+    _cleanup_missing_image_records(_all_image_paths())
     all_tags = load_tags()
     with _owners_lock:
         owners = _load_image_owners_locked()
+    assets = load_assets()
+    disk_items = _image_items(start_date, end_date)
     items = []
-    for item in _image_items(start_date, end_date):
+    for item in disk_items:
         path = str(item["path"])
-        owner = owners.get(path)
+        owner_record = owners.get(path)
+        asset = assets.get(path)
+        if asset is None:
+            try:
+                asset = upsert_asset(
+                    path,
+                    file_path=config.images_dir / path,
+                    owner_identity=owner_record,
+                    tags=all_tags.get(path, []),
+                    created_at=str(item.get("created_at") or ""),
+                )
+            except Exception:
+                asset = {}
+        if asset and not owner_record and asset.get("owner_id"):
+            owner_record = asset
+        merged = _asset_list_item(asset or {}, item, base_url)
+        tags = all_tags.get(path) or (asset.get("tags", []) if isinstance(asset, dict) else [])
+        merged["tags"] = tags if isinstance(tags, list) else []
         if not _is_admin(identity):
             owner_id = _identity_owner_id(identity)
-            if not owner_id or not owner or str(owner.get("owner_id") or "") != owner_id:
+            if not owner_id or not owner_record or str(owner_record.get("owner_id") or "") != owner_id:
                 continue
-        items.append({
-            **item,
-            "url": f"{base_url.rstrip('/')}/images/{path}",
-            "thumbnail_url": thumbnail_url(base_url, path),
-            "tags": all_tags.get(path, []),
-            **({
-                "owner_id": owner.get("owner_id"),
-                "owner_name": owner.get("owner_name"),
-                "owner_role": owner.get("owner_role"),
-            } if owner else {}),
-        })
+        if owner_record:
+            merged.update({
+                "owner_id": owner_record.get("owner_id"),
+                "owner_name": owner_record.get("owner_name"),
+                "owner_role": owner_record.get("owner_role"),
+            })
+        if owner_record and str(owner_record.get("owner_id") or "") and not merged.get("owner_id"):
+            merged["owner_id"] = owner_record.get("owner_id")
+        if search and not _matches_query(merged, search.strip()):
+            continue
+        required_tags = [
+            candidate.strip()
+            for candidate in tag.split(",")
+            if candidate.strip()
+        ]
+        if required_tags and not all(candidate in merged.get("tags", []) for candidate in required_tags):
+            continue
+        if owner.strip():
+            owner_value = owner.strip()
+            if owner_value not in {str(merged.get("owner_id") or ""), str(merged.get("owner_name") or "")}:
+                continue
+        if mode.strip() and str(merged.get("mode") or "") != mode.strip():
+            continue
+        if model.strip() and str(merged.get("model") or "") != model.strip():
+            continue
+        items.append(merged)
+    sort_field, descending = _normalize_sort(sort)
+    items.sort(key=lambda item: item.get("bytes" if sort_field == "size" else sort_field) or "", reverse=descending)
+    total = len(items)
+    normalized_page = max(1, int(page or 1))
+    normalized_page_size = max(0, min(500, int(page_size or 0)))
+    if normalized_page_size:
+        start = (normalized_page - 1) * normalized_page_size
+        end = start + normalized_page_size
+        items = items[start:end]
     groups: dict[str, list[dict[str, object]]] = {}
     for item in items:
         groups.setdefault(str(item["date"]), []).append(item)
-    return {"items": items, "groups": [{"date": key, "items": value} for key, value in groups.items()]}
+    pages = max(1, (total + normalized_page_size - 1) // normalized_page_size) if normalized_page_size else 1
+    return {
+        "items": items,
+        "groups": [{"date": key, "items": value} for key, value in groups.items()],
+        "page": normalized_page,
+        "page_size": normalized_page_size or total,
+        "pages": pages,
+        "total": total,
+        "has_more": normalized_page_size > 0 and normalized_page * normalized_page_size < total,
+    }
 
 
 def delete_images(paths: list[str] | None = None, start_date: str = "", end_date: str = "", all_matching: bool = False) -> dict[str, int]:
@@ -293,6 +447,10 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
                     thumbnail.unlink()
             remove_tags(item)
             forget_image_owner(item)
+            try:
+                mark_asset_deleted(item)
+            except Exception:
+                pass
             removed += 1
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(config.image_thumbnails_dir)

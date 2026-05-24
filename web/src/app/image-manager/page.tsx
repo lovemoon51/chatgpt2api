@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
+import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -14,10 +14,16 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageTags, fetchManagedImages, setImageTags, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
+const sortOptions = [
+  { label: "创建时间", value: "created_at" },
+  { label: "文件大小", value: "size" },
+  { label: "文件名", value: "name" },
+] as const;
 
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
@@ -61,10 +67,18 @@ function ImageManagerContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("created_at");
+  const [order, setOrder] = useState<"desc" | "asc">("desc");
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState("12");
+  const [serverTotal, setServerTotal] = useState<number | null>(null);
+  const [serverPageCount, setServerPageCount] = useState<number | null>(null);
+  const [serverPaged, setServerPaged] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -77,9 +91,27 @@ function ImageManagerContent() {
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
 
-  const filteredItems = selectedTags.length > 0
-    ? items.filter((item) => selectedTags.every((t) => (item.tags ?? []).includes(t)))
-    : items;
+  const filteredItems = useMemo(() => {
+    if (serverPaged) {
+      return items;
+    }
+    const normalizedQuery = query.trim().toLowerCase();
+    const locallyFiltered = items.filter((item) => {
+      const tagMatched = selectedTags.length === 0 || selectedTags.every((t) => (item.tags ?? []).includes(t));
+      const queryMatched = !normalizedQuery || [item.name, item.rel, item.date, item.created_at, ...(item.tags ?? [])]
+        .some((value) => String(value || "").toLowerCase().includes(normalizedQuery));
+      return tagMatched && queryMatched;
+    });
+    return locallyFiltered.sort((a, b) => {
+      const direction = order === "asc" ? 1 : -1;
+      const left = sort === "size" ? a.size : sort === "name" ? a.name : a.created_at;
+      const right = sort === "size" ? b.size : sort === "name" ? b.name : b.created_at;
+      if (typeof left === "number" && typeof right === "number") {
+        return (left - right) * direction;
+      }
+      return String(left).localeCompare(String(right), "zh-CN") * direction;
+    });
+  }, [items, order, query, selectedTags, serverPaged, sort]);
 
   const lightboxImages = filteredItems.map((item) => ({
     id: item.name,
@@ -87,32 +119,48 @@ function ImageManagerContent() {
     sizeLabel: formatSize(item.size),
     dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
   }));
-  const pageSize = 12;
-  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const numericPageSize = Number(pageSize);
+  const totalCount = serverTotal ?? filteredItems.length;
+  const pageCount = serverPageCount ?? Math.max(1, Math.ceil(filteredItems.length / numericPageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = serverPaged ? filteredItems : filteredItems.slice((safePage - 1) * numericPageSize, safePage * numericPageSize);
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const selectedCount = deleteMode === "filtered" ? items.length : selectedPaths.length;
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(imageKey(item)));
   const allSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedSet.has(imageKey(item)));
 
-  const loadImages = async () => {
+  const loadImages = useCallback(async () => {
     setIsLoading(true);
     try {
       const [data, tagsData] = await Promise.all([
-        fetchManagedImages({ start_date: startDate, end_date: endDate }),
+        fetchManagedImages({
+          start_date: startDate,
+          end_date: endDate,
+          q: query.trim(),
+          tags: selectedTags,
+          sort,
+          order,
+          page,
+          page_size: numericPageSize,
+        }),
         fetchImageTags(),
       ]);
+      const hasServerPaging = typeof data.total === "number" || typeof data.page === "number" || typeof data.page_size === "number";
       setItems(data.items);
       setAllTags(tagsData.tags);
+      setServerPaged(hasServerPaging);
+      setServerTotal(typeof data.total === "number" ? data.total : null);
+      setServerPageCount(typeof data.pages === "number" ? data.pages : typeof data.total === "number" ? Math.max(1, Math.ceil(data.total / numericPageSize)) : null);
+      setLoadError("");
       setSelectedPaths((current) => current.filter((path) => data.items.some((item) => imageKey(item) === path)));
-      setPage(1);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载图片失败");
+      const message = error instanceof Error ? error.message : "加载图片失败";
+      setLoadError(message);
+      toast.error(message);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [endDate, numericPageSize, order, page, query, selectedTags, sort, startDate]);
 
   const closeDialog = useCallback(() => {
     setDialogVisible(false);
@@ -211,7 +259,11 @@ function ImageManagerContent() {
   const clearFilters = () => {
     setStartDate("");
     setEndDate("");
+    setQuery("");
     setSelectedTags([]);
+    setSort("created_at");
+    setOrder("desc");
+    setPage(1);
   };
 
   const togglePaths = (paths: string[], checked: boolean) => {
@@ -254,7 +306,7 @@ function ImageManagerContent() {
 
   useEffect(() => {
     void loadImages();
-  }, [startDate, endDate]);
+  }, [loadImages]);
 
   return (
     <section className="space-y-5">
@@ -263,7 +315,38 @@ function ImageManagerContent() {
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Images</div>
           <h1 className="text-2xl font-semibold tracking-tight">图片管理</h1>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="grid gap-2 sm:grid-cols-2 lg:flex lg:flex-wrap">
+          <div className="relative min-w-0 sm:col-span-2 lg:min-w-[220px]">
+            <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+            <Input
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              placeholder="搜索文件名/路径/标签"
+              className="h-10 rounded-xl border-stone-200 bg-white pl-10"
+            />
+          </div>
+          <Select value={sort} onValueChange={(value) => { setSort(value); setPage(1); }}>
+            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white lg:w-[132px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {sortOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={order} onValueChange={(value) => { setOrder(value as "desc" | "asc"); setPage(1); }}>
+            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white lg:w-[112px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="desc">降序</SelectItem>
+              <SelectItem value="asc">升序</SelectItem>
+            </SelectContent>
+          </Select>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
@@ -278,6 +361,24 @@ function ImageManagerContent() {
           </Button>
         </div>
       </div>
+
+      {loadError ? (
+        <Card className="rounded-2xl border-rose-100 bg-rose-50/90 shadow-sm">
+          <CardContent className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 text-rose-700">
+              <AlertTriangle className="mt-0.5 size-5 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">图片列表加载失败</div>
+                <div className="mt-1 break-words text-xs leading-5 text-rose-600">{loadError}</div>
+              </div>
+            </div>
+            <Button variant="outline" className="h-9 shrink-0 rounded-xl border-rose-200 bg-white px-3 text-rose-700 hover:bg-rose-50" onClick={() => void loadImages()} disabled={isLoading}>
+              <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
+              重试
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {allTags.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
@@ -332,8 +433,9 @@ function ImageManagerContent() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
               <ImageIcon className="size-4" />
-              共 {filteredItems.length} 张
-              {selectedTags.length > 0 ? <span className="text-stone-400">（筛选自 {items.length} 张）</span> : null}
+              共 {totalCount} 张
+              {serverPaged ? <span className="text-stone-400">服务端分页</span> : null}
+              {(selectedTags.length > 0 || query.trim()) && !serverPaged ? <span className="text-stone-400">（筛选自 {items.length} 张）</span> : null}
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
                 本页全选
@@ -344,7 +446,7 @@ function ImageManagerContent() {
               </label>
               {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
               <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages()} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
@@ -506,8 +608,25 @@ function ImageManagerContent() {
               </div>
             )})}
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <span>第 {safePage} / {pageCount} 页，共 {filteredItems.length} 张</span>
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+            <span>第 {safePage} / {pageCount} 页，共 {totalCount} 张</span>
+            <Select
+              value={pageSize}
+              onValueChange={(value) => {
+                setPageSize(value);
+                setPage(1);
+              }}
+            >
+              <SelectTrigger className="h-9 w-[104px] rounded-lg border-stone-200 bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="12">12 / 页</SelectItem>
+                <SelectItem value="24">24 / 页</SelectItem>
+                <SelectItem value="48">48 / 页</SelectItem>
+                <SelectItem value="96">96 / 页</SelectItem>
+              </SelectContent>
+            </Select>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
@@ -586,7 +705,7 @@ function ImageManagerContent() {
             <DialogTitle>删除标签</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-stone-600">
-            确定要删除标签 <span className="font-semibold">"{tagDeleteTarget}"</span> 吗？将从所有图片中移除该标签。
+            确定要删除标签 <span className="font-semibold">“{tagDeleteTarget}”</span> 吗？将从所有图片中移除该标签。
           </p>
           <DialogFooter>
             <Button variant="outline" className="rounded-xl" onClick={() => setTagDeleteTarget(null)}>

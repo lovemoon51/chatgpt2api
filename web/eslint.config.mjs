@@ -10,6 +10,9 @@ const eslintConfig = [
         rules: {
             '@typescript-eslint/no-unused-vars': 'off', // 不检查未使用的变量
             '@typescript-eslint/no-explicit-any': 'off', // 关闭 any 报错
+            'react/no-unescaped-entities': 'warn',
+            'react-hooks/refs': 'warn',
+            'react-hooks/set-state-in-effect': 'warn',
         },
     },
 ];

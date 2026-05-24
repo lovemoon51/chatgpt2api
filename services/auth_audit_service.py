@@ -86,6 +86,30 @@ class AuthAuditService:
         with self._lock:
             return [dict(event) for event in self._events]
 
+    def record_event(
+        self,
+        *,
+        source: str,
+        interface: str,
+        subject_role: str,
+        reason: str,
+        key_hint: str = "",
+        detail: dict[str, object] | None = None,
+    ) -> None:
+        normalized_source = str(source or "").strip() or "unknown"
+        event = {
+            "timestamp": _now_iso(),
+            "source": normalized_source,
+            "interface": str(interface or "api"),
+            "subject_role": str(subject_role or "identity"),
+            "reason": str(reason or "event"),
+            "key_hint": str(key_hint or ""),
+        }
+        if detail:
+            event["detail"] = dict(detail)
+        with self._lock:
+            self._append_event_locked(event)
+
     def clear_failures(self, source: str) -> None:
         normalized_source = str(source or "").strip()
         if not normalized_source:

@@ -4,20 +4,72 @@ import { LoaderCircle, PlugZap, Save, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { testProxy, type ProxyTestResult, type SettingsDiagnosticItem } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
+
+const diagnosticPriority = [
+  "auth-key",
+  "base_url",
+  "proxy",
+  "storage.backend",
+  "storage.database_url",
+  "auto_register",
+  "account_pool",
+  "log_levels",
+  "backup.enabled",
+  "backup.secret_access_key",
+  "backup.passphrase",
+  "ai_review.enabled",
+  "ai_review.api_key",
+];
+
+const sourceLabels: Record<string, string> = {
+  env: "环境变量",
+  "config.json": "config.json",
+  default: "默认值",
+  missing: "缺失",
+};
+
+function sourceLabel(source: string) {
+  return sourceLabels[source] || source;
+}
+
+function sourceVariant(source: string): "success" | "info" | "danger" | "outline" {
+  if (source === "env") return "success";
+  if (source === "config.json") return "info";
+  if (source === "missing") return "danger";
+  return "outline";
+}
+
+function diagnosticValue(item: SettingsDiagnosticItem) {
+  if (item.sensitive) {
+    return item.status;
+  }
+  return item.value || item.status;
+}
+
+function sortDiagnostics(items: SettingsDiagnosticItem[]) {
+  const order = new Map(diagnosticPriority.map((key, index) => [key, index]));
+  return [...items].sort((left, right) => {
+    const leftIndex = order.get(left.key) ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = order.get(right.key) ?? Number.MAX_SAFE_INTEGER;
+    return leftIndex - rightIndex || left.label.localeCompare(right.label, "zh-CN");
+  });
+}
 
 export function ConfigCard() {
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
   const logLevelOptions = ["debug", "info", "warning", "error"];
   const config = useSettingsStore((state) => state.config);
+  const configDiagnostics = useSettingsStore((state) => state.configDiagnostics);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const isSavingAutoRegister = useSettingsStore((state) => state.isSavingAutoRegister);
@@ -34,8 +86,10 @@ export function ConfigCard() {
   const setSensitiveWordsText = useSettingsStore((state) => state.setSensitiveWordsText);
   const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
   const setAutoRegisterField = useSettingsStore((state) => state.setAutoRegisterField);
+  const setAccountPoolField = useSettingsStore((state) => state.setAccountPoolField);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
   const saveAutoRegister = useSettingsStore((state) => state.saveAutoRegister);
+  const diagnosticItems = sortDiagnostics(configDiagnostics?.items ?? []);
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -76,6 +130,46 @@ export function ConfigCard() {
         <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-600">
           管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
         </div>
+        {diagnosticItems.length > 0 ? (
+          <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-4 py-3">
+              <div>
+                <div className="text-sm font-medium text-stone-800">配置来源诊断</div>
+                <div className="mt-1 text-xs text-stone-500">敏感项仅显示设置状态，不显示明文。</div>
+              </div>
+              <Badge variant="outline" className="rounded-md border-stone-200 text-stone-500">
+                {configDiagnostics?.config_file ? "config.json" : "运行配置"}
+              </Badge>
+            </div>
+            <div className="overflow-x-auto">
+              <div className="min-w-[760px] divide-y divide-stone-100 text-sm">
+                <div className="grid grid-cols-[1.25fr_0.9fr_1fr_1.25fr] gap-3 bg-stone-50 px-4 py-2 text-xs font-medium text-stone-500">
+                  <span>配置项</span>
+                  <span>来源</span>
+                  <span>状态</span>
+                  <span>环境变量</span>
+                </div>
+                {diagnosticItems.map((item) => (
+                  <div key={item.key} className="grid grid-cols-[1.25fr_0.9fr_1fr_1.25fr] gap-3 px-4 py-2.5 text-stone-600">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-stone-700">{item.label}</div>
+                      <div className="truncate text-xs text-stone-400">{item.key}</div>
+                    </div>
+                    <div>
+                      <Badge variant={sourceVariant(item.source)} className="rounded-md">
+                        {sourceLabel(item.source)}
+                      </Badge>
+                    </div>
+                    <div className={item.configured ? "font-medium text-emerald-700" : "font-medium text-stone-400"}>
+                      {diagnosticValue(item)}
+                    </div>
+                    <div className="truncate font-mono text-xs text-stone-400">{item.env || "-"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
             <label className="text-sm text-stone-700">账号刷新间隔</label>
@@ -188,7 +282,7 @@ export function ConfigCard() {
                 <div>
                   <label className="text-sm font-medium text-stone-800">图片健康号池巡检</label>
                   <p className="mt-1 text-xs leading-6 text-stone-500">
-                    后台定时检查可生图账号数量，低于阈值时自动启动注册补池，减少用户请求时等待补号。
+                    后台定时检查可生图账号数量，低于阈值时自动启动注册补池，并受账号总上限约束。
                   </p>
                 </div>
               </div>
@@ -211,7 +305,7 @@ export function ConfigCard() {
                 </Button>
               </div>
             </div>
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-5">
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">最低健康账号</label>
                 <Input
@@ -230,7 +324,17 @@ export function ConfigCard() {
                   placeholder="50"
                   className="h-10 rounded-xl border-stone-200 bg-white"
                 />
-                <p className="text-xs text-stone-500">补池任务会补到该数量。</p>
+                <p className="text-xs text-stone-500">补池时尽量补到该健康数量。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">账号总上限</label>
+                <Input
+                  value={String(config?.account_pool?.max_total_accounts || "")}
+                  onChange={(event) => setAccountPoolField("max_total_accounts", event.target.value)}
+                  placeholder="50"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">达到该总数后不再自动注册。</p>
               </div>
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">检查间隔</label>

@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { toast } from "sonner";
 
 import {
+  type AccountPoolSettings,
   createCPAPool,
   deleteBackup,
   deleteCPAPool,
@@ -29,6 +30,7 @@ import {
   type CPARemoteFile,
   type RegisterConfig,
   type SettingsConfig,
+  type SettingsDiagnostics,
 } from "@/lib/api";
 
 import { buildAutoRegisterSettingsPatch, normalizeAutoRegisterSettings } from "./auto-register-settings";
@@ -109,6 +111,15 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       },
     },
     auto_register: normalizeAutoRegisterSettings(config.auto_register),
+    account_pool: {
+      max_total_accounts: Math.max(
+        1,
+        Number(config.account_pool?.max_total_accounts ?? config.auto_register?.target_available) || 50,
+      ),
+    },
+    auth: {
+      username_login_enabled: Boolean(config.auth?.username_login_enabled),
+    },
   };
 }
 
@@ -160,6 +171,7 @@ function normalizeRegisterConfig(config: RegisterConfig, previous?: RegisterConf
 
 type SettingsStore = {
   config: SettingsConfig | null;
+  configDiagnostics: SettingsDiagnostics | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
   isSavingAutoRegister: boolean;
@@ -217,6 +229,7 @@ type SettingsStore = {
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
   setAutoRegisterField: (key: keyof AutoRegisterSettings, value: string | boolean) => void;
+  setAccountPoolField: (key: keyof AccountPoolSettings, value: string) => void;
   setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
   setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
 
@@ -261,6 +274,7 @@ type SettingsStore = {
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
+  configDiagnostics: null,
   isLoadingConfig: true,
   isSavingConfig: false,
   isSavingAutoRegister: false,
@@ -320,6 +334,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const normalized = normalizeConfig(data.config);
       set({
         config: normalized,
+        configDiagnostics: data.diagnostics ?? null,
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载系统配置失败");
@@ -362,6 +377,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           check_interval_seconds: Math.max(5, Number(config.auto_register?.check_interval_seconds) || 30),
           cooldown_seconds: Math.max(30, Number(config.auto_register?.cooldown_seconds) || 300),
         },
+        account_pool: {
+          max_total_accounts: Math.max(1, Number(config.account_pool?.max_total_accounts) || 50),
+        },
+        auth: {
+          username_login_enabled: Boolean(config.auth?.username_login_enabled),
+        },
         backup: {
           ...(config.backup as BackupSettings),
           account_id: String(config.backup?.account_id || "").trim(),
@@ -376,6 +397,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       });
       set({
         config: normalizeConfig(data.config),
+        configDiagnostics: data.diagnostics ?? null,
       });
       toast.success("配置已保存");
       return true;
@@ -395,14 +417,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
     set({ isSavingAutoRegister: true });
     try {
-      const data = await updateSettingsConfig(buildAutoRegisterSettingsPatch(config.auto_register));
+      const data = await updateSettingsConfig({
+        ...buildAutoRegisterSettingsPatch(config.auto_register),
+        account_pool: {
+          max_total_accounts: Math.max(1, Number(config.account_pool?.max_total_accounts) || 50),
+        },
+      });
       const savedAutoRegister = normalizeAutoRegisterSettings(data.config.auto_register);
+      const savedAccountPool = normalizeConfig(data.config).account_pool;
       set((state) => state.config ? {
         config: {
           ...state.config,
           auto_register: savedAutoRegister,
+          account_pool: savedAccountPool,
         },
-      } : { config: normalizeConfig(data.config) });
+        configDiagnostics: data.diagnostics ?? state.configDiagnostics,
+      } : { config: normalizeConfig(data.config), configDiagnostics: data.diagnostics ?? null });
       toast.success("巡检配置已保存");
       return true;
     } catch (error) {
@@ -513,6 +543,26 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         config: {
           ...state.config,
           auto_register: {
+            ...current,
+            [key]: value,
+          },
+        },
+      };
+    });
+  },
+
+  setAccountPoolField: (key, value) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      const current = state.config.account_pool || {
+        max_total_accounts: state.config.auto_register?.target_available || 50,
+      };
+      return {
+        config: {
+          ...state.config,
+          account_pool: {
             ...current,
             [key]: value,
           },

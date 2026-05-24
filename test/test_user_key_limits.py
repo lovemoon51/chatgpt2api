@@ -75,6 +75,20 @@ class UserKeyLimitServiceTests(unittest.TestCase):
         with self.service.reserve(identity, model="gpt-4o", kind="text"):
             pass
 
+    def test_manual_acquire_holds_until_release(self) -> None:
+        identity = {"id": "user-1", "role": "user", "limits": {"concurrency": 1}}
+
+        release = self.service.acquire(identity, model="gpt-4o", kind="text")
+        try:
+            with self.assertRaisesRegex(UsageLimitError, "concurrency limit exceeded"):
+                self.service.acquire(identity, model="gpt-4o", kind="text")
+        finally:
+            release()
+
+        next_release = self.service.acquire(identity, model="gpt-4o", kind="text")
+        next_release()
+        next_release()
+
 
 class UserKeyAuthServiceLimitTests(unittest.TestCase):
     def test_user_key_create_update_and_authenticate_include_limits(self) -> None:
@@ -143,7 +157,10 @@ class UserNameLoginApiTests(unittest.TestCase):
             app = FastAPI()
             app.include_router(system_module.create_router("test-version"))
 
-            with mock.patch.object(system_module, "auth_service", service):
+            with (
+                mock.patch.object(system_module, "auth_service", service),
+                mock.patch.object(system_module.config, "get_auth_settings", return_value={"username_login_enabled": True}),
+            ):
                 client = TestClient(app)
                 response = client.post("/auth/login", json={"login": "Studio Guest"})
 
@@ -153,6 +170,22 @@ class UserNameLoginApiTests(unittest.TestCase):
             self.assertEqual(payload["subject_id"], user["id"])
             self.assertEqual(payload["name"], "Studio Guest")
             self.assertTrue(payload["access_token"].startswith("sess-"))
+
+    def test_login_by_user_key_name_is_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            service.create_key(role="user", name="Studio Guest")
+            app = FastAPI()
+            app.include_router(system_module.create_router("test-version"))
+
+            with (
+                mock.patch.object(system_module, "auth_service", service),
+                mock.patch.object(system_module.config, "get_auth_settings", return_value={"username_login_enabled": False}),
+            ):
+                client = TestClient(app)
+                response = client.post("/auth/login", json={"login": "Studio Guest"})
+
+            self.assertEqual(response.status_code, 401, response.text)
 
     def test_session_token_from_name_login_can_authorize_followup_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

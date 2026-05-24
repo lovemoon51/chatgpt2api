@@ -82,6 +82,71 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(settings["check_interval_seconds"], 5)
         self.assertEqual(settings["cooldown_seconds"], 30)
 
+    def test_account_pool_max_total_accounts_defaults_from_legacy_auto_register_target(self) -> None:
+        settings = self.config_module._normalize_account_pool_settings(
+            {},
+            {"target_available": "120"},
+        )
+
+        self.assertEqual(settings["max_total_accounts"], 120)
+
+    def test_auth_settings_disable_username_login_by_default(self) -> None:
+        settings = self.config_module._normalize_auth_settings({})
+
+        self.assertFalse(settings["username_login_enabled"])
+
+    def test_config_diagnostics_masks_secret_values_and_reports_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth-key": "config-secret",
+                        "base_url": "https://from-config.example",
+                        "backup": {
+                            "secret_access_key": "r2-secret",
+                            "passphrase": "backup-passphrase",
+                        },
+                        "ai_review": {"api_key": "sk-secret"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            module = self.config_module
+            old_env_auth_key = module.os.environ.get("CHATGPT2API_AUTH_KEY")
+            old_env_base_url = module.os.environ.get("CHATGPT2API_BASE_URL")
+            old_storage_backend = module.os.environ.get("STORAGE_BACKEND")
+            try:
+                module.os.environ["CHATGPT2API_AUTH_KEY"] = "env-secret"
+                module.os.environ["CHATGPT2API_BASE_URL"] = "https://from-env.example/"
+                module.os.environ["STORAGE_BACKEND"] = "sqlite"
+                store = module.ConfigStore(config_path)
+
+                diagnostics = store.diagnostics()
+            finally:
+                for key, value in {
+                    "CHATGPT2API_AUTH_KEY": old_env_auth_key,
+                    "CHATGPT2API_BASE_URL": old_env_base_url,
+                    "STORAGE_BACKEND": old_storage_backend,
+                }.items():
+                    if value is None:
+                        module.os.environ.pop(key, None)
+                    else:
+                        module.os.environ[key] = value
+
+            items = {item["key"]: item for item in diagnostics["items"]}
+            self.assertEqual(items["auth-key"]["source"], "env")
+            self.assertEqual(items["auth-key"]["status"], "已设置")
+            self.assertNotIn("value", items["auth-key"])
+            self.assertEqual(items["base_url"]["source"], "env")
+            self.assertEqual(items["base_url"]["value"], "https://from-env.example")
+            self.assertEqual(items["storage.backend"]["source"], "env")
+            self.assertEqual(items["storage.backend"]["value"], "sqlite")
+            self.assertNotIn("r2-secret", json.dumps(diagnostics, ensure_ascii=False))
+            self.assertNotIn("backup-passphrase", json.dumps(diagnostics, ensure_ascii=False))
+            self.assertNotIn("sk-secret", json.dumps(diagnostics, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -159,7 +159,10 @@ export function ImageLightbox({
   }, [hasNext, currentIndex, onIndexChange]);
 
   useEffect(() => {
-    resetTransform();
+    const frame = requestAnimationFrame(() => {
+      resetTransform();
+    });
+    return () => cancelAnimationFrame(frame);
   }, [current?.id, open, resetTransform]);
 
   useEffect(() => {

@@ -4,11 +4,19 @@ import localforage from "localforage";
 
 export type AuthRole = "admin" | "user";
 
+export type StoredAuthLimits = {
+  requestsPerDay?: number | null;
+  imagesPerDay?: number | null;
+  concurrency?: number | null;
+  models?: string[];
+};
+
 export type StoredAuthSession = {
   key: string;
   role: AuthRole;
   subjectId: string;
   name: string;
+  limits?: StoredAuthLimits | null;
 };
 
 export const AUTH_KEY_STORAGE_KEY = "chatgpt2api_auth_key";
@@ -36,7 +44,44 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
     role,
     subjectId: String(candidate.subjectId || "").trim(),
     name: String(candidate.name || "").trim(),
+    limits: normalizeLimits(candidate.limits),
   };
+}
+
+function normalizeLimitNumber(value: unknown) {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizeLimits(value: unknown): StoredAuthLimits | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<StoredAuthLimits>;
+  const limits: StoredAuthLimits = {};
+  const requestsPerDay = normalizeLimitNumber(candidate.requestsPerDay);
+  const imagesPerDay = normalizeLimitNumber(candidate.imagesPerDay);
+  const concurrency = normalizeLimitNumber(candidate.concurrency);
+  if (requestsPerDay !== undefined) {
+    limits.requestsPerDay = requestsPerDay;
+  }
+  if (imagesPerDay !== undefined) {
+    limits.imagesPerDay = imagesPerDay;
+  }
+  if (concurrency !== undefined) {
+    limits.concurrency = concurrency;
+  }
+  if (Array.isArray(candidate.models)) {
+    limits.models = candidate.models.map((model) => String(model).trim()).filter(Boolean);
+  }
+
+  return Object.keys(limits).length > 0 ? limits : null;
 }
 
 export function getDefaultRouteForRole(role: AuthRole) {

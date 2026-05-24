@@ -115,6 +115,7 @@ export function ImageComposer({
                   className="group size-14 overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 transition hover:border-stone-300 sm:size-16"
                   aria-label={`预览参考图 ${image.name || index + 1}`}
                 >
+                  {/* eslint-disable-next-line @next/next/no-img-element -- Local data URL previews are not served through Next image optimization. */}
                   <img
                     src={image.dataUrl}
                     alt={image.name || `参考图 ${index + 1}`}

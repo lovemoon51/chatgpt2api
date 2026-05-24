@@ -155,11 +155,16 @@ class LogService:
         except Exception:
             return DEFAULT_LOG_RETENTION_MAX_ENTRIES
 
+    def _read_lines(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        return self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+
     def _prune_retention(self) -> None:
         limit = self._retention_limit()
         if not self.path.exists():
             return
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        lines = self._read_lines()
         if len(lines) <= limit:
             return
         content = "\n".join(lines[-limit:])
@@ -212,7 +217,7 @@ class LogService:
         if not self.path.exists():
             return []
         items: list[dict[str, Any]] = []
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        lines = self._read_lines()
         for line_number in range(len(lines) - 1, -1, -1):
             item = self._parse_line(lines[line_number], line_number)
             if item is None:
@@ -229,7 +234,7 @@ class LogService:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
         if not self.path.exists() or not target_ids:
             return {"removed": 0}
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        lines = self._read_lines()
         kept_lines: list[str] = []
         removed = 0
         for line_number, raw_line in enumerate(lines):

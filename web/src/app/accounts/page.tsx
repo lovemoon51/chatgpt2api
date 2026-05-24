@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
+  AlertTriangle,
   Ban,
   CheckCircle2,
   ChevronLeft,
@@ -190,6 +191,44 @@ function accountTags(account: Account) {
   return tags;
 }
 
+type RefreshProbeState = {
+  status: "pending" | "success" | "failed" | "invalid";
+  completed: number;
+  requested: number;
+  message?: string;
+  updatedAt: number;
+};
+
+function isImageReadyAccount(account: Account) {
+  if (account.status !== "正常") return false;
+  if (account.image_blocked_reason) return false;
+  if (isUnlimitedImageQuotaAccount(account) || imageQuotaUnknown(account)) return true;
+  return Number(account.quota || 0) > 0;
+}
+
+function hasLowImageQuota(account: Account) {
+  if (!isImageReadyAccount(account) || isUnlimitedImageQuotaAccount(account) || imageQuotaUnknown(account)) {
+    return false;
+  }
+  return Number(account.quota || 0) <= 3;
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const pad = (num: number) => String(num).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function probeBadgeMeta(state?: RefreshProbeState) {
+  if (!state) return null;
+  if (state.status === "success") return { label: "探针成功", variant: "success" as const };
+  if (state.status === "invalid") return { label: "Token 失效", variant: "danger" as const };
+  if (state.status === "failed") return { label: "探针失败", variant: "warning" as const };
+  return { label: "等待探针", variant: "secondary" as const };
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -203,10 +242,13 @@ function AccountsPageContent() {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isExportingCpa, setIsExportingCpa] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState<Record<string, RefreshProbeState>>({});
+  const [refreshRun, setRefreshRun] = useState<{ label: string; requested: number; completed: number; active: boolean } | null>(null);
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
@@ -215,9 +257,11 @@ function AccountsPageContent() {
     try {
       const data = await fetchAccounts();
       setAccounts(data.items);
+      setLoadError("");
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
+      setLoadError(message);
       toast.error(message);
     } finally {
       if (!silent) {
@@ -261,8 +305,18 @@ function AccountsPageContent() {
     const disabled = accounts.filter((item) => item.status === "禁用").length;
     const quota = formatQuotaSummary(accounts);
     const plusPromo = accounts.filter((item) => item.can_activate_plus).length;
+    const imageReady = accounts.filter(isImageReadyAccount).length;
+    const imageBlocked = accounts.filter((item) => item.status === "正常" && Boolean(item.image_blocked_reason)).length;
+    const quotaUnknown = accounts.filter(imageQuotaUnknown).length;
+    const lowQuota = accounts.filter(hasLowImageQuota).length;
+    const unlimited = accounts.filter(isUnlimitedImageQuotaAccount).length;
+    const stale = accounts.filter((item) => !item.last_used_at).length;
+    const successCount = accounts.reduce((sum, item) => sum + Number(item.success || 0), 0);
+    const failCount = accounts.reduce((sum, item) => sum + Number(item.fail || 0), 0);
+    const totalCalls = successCount + failCount;
+    const successRate = totalCalls > 0 ? Math.round((successCount / totalCalls) * 100) : null;
 
-    return { total, active, limited, abnormal, disabled, quota, plusPromo };
+    return { total, active, limited, abnormal, disabled, quota, plusPromo, imageReady, imageBlocked, quotaUnknown, lowQuota, unlimited, stale, successRate };
   }, [accounts]);
 
   const accountTypeOptions = useMemo(
@@ -320,13 +374,23 @@ function AccountsPageContent() {
     accessTokens: string[],
     options: { scope?: "all" | "selected"; toastLabel: string } = { toastLabel: "刷新账号" },
   ) => {
-    if (accessTokens.length === 0) {
+    const targetTokens = accessTokens.filter(Boolean);
+    if (targetTokens.length === 0) {
       toast.error("没有需要刷新的账户");
       return;
     }
 
     const toastId = toast.loading(`${options.toastLabel}：连接中…`, refreshToastOptions);
     setIsRefreshing(true);
+    setRefreshRun({ label: options.toastLabel, requested: targetTokens.length, completed: 0, active: true });
+    setRefreshProgress((current) => {
+      const next = { ...current };
+      const now = Date.now();
+      targetTokens.forEach((token) => {
+        next[token] = { status: "pending", completed: 0, requested: targetTokens.length, updatedAt: now };
+      });
+      return next;
+    });
     try {
       let removedFailedRunning = 0;
       let removedRateRunning = 0;
@@ -334,6 +398,7 @@ function AccountsPageContent() {
       let lastCompleted = 0;
       const updateProgressToast = (completed: number, requested: number) => {
         lastCompleted = completed;
+        setRefreshRun({ label: options.toastLabel, requested, completed, active: true });
         const parts = [`${options.toastLabel}（${completed} / ${requested}）`];
         if (removedFailedRunning > 0) {
           parts.push(`已移除失效账号 ${removedFailedRunning} 个`);
@@ -344,11 +409,10 @@ function AccountsPageContent() {
         toast.loading(parts.join("，"), { ...refreshToastOptions, id: toastId });
       };
 
-      const final = await refreshAccountsStream(accessTokens, {
+      const final = await refreshAccountsStream(targetTokens, {
         ...(options.scope ? { scope: options.scope } : {}),
         onEvent: (event) => {
           if (typeof window !== "undefined") {
-            // eslint-disable-next-line no-console
             console.debug("[refresh-stream]", event);
           }
           receivedAny = true;
@@ -361,6 +425,16 @@ function AccountsPageContent() {
             if (event.outcome === "invalid") {
               removedFailedRunning += 1;
             }
+            setRefreshProgress((current) => ({
+              ...current,
+              [event.token]: {
+                status: event.outcome === "succeeded" ? "success" : event.outcome,
+                completed: event.completed,
+                requested: event.requested,
+                message: event.error,
+                updatedAt: Date.now(),
+              },
+            }));
             updateProgressToast(event.completed, event.requested);
           } else if (event.type === "batch") {
             setAccounts(event.items);
@@ -406,9 +480,11 @@ function AccountsPageContent() {
           id: toastId,
         });
       }
+      setRefreshRun((current) => current ? { ...current, completed: final?.completed ?? current.completed, requested: final?.requested ?? current.requested, active: false } : current);
     } catch (error) {
       const message = error instanceof Error ? error.message : `${options.toastLabel}失败`;
       toast.error(message, { ...refreshToastOptions, id: toastId });
+      setRefreshRun((current) => current ? { ...current, active: false } : current);
     } finally {
       setIsRefreshing(false);
     }
@@ -486,7 +562,7 @@ function AccountsPageContent() {
           <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
           <Button
             variant="outline"
             size="icon"
@@ -537,6 +613,24 @@ function AccountsPageContent() {
           </Button>
         </div>
       </section>
+
+      {loadError ? (
+        <Card className="rounded-2xl border-rose-100 bg-rose-50/90 shadow-sm">
+          <CardContent className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 text-rose-700">
+              <AlertTriangle className="mt-0.5 size-5 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">账号列表加载失败</div>
+                <div className="mt-1 break-words text-xs leading-5 text-rose-600">{loadError}</div>
+              </div>
+            </div>
+            <Button variant="outline" className="h-9 shrink-0 rounded-xl border-rose-200 bg-white px-3 text-rose-700 hover:bg-rose-50" onClick={() => void loadAccounts()} disabled={isLoading || isRefreshing || isDeleting}>
+              <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
+              重试
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
@@ -608,6 +702,45 @@ function AccountsPageContent() {
             );
           })}
         </div>
+        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <CardContent className="space-y-4 p-5">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-base font-semibold tracking-tight">健康摘要</h2>
+                <p className="mt-1 text-xs text-stone-500">图片可用性、额度风险和最近探针进度</p>
+              </div>
+              {refreshRun ? (
+                <div className="w-full max-w-sm rounded-xl border border-sky-100 bg-sky-50/80 px-4 py-3">
+                  <div className="flex items-center justify-between gap-3 text-xs font-medium text-sky-700">
+                    <span>{refreshRun.label}</span>
+                    <span>{refreshRun.completed} / {refreshRun.requested}</span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-white">
+                    <div
+                      className={cn("h-full rounded-full bg-sky-500 transition-all", refreshRun.active ? "animate-pulse" : "")}
+                      style={{ width: `${Math.min(100, Math.round((refreshRun.completed / Math.max(1, refreshRun.requested)) * 100))}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
+              {[
+                { label: "可用图片账号", value: summary.imageReady, tone: summary.imageReady === 0 ? "text-rose-600" : "text-emerald-700" },
+                { label: "低额度账号", value: summary.lowQuota, tone: summary.lowQuota > 0 ? "text-amber-600" : "text-stone-700" },
+                { label: "额度未知", value: summary.quotaUnknown, tone: summary.quotaUnknown > 0 ? "text-amber-600" : "text-stone-700" },
+                { label: "图片阻断", value: summary.imageBlocked, tone: summary.imageBlocked > 0 ? "text-rose-600" : "text-stone-700" },
+                { label: "不限额度", value: summary.unlimited, tone: "text-blue-600" },
+                { label: "累计成功率", value: summary.successRate === null ? "—" : `${summary.successRate}%`, tone: "text-stone-700" },
+              ].map((item) => (
+                <div key={item.label} className="rounded-xl bg-stone-50 px-4 py-3">
+                  <div className="text-xs text-stone-400">{item.label}</div>
+                  <div className={cn("mt-1 text-lg font-semibold", item.tone)}>{item.value}</div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       </section>
 
       <section className="space-y-4">
@@ -763,7 +896,7 @@ function AccountsPageContent() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
+              <table className="w-full min-w-[1120px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
                     <th className="w-12 px-4 py-3">
@@ -777,6 +910,7 @@ function AccountsPageContent() {
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-56 px-4 py-3">账号信息</th>
                     <th className="w-24 px-4 py-3">额度</th>
+                    <th className="w-44 px-4 py-3">探针</th>
                     <th className="w-40 px-4 py-3">恢复时间</th>
                     <th className="w-18 px-4 py-3">成功</th>
                     <th className="w-18 px-4 py-3">失败</th>
@@ -788,6 +922,8 @@ function AccountsPageContent() {
                     const status = statusMeta[account.status];
                     const StatusIcon = status.icon;
                     const tags = accountTags(account);
+                    const probe = refreshProgress[account.access_token];
+                    const probeMeta = probeBadgeMeta(probe);
 
                     return (
                       <tr
@@ -861,6 +997,28 @@ function AccountsPageContent() {
                           <Badge variant="info" className="rounded-md">
                             {formatQuota(account)}
                           </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {probeMeta ? (
+                                <Badge variant={probeMeta.variant} className="rounded-md">
+                                  {probe?.status === "pending" ? <LoaderCircle className="size-3 animate-spin" /> : null}
+                                  {probeMeta.label}
+                                </Badge>
+                              ) : (
+                                <Badge variant={isImageReadyAccount(account) ? "success" : "secondary"} className="rounded-md">
+                                  {isImageReadyAccount(account) ? "图片可用" : "待探针"}
+                                </Badge>
+                              )}
+                              {account.image_blocked_reason ? (
+                                <Badge variant="danger" className="rounded-md">图片阻断</Badge>
+                              ) : null}
+                            </div>
+                            <div className="text-[11px] leading-4 text-stone-400">
+                              {probe?.message || (account.default_model_slug ? `默认 ${account.default_model_slug}` : `最近 ${formatDateTime(account.last_used_at)}`)}
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                           {(() => {

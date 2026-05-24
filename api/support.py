@@ -14,6 +14,7 @@ from services.auth_audit_service import auth_audit_service, key_hint, source_hin
 from services.auth_service import auth_service
 from services.config import config
 from services.log_service import LOG_TYPE_ACCOUNT, log_service
+from services.system_status_service import worker_error, worker_heartbeat, worker_started, worker_stopped
 from services.usage_limit_service import UsageLimitError, usage_limit_service
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -267,22 +268,33 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
+    worker_name = "limited-account-watcher"
 
     def worker() -> None:
-        while not stop_event.is_set():
-            try:
-                limited_tokens = account_service.list_limited_tokens(
-                    due_only=True,
-                    limit=account_service.limited_refresh_batch_size(),
-                )
-                if limited_tokens:
-                    print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
-                    account_service.refresh_accounts(limited_tokens)
-            except Exception as exc:
-                print(f"[account-limited-watcher] fail {exc}")
-            stop_event.wait(interval_seconds)
+        worker_started(worker_name)
+        try:
+            while not stop_event.is_set():
+                worker_heartbeat(worker_name)
+                try:
+                    limited_tokens = account_service.list_limited_tokens(
+                        due_only=True,
+                        limit=account_service.limited_refresh_batch_size(),
+                    )
+                    if limited_tokens:
+                        print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
+                        account_service.refresh_accounts(limited_tokens)
+                except Exception as exc:
+                    worker_error(worker_name, exc)
+                    print(f"[account-limited-watcher] fail {exc}")
+                stop_event.wait(interval_seconds)
+        except Exception as exc:
+            worker_stopped(worker_name, exc)
+            raise
+        finally:
+            if stop_event.is_set():
+                worker_stopped(worker_name)
 
-    thread = Thread(target=worker, name="limited-account-watcher", daemon=True)
+    thread = Thread(target=worker, name=worker_name, daemon=True)
     thread.start()
     return thread
 
@@ -308,6 +320,22 @@ def refresh_all_accounts_for_watcher(account_pool=None) -> dict[str, object]:
     return account_pool.refresh_accounts(tokens, REFRESH_ALL_ACCOUNTS_LOG_TITLE)
 
 
+def _account_pool_total_count(account_pool) -> int:
+    list_tokens = getattr(account_pool, "list_tokens", None)
+    if callable(list_tokens):
+        try:
+            return len(list_tokens())
+        except Exception:
+            pass
+    list_accounts = getattr(account_pool, "list_accounts", None)
+    if callable(list_accounts):
+        try:
+            return len(list_accounts())
+        except Exception:
+            pass
+    return 0
+
+
 def run_auto_register_check(
     last_triggered_at: float = 0.0,
     *,
@@ -324,25 +352,51 @@ def run_auto_register_check(
     if registrar is None:
         from services.register_service import register_service as registrar
 
-    refresh_result = refresh_all_accounts_for_watcher(account_pool)
-    available = int(account_pool.available_account_count())
     min_available = int(settings.get("min_available") or 50)
-    target_available = max(min_available, int(settings.get("target_available") or min_available))
+    target_available = int(settings.get("target_available") or min_available)
+    try:
+        pool_settings = config.get_account_pool_settings()
+    except AttributeError:
+        pool_settings = {}
+    max_total_accounts = int(pool_settings.get("max_total_accounts") or target_available)
+    min_available = min(min_available, target_available, max_total_accounts)
     register_state = registrar.get()
     current_time = time.time() if now is None else now
+    available = int(account_pool.available_account_count())
+    total_accounts = _account_pool_total_count(account_pool)
     detail = {
         "available": available,
+        "total_accounts": total_accounts,
         "min_available": min_available,
         "target_available": target_available,
+        "max_total_accounts": max_total_accounts,
         "check_interval_seconds": int(settings.get("check_interval_seconds") or 30),
         "cooldown_seconds": int(settings.get("cooldown_seconds") or 300),
+        "refresh": {"refreshed": 0, "errors": 0},
+        "triggered": False,
+        "reason": "",
+    }
+    if total_accounts >= max_total_accounts:
+        detail["reason"] = "account_limit_reached"
+        _add_account_log("图片健康号池巡检", detail)
+        return last_triggered_at, False
+
+    refresh_result = refresh_all_accounts_for_watcher(account_pool)
+    available = int(account_pool.available_account_count())
+    total_accounts = _account_pool_total_count(account_pool)
+    detail.update({
+        "available": available,
+        "total_accounts": total_accounts,
         "refresh": {
             "refreshed": int(refresh_result.get("refreshed") or 0) if isinstance(refresh_result, dict) else 0,
             "errors": len(refresh_result.get("errors") or []) if isinstance(refresh_result, dict) else 0,
         },
-        "triggered": False,
-        "reason": "",
-    }
+    })
+    if total_accounts >= max_total_accounts:
+        detail["reason"] = "account_limit_reached"
+        _add_account_log("图片健康号池巡检", detail)
+        return last_triggered_at, False
+
     if available >= min_available:
         detail["reason"] = "enough_available_accounts"
         _add_account_log("图片健康号池巡检", detail)
@@ -359,11 +413,11 @@ def run_auto_register_check(
         _add_account_log("图片健康号池巡检", detail)
         return last_triggered_at, False
 
-    print(f"[auto-register-watcher] available={available}, target={target_available}, starting register")
-    total = max(1, target_available - available)
+    print(f"[auto-register-watcher] available={available}, target={target_available}, max_total={max_total_accounts}, starting register")
+    total = max(1, max_total_accounts - total_accounts)
     registrar.update({
         "mode": "available",
-        "target_available": target_available,
+        "target_available": max_total_accounts,
         "total": total,
     })
     registrar.start()
@@ -376,20 +430,32 @@ def run_auto_register_check(
 
 def start_auto_register_watcher(stop_event: Event) -> Thread:
     last_triggered_at = 0.0
+    worker_name = "auto-register-watcher"
 
     def worker() -> None:
         nonlocal last_triggered_at
-        while not stop_event.is_set():
-            try:
-                settings = config.get_auto_register_settings()
-                interval_seconds = int(settings.get("check_interval_seconds") or 30)
-                last_triggered_at, _triggered = run_auto_register_check(last_triggered_at)
-            except Exception as exc:
-                print(f"[auto-register-watcher] fail {exc}")
-                _add_account_log("图片健康号池巡检失败", {"error": str(exc), "triggered": False})
-            stop_event.wait(int(config.get_auto_register_settings().get("check_interval_seconds") or 30))
+        worker_started(worker_name)
+        try:
+            while not stop_event.is_set():
+                worker_heartbeat(worker_name)
+                try:
+                    settings = config.get_auto_register_settings()
+                    interval_seconds = int(settings.get("check_interval_seconds") or 30)
+                    last_triggered_at, _triggered = run_auto_register_check(last_triggered_at)
+                except Exception as exc:
+                    worker_error(worker_name, exc)
+                    print(f"[auto-register-watcher] fail {exc}")
+                    _add_account_log("图片健康号池巡检失败", {"error": str(exc), "triggered": False})
+                    interval_seconds = int(config.get_auto_register_settings().get("check_interval_seconds") or 30)
+                stop_event.wait(interval_seconds)
+        except Exception as exc:
+            worker_stopped(worker_name, exc)
+            raise
+        finally:
+            if stop_event.is_set():
+                worker_stopped(worker_name)
 
-    thread = Thread(target=worker, name="auto-register-watcher", daemon=True)
+    thread = Thread(target=worker, name=worker_name, daemon=True)
     thread.start()
     return thread
 

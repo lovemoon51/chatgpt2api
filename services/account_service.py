@@ -401,6 +401,20 @@ class AccountService:
                and token not in excluded
         ]
 
+    def _rank_image_candidate_tokens(self, tokens: list[str]) -> list[str]:
+        if not tokens:
+            return []
+        start = self._index % len(tokens)
+        rotation = {token: index for index, token in enumerate(tokens[start:] + tokens[:start])}
+        return sorted(
+            tokens,
+            key=lambda token: (
+                int(self._accounts.get(token, {}).get("success") or 0),
+                str(self._accounts.get(token, {}).get("last_used_at") or ""),
+                rotation[token],
+            ),
+        )
+
     def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
         with self._image_slot_condition:
             while True:
@@ -408,7 +422,7 @@ class AccountService:
                     raise RuntimeError("no available image quota")
                 tokens = self._list_available_candidate_tokens(excluded_tokens)
                 if tokens:
-                    access_token = tokens[self._index % len(tokens)]
+                    access_token = self._rank_image_candidate_tokens(tokens)[0]
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token

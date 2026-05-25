@@ -312,6 +312,42 @@ export function ImageResults({
                     <span>{formatConversationTime(turn.createdAt)}</span>
                     {latestPhaseUpdatedAt ? <span>阶段更新 {formatPhaseTime(latestPhaseUpdatedAt)}</span> : null}
                   </div>
+                  {turn.referenceImages.length > 0 ? (
+                    <>
+                      <div className="mb-2 flex flex-wrap justify-end gap-2 sm:mb-3">
+                        {turn.referenceImages.map((image, index) => (
+                          <button
+                            key={`${turn.id}-${image.name}-${index}`}
+                            type="button"
+                            onClick={() => onOpenLightbox(referenceLightboxImages, index)}
+                            className="group relative h-20 w-20 overflow-hidden rounded-2xl border border-stone-200/80 bg-stone-100/60 text-left shadow-sm transition hover:border-stone-300 sm:h-24 sm:w-24"
+                            aria-label={`预览参考图 ${image.name || index + 1}`}
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element -- Local data URL previews are not served through Next image optimization. */}
+                            <img
+                              src={image.dataUrl}
+                              alt={image.name || `参考图 ${index + 1}`}
+                              className="absolute inset-0 h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
+                            />
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mb-2 flex flex-wrap justify-end gap-1.5 sm:mb-3">
+                        {turn.referenceImages.map((image, index) => (
+                          <Button
+                            key={`${turn.id}-${image.name}-${index}-edit`}
+                            variant="outline"
+                            size="sm"
+                            className="h-7 rounded-full border-stone-200 bg-white px-2.5 text-[11px] text-stone-700 hover:bg-stone-50 sm:h-8 sm:px-3 sm:text-xs"
+                            onClick={() => onContinueEdit(selectedConversation.id, image)}
+                          >
+                            <Sparkles className="size-3 sm:size-4" />
+                            加入编辑
+                          </Button>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
                   <div className="text-right">{turn.prompt}</div>
                   <div className="mt-2 flex flex-wrap justify-end gap-1.5">
                     <button
@@ -337,40 +373,6 @@ export function ImageResults({
             {!turn.resultsDeleted ? (
               <div className="flex justify-start">
                 <div className="w-full p-1">
-                  {turn.referenceImages.length > 0 ? (
-                    <div className="mb-4 flex flex-col items-end">
-                      <div className="mb-3 text-xs font-medium text-stone-500">本轮参考图</div>
-                      <div className="flex flex-wrap justify-end gap-3">
-                        {turn.referenceImages.map((image, index) => (
-                          <div key={`${turn.id}-${image.name}-${index}`} className="flex flex-col items-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => onOpenLightbox(referenceLightboxImages, index)}
-                              className="group relative h-24 w-24 overflow-hidden border border-stone-200/80 bg-stone-100/60 text-left transition hover:border-stone-300"
-                              aria-label={`预览参考图 ${image.name || index + 1}`}
-                            >
-                              {/* eslint-disable-next-line @next/next/no-img-element -- Local data URL previews are not served through Next image optimization. */}
-                              <img
-                                src={image.dataUrl}
-                                alt={image.name || `参考图 ${index + 1}`}
-                                className="absolute inset-0 h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
-                              />
-                            </button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="rounded-full border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
-                              onClick={() => onContinueEdit(selectedConversation.id, image)}
-                            >
-                              <Sparkles className="size-4" />
-                              加入编辑
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
                   <div className="mb-3 flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500 sm:mb-4 sm:gap-2 sm:text-xs">
                     <span className="rounded-full bg-stone-100 px-3 py-1">{turn.count} 张</span>
                     <span className="rounded-full bg-stone-100 px-3 py-1">{getTurnStatusLabel(turn.status)}</span>

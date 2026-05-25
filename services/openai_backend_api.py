@@ -972,13 +972,14 @@ class OpenAIBackendAPI:
             sediment_ids: list[str],
             poll: bool = True,
             progress_callback=None,
+            poll_timeout_secs: int | None = None,
     ) -> list[str]:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
         if poll and conversation_id and not file_ids and not sediment_ids:
             logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
             polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
-                                                                            config.image_poll_timeout_secs,
+                                                                            poll_timeout_secs or config.image_poll_timeout_secs,
                                                                             progress_callback=progress_callback)
             file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
             sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)

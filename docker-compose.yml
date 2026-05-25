@@ -11,7 +11,7 @@ services:
     cap_drop:
       - ALL
     ports:
-      - "3000:8000"
+      - "3001:8000"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json

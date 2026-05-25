@@ -97,7 +97,264 @@ class ReusableSingleAccountService(FakeAccountService):
         super().mark_image_result(access_token, success)
 
 
+class ReusableRaceAccountService(FakeAccountService):
+    def __init__(self) -> None:
+        super().__init__(["token-1"])
+        self._lock = threading.Lock()
+        self._inflight = 0
+
+    def get_available_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        if "token-1" in set(excluded_tokens or set()):
+            raise RuntimeError("no available image quota")
+        with self._lock:
+            if self._inflight >= 2:
+                raise RuntimeError("no available image quota")
+            self._inflight += 1
+        return "token-1"
+
+    def release_image_slot(self, access_token: str) -> None:
+        if not access_token:
+            return
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    def mark_image_result(self, access_token: str, success: bool) -> None:
+        self.release_image_slot(access_token)
+        super().mark_image_result(access_token, success)
+
+
 class ImageEmptyResultRetryTests(unittest.TestCase):
+    def patch_image_race_config(self, *, parallelism: int = 2, max_inflight: int = 2):
+        return mock.patch.dict(
+            conversation.config.data,
+            {
+                "image_race_parallelism": parallelism,
+                "image_race_max_inflight": max_inflight,
+            },
+        )
+
+    def test_image_race_config_defaults_disable_racing(self) -> None:
+        original_config = dict(conversation.config.data)
+        try:
+            conversation.config.data.pop("image_race_parallelism", None)
+            conversation.config.data.pop("image_race_max_inflight", None)
+
+            self.assertEqual(conversation.image_race_parallelism_limit(), 1)
+            self.assertEqual(conversation.image_race_max_inflight_limit(3), 3)
+        finally:
+            conversation.config.data.clear()
+            conversation.config.data.update(original_config)
+
+    def test_image_race_config_enables_bounded_racing(self) -> None:
+        with self.patch_image_race_config(parallelism=4, max_inflight=5):
+            self.assertEqual(conversation.image_race_parallelism_limit(), 4)
+            self.assertEqual(conversation.image_race_max_inflight_limit(3), 5)
+            self.assertEqual(conversation.image_race_max_inflight_limit(1), 4)
+
+    def test_single_image_request_races_accounts_and_returns_first_success(self) -> None:
+        fake_accounts = FakeAccountService(["slow-token", "fast-token"])
+        stream_tokens: list[str] = []
+        stream_lock = threading.Lock()
+        slow_can_finish = threading.Event()
+
+        def fake_stream(_backend, request, index, total):
+            token = getattr(_backend, "access_token", "")
+            with stream_lock:
+                stream_tokens.append(token)
+            if token == "slow-token":
+                slow_can_finish.wait(timeout=1)
+                return iter([
+                    conversation.ImageOutput(
+                        kind="result",
+                        model=request.model,
+                        index=index,
+                        total=total,
+                        data=[{"url": "http://example.test/slow.png"}],
+                    )
+                ])
+            time.sleep(0.05)
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": "http://example.test/fast.png"}],
+                )
+            ])
+
+        with (
+            self.patch_image_race_config(parallelism=2, max_inflight=2),
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            started = time.perf_counter()
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=1)
+                )
+            )
+            elapsed = time.perf_counter() - started
+
+        result_outputs = [output for output in outputs if output.kind == "result"]
+        self.assertLess(elapsed, 0.3)
+        self.assertEqual(result_outputs[0].data[0]["url"], "http://example.test/fast.png")
+        self.assertEqual(set(stream_tokens), {"slow-token", "fast-token"})
+        self.assertIn(("fast-token", True), fake_accounts.marked)
+
+    def test_multi_image_racing_respects_global_inflight_limit(self) -> None:
+        fake_accounts = FakeAccountService(["slot-1-slow", "slot-2", "slot-3", "slot-1-fast", "extra"])
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+        slow_can_finish = threading.Event()
+        slow_done = threading.Event()
+
+        def fake_stream(_backend, request, index, total):
+            nonlocal active, max_active
+            token = getattr(_backend, "access_token", "")
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                if token == "slot-1-slow":
+                    slow_can_finish.wait(timeout=1)
+                    return iter([
+                        conversation.ImageOutput(
+                            kind="result",
+                            model=request.model,
+                            index=index,
+                            total=total,
+                            data=[{"url": "http://example.test/slot-1-slow.png"}],
+                        )
+                    ])
+                time.sleep(0.05)
+                return iter([
+                    conversation.ImageOutput(
+                        kind="result",
+                        model=request.model,
+                        index=index,
+                        total=total,
+                        data=[{"url": f"http://example.test/{token}.png"}],
+                    )
+                ])
+            finally:
+                with active_lock:
+                    active -= 1
+                if token == "slot-1-slow":
+                    slow_done.set()
+
+        with (
+            self.patch_image_race_config(parallelism=2, max_inflight=4),
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            started = time.perf_counter()
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=3)
+                )
+            )
+            elapsed = time.perf_counter() - started
+            slow_can_finish.set()
+            slow_done.wait(timeout=2)
+
+        result_outputs = [output for output in outputs if output.kind == "result"]
+        urls = [output.data[0]["url"] for output in result_outputs]
+        self.assertLess(elapsed, 0.3)
+        self.assertEqual([output.index for output in result_outputs], [1, 2, 3])
+        self.assertEqual(len(result_outputs), 3)
+        self.assertLessEqual(max_active, 4)
+        self.assertIn("http://example.test/slot-1-fast.png", urls)
+        self.assertNotIn("http://example.test/extra.png", urls)
+
+    def test_racing_tracks_running_losers_when_cancel_fails(self) -> None:
+        fake_accounts = FakeAccountService(["slot-1-slow", "slot-2", "slot-3", "slot-1-fast", "slot-2-race", "slot-3-race"])
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+        slow_can_finish = threading.Event()
+        other_can_finish = threading.Event()
+        stream_tokens: list[str] = []
+
+        def fake_stream(_backend, request, index, total):
+            nonlocal active, max_active
+            token = getattr(_backend, "access_token", "")
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+                stream_tokens.append(token)
+            try:
+                if token == "slot-1-slow":
+                    slow_can_finish.wait(timeout=1)
+                elif token != "slot-1-fast":
+                    other_can_finish.wait(timeout=1)
+                else:
+                    time.sleep(0.05)
+                return iter([
+                    conversation.ImageOutput(
+                        kind="result",
+                        model=request.model,
+                        index=index,
+                        total=total,
+                        data=[{"url": f"http://example.test/{token}.png"}],
+                    )
+                ])
+            finally:
+                with active_lock:
+                    active -= 1
+
+        with (
+            self.patch_image_race_config(parallelism=2, max_inflight=4),
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=3)
+                )
+            )
+            slow_can_finish.set()
+            other_can_finish.set()
+
+        result_outputs = [output for output in outputs if output.kind == "result"]
+        self.assertEqual([output.index for output in result_outputs], [1, 2, 3])
+        self.assertLessEqual(max_active, 4)
+
+    def test_racing_preserves_cross_slot_account_reuse_when_pool_is_small(self) -> None:
+        fake_accounts = ReusableRaceAccountService()
+
+        def fake_stream(_backend, request, index, total):
+            time.sleep(0.05)
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": f"http://example.test/reused-{index}.png"}],
+                )
+            ])
+
+        with (
+            self.patch_image_race_config(parallelism=2, max_inflight=3),
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat", n=2)
+                )
+            )
+
+        result_outputs = [output for output in outputs if output.kind == "result"]
+        self.assertEqual([output.index for output in result_outputs], [1, 2])
+        self.assertEqual(fake_accounts.marked, [("token-1", True), ("token-1", True)])
+
     def test_multi_image_request_runs_images_in_parallel(self) -> None:
         fake_accounts = FakeAccountService(["token-1", "token-2", "token-3"])
         stream_tokens: list[str] = []
@@ -279,6 +536,48 @@ class ImageEmptyResultRetryTests(unittest.TestCase):
 
         self.assertEqual(outputs[0].data[0]["url"], "http://example.test/image.png")
         self.assertEqual(fake_accounts.marked, [("token-1", False), ("token-2", True)])
+
+    def test_retryable_first_empty_result_attempt_uses_shorter_poll_timeout(self) -> None:
+        original_config = dict(conversation.config.data)
+        conversation.config.data.update({
+            "image_poll_timeout_secs": 300,
+            "image_first_attempt_poll_timeout_secs": 90,
+            "image_empty_result_retry_limit": 2,
+        })
+        fake_accounts = FakeAccountService(["token-1", "token-2"])
+        seen_timeouts: list[int | None] = []
+
+        def fake_stream(_backend, request, index, total):
+            seen_timeouts.append(request.image_poll_timeout_secs)
+            if getattr(_backend, "access_token", "") == "token-1":
+                return iter(())
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": "http://example.test/image.png"}],
+                )
+            ])
+
+        try:
+            with (
+                mock.patch.object(conversation, "account_service", fake_accounts),
+                mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+                mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+            ):
+                outputs = list(
+                    conversation.stream_image_outputs_with_pool(
+                        conversation.ConversationRequest(model="gpt-image-2", prompt="cat")
+                    )
+                )
+        finally:
+            conversation.config.data.clear()
+            conversation.config.data.update(original_config)
+
+        self.assertEqual(outputs[0].data[0]["url"], "http://example.test/image.png")
+        self.assertEqual(seen_timeouts, [90, 300])
 
     def test_empty_result_reports_clear_timeout_message(self) -> None:
         fake_accounts = FakeAccountService(["token-1"])

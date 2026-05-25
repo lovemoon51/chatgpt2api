@@ -7,10 +7,10 @@ import json
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 import tiktoken
 
@@ -94,12 +94,39 @@ def image_empty_result_retry_limit() -> int:
     return max(1, value)
 
 
+def image_first_attempt_poll_timeout_secs() -> int:
+    try:
+        value = int(config.data.get("image_first_attempt_poll_timeout_secs") or 90)
+    except (TypeError, ValueError):
+        value = 90
+    return max(1, value)
+
+
 def image_request_parallelism_limit() -> int:
     try:
         value = int(config.data.get("image_request_parallelism") or 3)
     except (TypeError, ValueError):
         value = 3
     return max(1, min(8, value))
+
+
+def image_race_parallelism_limit() -> int:
+    try:
+        value = int(config.data.get("image_race_parallelism") or 1)
+    except (TypeError, ValueError):
+        value = 1
+    return max(1, min(8, value))
+
+
+def image_race_max_inflight_limit(total: int) -> int:
+    total = max(1, int(total or 1))
+    race_parallelism = image_race_parallelism_limit()
+    default_limit = total * race_parallelism
+    try:
+        value = int(config.data.get("image_race_max_inflight") or default_limit)
+    except (TypeError, ValueError):
+        value = default_limit
+    return max(total, min(default_limit, value))
 
 
 def is_unusable_image_account_error(message: str) -> bool:
@@ -137,9 +164,9 @@ def is_checkout_required_error(message: str) -> bool:
     )
 
 
-def no_image_result_message() -> str:
+def no_image_result_message(timeout_secs: int | None = None) -> str:
     return (
-        f"上游图片任务在 {config.image_poll_timeout_secs} 秒内没有返回图片数据，"
+        f"上游图片任务在 {timeout_secs or config.image_poll_timeout_secs} 秒内没有返回图片数据，"
         "可能仍在生成、被上游静默拒绝，或返回格式发生变化。请稍后重试，或在设置里调大图片轮询超时。"
     )
 
@@ -387,6 +414,7 @@ class ConversationRequest:
     mode: str = ""
     source_task_id: str = ""
     progress_callback: Callable[[dict[str, Any]], None] | None = None
+    image_poll_timeout_secs: int | None = None
 
 
 @dataclass
@@ -756,11 +784,13 @@ def stream_image_outputs(
         phase="polling",
         label="生成中",
     )
+    poll_timeout_secs = request.image_poll_timeout_secs or config.image_poll_timeout_secs
     image_urls = backend.resolve_conversation_image_urls(
         conversation_id,
         file_ids,
         sediment_ids,
         progress_callback=request.progress_callback,
+        poll_timeout_secs=poll_timeout_secs,
     )
     emit_image_progress(
         request.progress_callback,
@@ -810,6 +840,17 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
 
 
+class _ImageTokenScope(Protocol):
+    def excluded(self, attempted_tokens: set[str] | None = None) -> set[str]:
+        ...
+
+    def remember(self, access_token: str) -> None:
+        ...
+
+    def acquire(self, attempted_tokens: set[str] | None = None) -> str:
+        ...
+
+
 @dataclass
 class _ImageBatchTokenScope:
     tokens: set[str] = field(default_factory=set)
@@ -835,6 +876,55 @@ class _ImageBatchTokenScope:
         return token
 
 
+class _ImageRaceTokenCoordinator:
+    def __init__(self) -> None:
+        self.tokens: set[str] = set()
+        self.slot_tokens: dict[int, set[str]] = {}
+        self.lock = threading.Lock()
+
+    def _slot_tokens(self, index: int) -> set[str]:
+        return self.slot_tokens.setdefault(index, set())
+
+    def excluded(self, index: int, attempted_tokens: set[str] | None = None) -> set[str]:
+        with self.lock:
+            return set(attempted_tokens or set()) | set(self.tokens) | set(self._slot_tokens(index))
+
+    def remember(self, index: int, access_token: str) -> None:
+        if not access_token:
+            return
+        with self.lock:
+            self.tokens.add(access_token)
+            self._slot_tokens(index).add(access_token)
+
+    def acquire(self, index: int, attempted_tokens: set[str] | None = None) -> str:
+        attempted = set(attempted_tokens or set())
+        with self.lock:
+            slot_excluded = attempted | set(self._slot_tokens(index))
+            try:
+                token = account_service.get_available_access_token(slot_excluded | set(self.tokens))
+            except RuntimeError:
+                token = account_service.get_available_access_token(slot_excluded)
+            if token:
+                self.tokens.add(token)
+                self._slot_tokens(index).add(token)
+            return token
+
+
+class _ImageRaceSlotTokenScope:
+    def __init__(self, coordinator: _ImageRaceTokenCoordinator, index: int) -> None:
+        self.coordinator = coordinator
+        self.index = index
+
+    def excluded(self, attempted_tokens: set[str] | None = None) -> set[str]:
+        return self.coordinator.excluded(self.index, attempted_tokens)
+
+    def remember(self, access_token: str) -> None:
+        self.coordinator.remember(self.index, access_token)
+
+    def acquire(self, attempted_tokens: set[str] | None = None) -> str:
+        return self.coordinator.acquire(self.index, attempted_tokens)
+
+
 class _ImageBatchStopped(RuntimeError):
     pass
 
@@ -842,6 +932,16 @@ class _ImageBatchStopped(RuntimeError):
 def _raise_if_batch_stopped(cancel_event: threading.Event | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise _ImageBatchStopped("image batch stopped")
+
+
+def _release_cancelled_image_token(access_token: str) -> None:
+    release_image_slot = getattr(account_service, "release_image_slot", None)
+    if not callable(release_image_slot):
+        return
+    try:
+        release_image_slot(access_token)
+    except Exception:
+        pass
 
 
 def _thread_safe_progress_callback(
@@ -862,8 +962,9 @@ def _stream_single_image_outputs_with_pool(
         request: ConversationRequest,
         index: int,
         total: int,
-        token_scope: _ImageBatchTokenScope | None = None,
+        token_scope: _ImageTokenScope | None = None,
         cancel_event: threading.Event | None = None,
+        mark_cancelled_failure: bool = True,
 ) -> Iterator[ImageOutput]:
     emitted = False
     last_error = ""
@@ -935,7 +1036,13 @@ def _stream_single_image_outputs_with_pool(
         returned_result = False
         try:
             backend = OpenAIBackendAPI(access_token=token)
-            for output in stream_image_outputs(backend, request, index, total):
+            attempt_timeout = (
+                image_first_attempt_poll_timeout_secs()
+                if empty_result_attempts == 0 and empty_result_limit > 1
+                else config.image_poll_timeout_secs
+            )
+            attempt_request = dataclasses.replace(request, image_poll_timeout_secs=attempt_timeout)
+            for output in stream_image_outputs(backend, attempt_request, index, total):
                 _raise_if_batch_stopped(cancel_event)
                 if output.kind == "message" and request.message_as_error:
                     raise ImageGenerationError(
@@ -954,12 +1061,12 @@ def _stream_single_image_outputs_with_pool(
                 return
             if not returned_result:
                 empty_result_attempts += 1
-                last_error = no_image_result_message()
+                last_error = no_image_result_message(attempt_timeout)
                 logger.warning({
                     "event": "image_stream_empty_result",
                     "request_token": token,
                     "attempted_tokens": len(attempted_tokens),
-                    "timeout_secs": config.image_poll_timeout_secs,
+                    "timeout_secs": attempt_timeout,
                 })
                 if empty_result_attempts >= empty_result_limit:
                     raise ImageGenerationError(image_stream_error_message(last_error))
@@ -969,7 +1076,10 @@ def _stream_single_image_outputs_with_pool(
             account_service.mark_image_result(token, True)
             break
         except _ImageBatchStopped:
-            account_service.mark_image_result(token, False)
+            if mark_cancelled_failure:
+                account_service.mark_image_result(token, False)
+            else:
+                _release_cancelled_image_token(token)
             raise
         except ImageUsageLimitReachedError as exc:
             last_error = str(exc)
@@ -1051,10 +1161,168 @@ def _collect_single_image_outputs_with_pool(
         request: ConversationRequest,
         index: int,
         total: int,
-        token_scope: _ImageBatchTokenScope,
+        token_scope: _ImageTokenScope,
         cancel_event: threading.Event,
+        mark_cancelled_failure: bool = True,
 ) -> list[ImageOutput]:
-    return list(_stream_single_image_outputs_with_pool(request, index, total, token_scope, cancel_event))
+    return list(
+        _stream_single_image_outputs_with_pool(
+            request,
+            index,
+            total,
+            token_scope,
+            cancel_event,
+            mark_cancelled_failure,
+        )
+    )
+
+
+def _stream_race_image_outputs_with_pool(request: ConversationRequest, total: int) -> Iterator[ImageOutput]:
+    race_parallelism = image_race_parallelism_limit()
+    max_inflight = image_race_max_inflight_limit(total)
+    token_coordinator = _ImageRaceTokenCoordinator()
+    worker_request = dataclasses.replace(
+        request,
+        progress_callback=_thread_safe_progress_callback(request.progress_callback),
+    )
+    logger.info({
+        "event": "image_stream_race_batch_start",
+        "image_count": total,
+        "race_parallelism": race_parallelism,
+        "max_inflight": max_inflight,
+    })
+    emit_image_progress(
+        request.progress_callback,
+        phase="submitting",
+        label="批量提交中" if total > 1 else "提交中",
+        metadata={"image_total": total, "race_parallelism": race_parallelism, "max_inflight": max_inflight},
+    )
+
+    results: dict[int, list[ImageOutput]] = {}
+    slot_errors: dict[int, BaseException] = {}
+    slot_attempts = {index: 0 for index in range(1, total + 1)}
+    slot_cancel_events = {index: threading.Event() for index in range(1, total + 1)}
+    future_to_index: dict[Any, int] = {}
+    executor = ThreadPoolExecutor(max_workers=max_inflight, thread_name_prefix="image-race")
+    shutdown_wait = True
+
+    def slot_is_active(index: int) -> bool:
+        return any(active_index == index for active_index in future_to_index.values())
+
+    def submit_slot(index: int) -> bool:
+        if index in results or slot_attempts[index] >= race_parallelism:
+            return False
+        future = executor.submit(
+            _collect_single_image_outputs_with_pool,
+            worker_request,
+            index,
+            total,
+            _ImageRaceSlotTokenScope(token_coordinator, index),
+            slot_cancel_events[index],
+            False,
+        )
+        future_to_index[future] = index
+        slot_attempts[index] += 1
+        return True
+
+    def fill_capacity() -> None:
+        while len(future_to_index) < max_inflight:
+            submitted = False
+            for index in range(1, total + 1):
+                if index in results or slot_is_active(index):
+                    continue
+                submitted = submit_slot(index)
+                if submitted:
+                    break
+            if submitted:
+                continue
+            for index in range(1, total + 1):
+                if index in results:
+                    continue
+                submitted = submit_slot(index)
+                if submitted:
+                    break
+            if not submitted:
+                break
+
+    def cancel_slot_losers(index: int) -> None:
+        slot_cancel_events[index].set()
+        for future, active_index in list(future_to_index.items()):
+            if active_index != index:
+                continue
+            if future.cancel():
+                future_to_index.pop(future, None)
+
+    def cancel_batch() -> None:
+        for event in slot_cancel_events.values():
+            event.set()
+        for future in list(future_to_index):
+            future.cancel()
+        future_to_index.clear()
+
+    try:
+        for index in range(1, total + 1):
+            submit_slot(index)
+        fill_capacity()
+
+        while len(results) < total:
+            if not future_to_index:
+                error = next(
+                    (slot_errors[index] for index in range(1, total + 1) if index not in results and index in slot_errors),
+                    None,
+                )
+                if error is not None:
+                    raise error
+                raise ImageGenerationError("image generation failed")
+
+            done, _ = wait(set(future_to_index), return_when=FIRST_COMPLETED)
+            for future in done:
+                index = future_to_index.pop(future, None)
+                if index is None or index in results:
+                    continue
+                try:
+                    outputs = future.result()
+                except (CancelledError, _ImageBatchStopped):
+                    continue
+                except Exception as exc:
+                    slot_errors[index] = exc
+                    if slot_attempts[index] >= race_parallelism and not slot_is_active(index):
+                        cancel_batch()
+                        shutdown_wait = False
+                        raise
+                    continue
+
+                message_output = next((output for output in outputs if output.kind == "message"), None)
+                if message_output is not None:
+                    cancel_batch()
+                    shutdown_wait = False
+                    yield message_output
+                    return
+
+                if any(output.kind == "result" for output in outputs):
+                    results[index] = outputs
+                    cancel_slot_losers(index)
+                    continue
+
+                slot_errors[index] = ImageGenerationError("image generation failed")
+                if slot_attempts[index] >= race_parallelism and not slot_is_active(index):
+                    cancel_batch()
+                    shutdown_wait = False
+                    raise slot_errors[index]
+            fill_capacity()
+    finally:
+        if len(results) >= total:
+            shutdown_wait = False
+        logger.info({
+            "event": "image_stream_race_batch_done",
+            "image_count": total,
+            "completed": len(results),
+        })
+        executor.shutdown(wait=shutdown_wait, cancel_futures=not shutdown_wait)
+
+    for index in range(1, total + 1):
+        for output in results.get(index, []):
+            yield output
 
 
 def _stream_parallel_image_outputs_with_pool(request: ConversationRequest, total: int) -> Iterator[ImageOutput]:
@@ -1153,7 +1421,10 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
         )
 
         total = max(1, int(request.n or 1))
-        if total == 1:
+        race_enabled = image_race_parallelism_limit() > 1 and image_race_max_inflight_limit(total) > total
+        if race_enabled:
+            yield from _stream_race_image_outputs_with_pool(request, total)
+        elif total == 1:
             yield from _stream_single_image_outputs_with_pool(request, 1, 1)
         else:
             yield from _stream_parallel_image_outputs_with_pool(request, total)

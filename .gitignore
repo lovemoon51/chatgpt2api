@@ -31,4 +31,5 @@ git_cache/
 
 # Local runtime output
 .codex-runtime-logs/
+runtime-logs/
 utils/output/

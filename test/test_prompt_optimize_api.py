@@ -48,6 +48,7 @@ class PromptOptimizeApiTests(unittest.TestCase):
             mock.patch.object(ai_module, "require_identity", return_value={"id": "user-1", "role": "user"}),
             mock.patch.object(ai_module, "filter_or_log", side_effect=fake_filter_or_log),
             mock.patch.object(ai_module, "usage_limited_call", return_value=FakeUsageLimit()),
+            mock.patch("services.log_service.log_service.add"),
             mock.patch.object(ai_module, "optimize_image_prompt", return_value="电影感窗边猫咪，柔和逆光，细节丰富", create=True) as optimize,
         ):
             response = self.client.post(
@@ -59,9 +60,9 @@ class PromptOptimizeApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"optimized_prompt": "电影感窗边猫咪，柔和逆光，细节丰富", "model": "auto"},
+            {"optimized_prompt": "电影感窗边猫咪，柔和逆光，细节丰富", "model": "gpt-5.5"},
         )
-        optimize.assert_called_once_with("一只猫坐在窗边", model="auto")
+        optimize.assert_called_once_with("一只猫坐在窗边", model="gpt-5.5")
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ class PromptOptimizerTests(unittest.TestCase):
 
         self.assertEqual(result, "优化后的提示词")
         request = captured["request"]
-        self.assertEqual(request.model, "auto")
+        self.assertEqual(request.model, "gpt-5.5")
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertIn("图像", request.messages[0]["content"])
         self.assertIn("提示词专家", request.messages[0]["content"])

@@ -15,7 +15,7 @@ from api.support import (
 )
 from services.content_filter import check_request, request_text
 from services.log_service import LoggedCall
-from services.prompt_optimizer import optimize_image_prompt
+from services.prompt_optimizer import PROMPT_OPTIMIZER_MODEL, optimize_image_prompt
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -88,7 +88,7 @@ class EmbeddingRequest(BaseModel):
 
 class PromptOptimizeRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
-    model: str = "auto"
+    model: str = PROMPT_OPTIMIZER_MODEL
 
 
 class PromptOptimizeResponse(BaseModel):
@@ -98,7 +98,7 @@ class PromptOptimizeResponse(BaseModel):
 
 def handle_prompt_optimize(payload: dict[str, str]) -> dict[str, str]:
     prompt = payload["prompt"]
-    model = payload.get("model") or "auto"
+    model = payload.get("model") or PROMPT_OPTIMIZER_MODEL
     return {"optimized_prompt": optimize_image_prompt(prompt, model=model), "model": model}
 
 
@@ -141,7 +141,7 @@ def create_router() -> APIRouter:
         prompt = body.prompt.strip()
         if not prompt:
             raise openai_http_exception("prompt is required", status_code=400, param="prompt", code="missing_required_parameter")
-        model = str(body.model or "auto")
+        model = str(body.model or PROMPT_OPTIMIZER_MODEL).strip() or PROMPT_OPTIMIZER_MODEL
         call = LoggedCall(identity, "/api/prompts/optimize", model, "提示词优化", request_text=prompt)
         with usage_limited_call(identity, "/api/prompts/optimize", model, "text") as release_limit:
             await filter_or_log(call, prompt)

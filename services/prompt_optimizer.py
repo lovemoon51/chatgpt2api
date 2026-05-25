@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from services.protocol.conversation import ConversationRequest, collect_text, text_backend
 
-PROMPT_OPTIMIZER_MODEL = "auto"
+PROMPT_OPTIMIZER_MODEL = "gpt-5.5"
 IMAGE_PROMPT_OPTIMIZER_SYSTEM_PROMPT = """你是一名图像生成提示词专家。请优化用户提供的作画提示词，保留原始意图和主体，不添加与原意矛盾的新内容。增强画面主体、场景、构图、光影、风格、材质、色彩、氛围与细节，让提示词更适合图像生成。默认保持用户原语言。只输出优化后的提示词，不要解释，不要 Markdown，不要标题，不要引号，不要多个候选。"""
 
 

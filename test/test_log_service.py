@@ -129,6 +129,32 @@ class LogServiceSecurityTests(unittest.TestCase):
             self.assertEqual(text_items[0]["type"], LOG_TYPE_TEXT)
             self.assertEqual(text_items[0]["detail"]["model"], "text-embedding-3-small")
 
+    def test_legacy_prompt_optimize_calls_are_listed_as_text_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "id": "prompt-optimize-call",
+                        "time": "2026-05-25 18:11:01",
+                        "type": LOG_TYPE_CALL,
+                        "summary": "提示词优化调用完成",
+                        "detail": {"endpoint": "/api/prompts/optimize", "model": "gpt-5.5"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            service = self._service(path)
+
+            self.assertEqual(service.list(type=LOG_TYPE_CALL), [])
+            text_items = service.list(type=LOG_TYPE_TEXT)
+            self.assertEqual(len(text_items), 1)
+            self.assertEqual(text_items[0]["type"], LOG_TYPE_TEXT)
+            self.assertEqual(text_items[0]["detail"]["model"], "gpt-5.5")
+
     def test_corrupt_utf8_log_bytes_do_not_break_listing_or_append(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "logs.jsonl"

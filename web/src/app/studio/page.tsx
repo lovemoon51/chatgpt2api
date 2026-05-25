@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type ClipboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type ClipboardEvent, type DragEvent } from "react";
 import {
   ArrowLeft,
   ArrowUp,
@@ -725,6 +725,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const taskQueuePanelRef = useRef<HTMLDivElement>(null);
   const taskQueueButtonRef = useRef<HTMLButtonElement>(null);
   const taskQueueBellRef = useRef<HTMLButtonElement>(null);
+  const dragDepthRef = useRef(0);
 
   const [prompt, setPrompt] = useState("");
   const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
@@ -761,6 +762,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const [taskQueueOpen, setTaskQueueOpen] = useState(false);
   const [revealedImageIds, setRevealedImageIds] = useState<Set<string>>(() => new Set());
   const [elapsedNowMs, setElapsedNowMs] = useState(() => Date.now());
+  const [isImageDragActive, setIsImageDragActive] = useState(false);
 
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
@@ -1135,6 +1137,44 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     textareaRef.current?.focus();
   };
 
+  const getDraggedImageFiles = (dataTransfer: DataTransfer) =>
+    Array.from(dataTransfer.files || []).filter((file) => file.type.startsWith("image/"));
+
+  const hasDraggedImage = (dataTransfer: DataTransfer) => {
+    if (getDraggedImageFiles(dataTransfer).length > 0) {
+      return true;
+    }
+    return Array.from(dataTransfer.items || []).some((item) => item.kind === "file" && item.type.startsWith("image/"));
+  };
+
+  const handleStudioDragEnter = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedImage(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsImageDragActive(true);
+  };
+
+  const handleStudioDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedImage(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleStudioDragLeave = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedImage(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsImageDragActive(false);
+    }
+  };
+
   const loadImageLibrary = useCallback(async () => {
     setIsLoadingImageLibrary(true);
     try {
@@ -1223,6 +1263,22 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     }
     event.preventDefault();
     void handleReferenceImageChange(imageFiles);
+  };
+
+  const handleStudioDrop = (event: DragEvent<HTMLElement>) => {
+    const imageFiles = getDraggedImageFiles(event.dataTransfer);
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsImageDragActive(false);
+    setStudioMode("image");
+    closeStudioOverlays();
+    void handleReferenceImageChange(imageFiles).then(() => {
+      textareaRef.current?.focus();
+    });
   };
 
   const runConversationQueue = useCallback(
@@ -1687,11 +1743,25 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   return (
     <>
       <section
+        onDragEnter={handleStudioDragEnter}
+        onDragOver={handleStudioDragOver}
+        onDragLeave={handleStudioDragLeave}
+        onDrop={handleStudioDrop}
         className={cn(
           "grid h-dvh min-h-[680px] w-full grid-cols-1 overflow-hidden lg:grid-cols-[280px_minmax(0,1fr)]",
           isDarkTheme ? "dark bg-slate-950 text-slate-100" : "bg-[#f3f6fb] text-slate-950",
         )}
       >
+        {isImageDragActive ? (
+          <div className="pointer-events-none fixed inset-4 z-[80] grid place-items-center rounded-[32px] border-2 border-dashed border-blue-400 bg-blue-100/70 text-blue-950 shadow-[0_28px_90px_-42px_rgba(37,99,235,0.55)] backdrop-blur-sm dark:border-blue-300 dark:bg-blue-950/70 dark:text-blue-100">
+            <div className="grid place-items-center gap-3">
+              <div className="grid size-16 place-items-center rounded-[24px] bg-white/85 shadow-sm dark:bg-slate-900/85">
+                <ImagePlus className="size-8" />
+              </div>
+              <div className="text-lg font-semibold">松开添加为作画参考图</div>
+            </div>
+          </div>
+        ) : null}
         {isSidebarOpen ? (
           <button
             type="button"

@@ -31,8 +31,8 @@ const typeLabels: Record<string, string> = {
   [LogType.Account]: "账号管理日志",
 };
 
-const textLogEndpoints = new Set(["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"]);
-const textLogSummaryPrefixes = ["文本生成", "Responses", "Messages", "Embeddings"];
+const textLogEndpoints = new Set(["/api/prompts/optimize", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"]);
+const textLogSummaryPrefixes = ["提示词优化", "文本生成", "Responses", "Messages", "Embeddings"];
 
 const statusOptions = [
   { label: "全部状态", value: "all" },

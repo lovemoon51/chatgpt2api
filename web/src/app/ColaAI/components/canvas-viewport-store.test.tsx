@@ -1,11 +1,18 @@
 import { describe, expect, test, beforeEach } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   getCanvasViewport,
   resetCanvasViewport,
   setCanvasViewport,
   subscribeCanvasViewport,
+  useCanvasViewport,
 } from "./canvas-viewport-store";
+
+function ViewportProbe() {
+  const viewport = useCanvasViewport();
+  return <span data-testid="viewport">{`${viewport.x},${viewport.y},${viewport.k}`}</span>;
+}
 
 describe("canvas viewport store", () => {
   beforeEach(() => {
@@ -58,5 +65,12 @@ describe("canvas viewport store", () => {
     expect(getCanvasViewport().k).toBe(0.12);
     setCanvasViewport({ x: 0, y: 0, k: 6 });
     expect(getCanvasViewport().k).toBe(4);
+  });
+
+  test("useCanvasViewport reads the current viewport during SSR", () => {
+    setCanvasViewport({ x: 80, y: -20, k: 1.25 });
+    const markup = renderToStaticMarkup(<ViewportProbe />);
+    expect(markup).toContain('data-testid="viewport"');
+    expect(markup).toContain("80,-20,1.25");
   });
 });

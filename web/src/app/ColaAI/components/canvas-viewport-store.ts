@@ -1,3 +1,7 @@
+"use client";
+
+import { useSyncExternalStore } from "react";
+
 import type { CanvasViewport } from "./canvas-types";
 
 const minZoom = 0.12;
@@ -34,4 +38,12 @@ export function subscribeCanvasViewport(listener: () => void): () => void {
 export function resetCanvasViewport(): void {
   currentViewport = defaultViewport;
   listeners.clear();
+}
+
+export function useCanvasViewport(): CanvasViewport {
+  return useSyncExternalStore(
+    subscribeCanvasViewport,
+    getCanvasViewport,
+    getCanvasViewport,
+  );
 }

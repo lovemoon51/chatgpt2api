@@ -118,6 +118,44 @@ describe("ColaAI canvas components", () => {
     expect(markup).not.toContain("contain:layout paint style");
   });
 
+  test("isolates image content with strict contain to prevent paint propagation", () => {
+    const state = createInitialCanvasState();
+    const imageNode = {
+      ...state.nodes[1],
+      metadata: {
+        ...state.nodes[1].metadata,
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={imageNode}
+        selected={false}
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+    expect(markup).toContain('data-cola-image-container="true"');
+    expect(markup).toContain("contain:strict");
+  });
+
+  test("renders connection layer with GPU compositing hint", () => {
+    const state = createInitialCanvasState();
+    const bounds = getCanvasLayerBounds(state.nodes);
+    const markup = renderToStaticMarkup(
+      <CanvasConnections
+        bounds={bounds}
+        nodes={state.nodes}
+        connections={state.connections}
+        selectedConnectionId={null}
+        onSelectConnection={() => undefined}
+      />,
+    );
+    expect(markup).toContain("translateZ(0)");
+  });
+
   test("renders video placeholder nodes without enabling generation", () => {
     const state = createInitialCanvasState();
     const videoNode = {

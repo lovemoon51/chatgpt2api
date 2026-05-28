@@ -42,6 +42,7 @@ function CanvasConnectionsComponent({
         top: bounds.top,
         width: bounds.width,
         height: bounds.height,
+        transform: "translateZ(0)",
       }}
       viewBox={`${bounds.left} ${bounds.top} ${bounds.width} ${bounds.height}`}
     >

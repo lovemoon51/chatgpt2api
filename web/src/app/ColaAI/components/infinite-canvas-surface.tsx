@@ -13,6 +13,7 @@ import {
 
 import { CanvasConnections } from "./canvas-connections";
 import { CanvasConnectionMenu } from "./canvas-connection-menu";
+import { computeCanvasConnectionPath } from "./canvas-connection-paths";
 import { CanvasContextMenu } from "./canvas-context-menu";
 import { findNearestConnectorHandle, type CanvasConnectorHandle } from "./canvas-connectors";
 import { CanvasGuides } from "./canvas-guides";
@@ -22,7 +23,6 @@ import { createSelectionRect, getNodesInSelectionRect } from "./canvas-selection
 import { getSnappedDelta } from "./canvas-snapping";
 import { getCanvasLayerBounds, getVisibleCanvasConnections, getVisibleCanvasNodes } from "./canvas-visibility";
 import { getCanvasViewport, setCanvasViewport, subscribeCanvasViewport } from "./canvas-viewport-store";
-import { createAnimationFrameBatcher } from "./frame-batcher";
 import type { CanvasCreatableNodeType, CanvasGuide, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
 
 type InfiniteCanvasSurfaceProps = {
@@ -67,6 +67,14 @@ type DragState =
       initialPositions: Record<string, CanvasPoint>;
       movingNodes: CanvasState["nodes"];
       stationaryNodes: CanvasState["nodes"];
+      nodeElements: Map<string, HTMLElement>;
+      affectedConnections: Array<{
+        element: SVGPathElement;
+        hitElement: SVGPathElement;
+        from: { nodeId: string; width: number; height: number; basePosition: CanvasPoint };
+        to: { nodeId: string; width: number; height: number; basePosition: CanvasPoint };
+      }>;
+      lastPositions: Record<string, CanvasPoint>;
     }
   | {
       type: "selection";
@@ -193,7 +201,6 @@ export function InfiniteCanvasSurface({
   const toggleNodeSelectionRef = useRef(onToggleNodeSelection);
   const undoRef = useRef(onUndo);
   const viewportChangeRef = useRef(onViewportChange);
-  const nodeMoveBatcherRef = useRef<ReturnType<typeof createAnimationFrameBatcher<Record<string, CanvasPoint>>> | null>(null);
 
   useEffect(() => {
     const sync = () => {
@@ -258,21 +265,6 @@ export function InfiniteCanvasSurface({
   ]);
 
   useEffect(() => {
-    nodeMoveBatcherRef.current = createAnimationFrameBatcher(
-      (positions) => {
-        moveNodesRef.current(positions);
-      },
-      (callback) => window.requestAnimationFrame(callback),
-      (id) => window.cancelAnimationFrame(id),
-    );
-
-    return () => {
-      nodeMoveBatcherRef.current?.cancel();
-      nodeMoveBatcherRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) {
@@ -325,15 +317,34 @@ export function InfiniteCanvasSurface({
         delta: rawDelta,
         threshold: snapThreshold / viewportRef.current.k,
       });
-      const positions = Object.fromEntries(
+
+      drag.lastPositions = Object.fromEntries(
         drag.nodeIds.map((nodeId) => {
           const initial = drag.initialPositions[nodeId];
           return [nodeId, { x: initial.x + snapped.delta.x, y: initial.y + snapped.delta.y }];
         }),
       );
 
+      drag.nodeIds.forEach((nodeId) => {
+        const el = drag.nodeElements.get(nodeId);
+        const pos = drag.lastPositions[nodeId];
+        if (el && pos) {
+          el.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+        }
+      });
+
+      drag.affectedConnections.forEach((conn) => {
+        const fromPos = drag.lastPositions[conn.from.nodeId] ?? conn.from.basePosition;
+        const toPos = drag.lastPositions[conn.to.nodeId] ?? conn.to.basePosition;
+        const d = computeCanvasConnectionPath(
+          { position: fromPos, width: conn.from.width, height: conn.from.height },
+          { position: toPos, width: conn.to.width, height: conn.to.height },
+        );
+        conn.element.setAttribute("d", d);
+        conn.hitElement.setAttribute("d", d);
+      });
+
       setGuides(snapped.guides);
-      nodeMoveBatcherRef.current?.push(positions);
     };
 
     const handlePointerUp = (event: PointerEvent) => {
@@ -342,7 +353,21 @@ export function InfiniteCanvasSurface({
         viewportChangeRef.current(getCanvasViewport());
       }
       if (drag?.type === "node") {
-        nodeMoveBatcherRef.current?.flush();
+        drag.nodeElements.forEach((el) => {
+          el.removeAttribute("data-cola-dragging");
+          el.style.willChange = "";
+        });
+        const movedNodeIds = drag.nodeIds.filter((id) => {
+          const initial = drag.initialPositions[id];
+          const last = drag.lastPositions[id];
+          return last && (initial.x !== last.x || initial.y !== last.y);
+        });
+        if (movedNodeIds.length > 0) {
+          const finalPositions = Object.fromEntries(
+            movedNodeIds.map((id) => [id, drag!.lastPositions[id]]),
+          );
+          moveNodesRef.current(finalPositions);
+        }
         finalizeHistoryBatchRef.current();
         setGuides([]);
       }
@@ -404,8 +429,27 @@ export function InfiniteCanvasSurface({
 
       if (event.key === "Escape") {
         event.preventDefault();
+        const drag = dragRef.current;
+        if (drag?.type === "node") {
+          drag.nodeIds.forEach((id) => {
+            const el = drag.nodeElements.get(id);
+            const initial = drag.initialPositions[id];
+            if (el && initial) {
+              el.style.transform = `translate(${initial.x}px, ${initial.y}px)`;
+            }
+            el?.removeAttribute("data-cola-dragging");
+            if (el) el.style.willChange = "";
+          });
+          drag.affectedConnections.forEach((conn) => {
+            const d = computeCanvasConnectionPath(
+              { position: conn.from.basePosition, width: conn.from.width, height: conn.from.height },
+              { position: conn.to.basePosition, width: conn.to.width, height: conn.to.height },
+            );
+            conn.element.setAttribute("d", d);
+            conn.hitElement.setAttribute("d", d);
+          });
+        }
         dragRef.current = null;
-        nodeMoveBatcherRef.current?.cancel();
         setGuides([]);
         setSelectionRect(null);
         setConnectionPreview(null);
@@ -681,6 +725,53 @@ export function InfiniteCanvasSurface({
       selectNodeRef.current(nodeId);
     }
 
+    const nodeElements = new Map<string, HTMLElement>();
+    selectedNodeIds.forEach((id) => {
+      const el = document.querySelector<HTMLElement>(`article[data-node-id="${id}"]`);
+      if (el) {
+        nodeElements.set(id, el);
+        el.setAttribute("data-cola-dragging", "true");
+        el.style.willChange = "transform";
+      }
+    });
+
+    const movingNodeIdSet2 = new Set(selectedNodeIds);
+    const nodesById = new Map(nodesRef.current.map((n) => [n.id, n]));
+    const affectedConnections: Array<{
+      element: SVGPathElement;
+      hitElement: SVGPathElement;
+      from: { nodeId: string; width: number; height: number; basePosition: CanvasPoint };
+      to: { nodeId: string; width: number; height: number; basePosition: CanvasPoint };
+    }> = [];
+    state.connections.forEach((connection) => {
+      const fromNode = nodesById.get(connection.fromNodeId);
+      const toNode = nodesById.get(connection.toNodeId);
+      if (!fromNode || !toNode) return;
+      if (!movingNodeIdSet2.has(connection.fromNodeId) && !movingNodeIdSet2.has(connection.toNodeId)) return;
+      const paths = document.querySelectorAll<SVGPathElement>(
+        `[data-connection-id="${connection.id}"]`,
+      );
+      const hitElement = paths[0];
+      const visibleElement = (paths[1] ?? paths[0]) as SVGPathElement | undefined;
+      if (!hitElement || !visibleElement) return;
+      affectedConnections.push({
+        element: visibleElement,
+        hitElement,
+        from: {
+          nodeId: fromNode.id,
+          width: fromNode.width,
+          height: fromNode.height,
+          basePosition: fromNode.position,
+        },
+        to: {
+          nodeId: toNode.id,
+          width: toNode.width,
+          height: toNode.height,
+          basePosition: toNode.position,
+        },
+      });
+    });
+
     dragRef.current = {
       type: "node",
       nodeIds: selectedNodeIds,
@@ -689,6 +780,9 @@ export function InfiniteCanvasSurface({
       initialPositions: getNodePositions(movingNodes),
       movingNodes,
       stationaryNodes: nodesRef.current.filter((item) => !selectedNodeIdSet.has(item.id)),
+      nodeElements,
+      affectedConnections,
+      lastPositions: getNodePositions(movingNodes),
     };
     document.body.style.cursor = "grabbing";
   }
@@ -728,7 +822,6 @@ export function InfiniteCanvasSurface({
     event.preventDefault();
     event.stopPropagation();
     dragRef.current = null;
-    nodeMoveBatcherRef.current?.flush();
     setConnectionMenu(null);
     setConnectionPreview(null);
     setGuides([]);

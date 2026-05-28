@@ -75,6 +75,7 @@ function CanvasConnectionsComponent({
               onContextMenu={(event) => onConnectionContextMenu?.(connection.id, event)}
             />
             <path
+              data-connection-id={connection.id}
               d={path}
               fill="none"
               stroke={selected ? "#7c3aed" : "#a78bfa"}

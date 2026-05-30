@@ -16,19 +16,24 @@ import { CanvasConnectionMenu } from "./canvas-connection-menu";
 import { computeCanvasConnectionPath } from "./canvas-connection-paths";
 import { CanvasContextMenu } from "./canvas-context-menu";
 import { findNearestConnectorHandle, type CanvasConnectorHandle } from "./canvas-connectors";
-import { CanvasGuides } from "./canvas-guides";
+import { CanvasGuides, clearGuidesDOM, renderGuidesToDOM } from "./canvas-guides";
 import { getCanvasImageFile } from "./canvas-image-files";
 import { CanvasNode } from "./canvas-node";
+import { CanvasNodeInfoDialog } from "./canvas-node-info-dialog";
 import { createSelectionRect, getNodesInSelectionRect } from "./canvas-selection";
-import { getSnappedDelta } from "./canvas-snapping";
+import { getSnappedDelta, precomputeStationaryAnchors, type PrecomputedStationaryAnchors } from "./canvas-snapping";
 import { getCanvasLayerBounds, getVisibleCanvasConnections, getVisibleCanvasNodes } from "./canvas-visibility";
 import { getCanvasViewport, setCanvasViewport, subscribeCanvasViewport } from "./canvas-viewport-store";
-import type { CanvasCreatableNodeType, CanvasGuide, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
+import type { CanvasCreatableNodeType, CanvasInteractionMode, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
+import { summarizeCanvasUpstream } from "./canvas-workflow";
+import type { CanvasConfigPatch } from "./use-canvas-store";
 
 type InfiniteCanvasSurfaceProps = {
+  interactionMode: CanvasInteractionMode;
   state: CanvasState;
   onAddConnectedNode: (fromNodeId: string, nodeType: CanvasCreatableNodeType, position: CanvasPoint) => void;
   onAddConnection: (fromNodeId: string, toNodeId: string) => void;
+  onConfigChange: (nodeId: string, patch: CanvasConfigPatch) => void;
   onContentChange: (nodeId: string, content: string) => void;
   onDeleteSelected: () => void;
   onDisconnectNode: (nodeId: string) => void;
@@ -49,6 +54,7 @@ type InfiniteCanvasSurfaceProps = {
   onToggleNodeSelection: (nodeId: string) => void;
   onUndo: () => void;
   onViewportChange: (viewport: CanvasViewport) => void;
+  onSurfaceSizeChange?: (size: { width: number; height: number }) => void;
 };
 
 type DragState =
@@ -67,6 +73,7 @@ type DragState =
       initialPositions: Record<string, CanvasPoint>;
       movingNodes: CanvasState["nodes"];
       stationaryNodes: CanvasState["nodes"];
+      precomputedStationary: PrecomputedStationaryAnchors;
       nodeElements: Map<string, HTMLElement>;
       affectedConnections: Array<{
         element: SVGPathElement;
@@ -112,11 +119,40 @@ const snapThreshold = 8;
 const connectorHitRadius = 22;
 
 function isEditableTarget(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) {
+  if (!target || typeof (target as { closest?: unknown }).closest !== "function") {
     return false;
   }
 
-  return Boolean(target.closest("input,textarea,select,[contenteditable='true']"));
+  return Boolean((target as Element).closest("input,textarea,select,[contenteditable='true'],[data-cola-wheel-local='true']"));
+}
+
+export function shouldHandleCanvasWheel(target: EventTarget | null) {
+  return !isEditableTarget(target);
+}
+
+export function getCanvasSurfacePointerIntent({
+  button,
+  interactionMode,
+  shiftKey,
+}: {
+  button: number;
+  interactionMode: CanvasInteractionMode;
+  shiftKey: boolean;
+}) {
+  if (button !== 0) {
+    return "ignore" as const;
+  }
+  if (shiftKey) {
+    return "selection" as const;
+  }
+  if (interactionMode === "hand") {
+    return "canvas" as const;
+  }
+  return "selection" as const;
+}
+
+export function getCanvasSurfaceCursor(interactionMode: CanvasInteractionMode) {
+  return interactionMode === "hand" ? "cursor-grab" : "cursor-default";
 }
 
 function getWorldPoint(event: Pick<PointerEvent | ReactPointerEvent, "clientX" | "clientY">, rect: DOMRect, viewport: CanvasViewport) {
@@ -144,10 +180,16 @@ function getConnectorHandles() {
   }).filter((handle) => handle.nodeId);
 }
 
+function getGuidesContainer() {
+  return document.querySelector<HTMLElement>("[data-cola-guides-container]");
+}
+
 export function InfiniteCanvasSurface({
+  interactionMode,
   state,
   onAddConnectedNode,
   onAddConnection,
+  onConfigChange,
   onContentChange,
   onDeleteSelected,
   onDisconnectNode,
@@ -166,6 +208,7 @@ export function InfiniteCanvasSurface({
   onSelectNodes,
   onToggleNodeSelection,
   onUndo,
+  onSurfaceSizeChange,
   onViewportChange,
 }: InfiniteCanvasSurfaceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -173,10 +216,10 @@ export function InfiniteCanvasSurface({
   const dragRef = useRef<DragState | null>(null);
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 });
   const [selectionRect, setSelectionRect] = useState<CanvasSelectionRect | null>(null);
-  const [guides, setGuides] = useState<CanvasGuide[]>([]);
   const [connectionPreview, setConnectionPreview] = useState<{ from: CanvasPoint; to: CanvasPoint } | null>(null);
   const [connectionMenu, setConnectionMenu] = useState<ConnectionMenuState | null>(null);
   const [contextMenu, setContextMenu] = useState<CanvasContextMenuState | null>(null);
+  const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
   const addConnectedNodeRef = useRef(onAddConnectedNode);
   const addConnectionRef = useRef(onAddConnection);
   const nodesRef = useRef(state.nodes);
@@ -265,7 +308,10 @@ export function InfiniteCanvasSurface({
   ]);
 
   useEffect(() => {
-    const handlePointerMove = (event: PointerEvent) => {
+    let pendingPointerMove: PointerEvent | null = null;
+    let pointerMoveRafId: number | null = null;
+
+    const processPointerMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) {
         return;
@@ -316,6 +362,7 @@ export function InfiniteCanvasSurface({
         stationaryNodes: drag.stationaryNodes,
         delta: rawDelta,
         threshold: snapThreshold / viewportRef.current.k,
+        precomputedStationary: drag.precomputedStationary,
       });
 
       drag.lastPositions = Object.fromEntries(
@@ -344,10 +391,36 @@ export function InfiniteCanvasSurface({
         conn.hitElement.setAttribute("d", d);
       });
 
-      setGuides(snapped.guides);
+      const guidesEl = getGuidesContainer();
+      if (guidesEl) renderGuidesToDOM(guidesEl, snapped.guides);
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      pendingPointerMove = event;
+      if (pointerMoveRafId === null) {
+        pointerMoveRafId = requestAnimationFrame(() => {
+          pointerMoveRafId = null;
+          if (pendingPointerMove) {
+            processPointerMove(pendingPointerMove);
+            pendingPointerMove = null;
+          }
+        });
+      }
+    };
+
+    const flushPendingPointerMove = () => {
+      if (pointerMoveRafId !== null) {
+        cancelAnimationFrame(pointerMoveRafId);
+        pointerMoveRafId = null;
+      }
+      if (pendingPointerMove) {
+        processPointerMove(pendingPointerMove);
+        pendingPointerMove = null;
+      }
     };
 
     const handlePointerUp = (event: PointerEvent) => {
+      flushPendingPointerMove();
       const drag = dragRef.current;
       if (drag?.type === "canvas") {
         viewportChangeRef.current(getCanvasViewport());
@@ -369,7 +442,8 @@ export function InfiniteCanvasSurface({
           moveNodesRef.current(finalPositions);
         }
         finalizeHistoryBatchRef.current();
-        setGuides([]);
+        const guidesEl2 = getGuidesContainer();
+        if (guidesEl2) clearGuidesDOM(guidesEl2);
       }
       if (drag?.type === "selection") {
         const rect = containerRef.current?.getBoundingClientRect();
@@ -377,6 +451,9 @@ export function InfiniteCanvasSurface({
           const endWorld = getWorldPoint(event, rect, viewportRef.current);
           const finalRect = createSelectionRect(drag.startWorld, endWorld);
           selectNodesRef.current(getNodesInSelectionRect(nodesRef.current, finalRect));
+        } else {
+          selectNodeRef.current(null);
+          selectConnectionRef.current(null);
         }
         setSelectionRect(null);
       }
@@ -418,6 +495,9 @@ export function InfiniteCanvasSurface({
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
+      if (pointerMoveRafId !== null) {
+        cancelAnimationFrame(pointerMoveRafId);
+      }
     };
   }, []);
 
@@ -450,7 +530,8 @@ export function InfiniteCanvasSurface({
           });
         }
         dragRef.current = null;
-        setGuides([]);
+        const guidesEl3 = getGuidesContainer();
+        if (guidesEl3) clearGuidesDOM(guidesEl3);
         setSelectionRect(null);
         setConnectionPreview(null);
         setConnectionMenu(null);
@@ -528,7 +609,12 @@ export function InfiniteCanvasSurface({
       return;
     }
 
-    const preventDocumentScroll = (event: globalThis.WheelEvent) => event.preventDefault();
+    const preventDocumentScroll = (event: globalThis.WheelEvent) => {
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+    };
     container.addEventListener("wheel", preventDocumentScroll, { passive: false });
     return () => container.removeEventListener("wheel", preventDocumentScroll);
   }, []);
@@ -541,12 +627,13 @@ export function InfiniteCanvasSurface({
 
     const updateSize = () => {
       const rect = container.getBoundingClientRect();
-      setSurfaceSize((current) => (
-        current.width === rect.width && current.height === rect.height
-          ? current
-          : { width: rect.width, height: rect.height }
-      ));
-    };
+        setSurfaceSize((current) => (
+          current.width === rect.width && current.height === rect.height
+            ? current
+            : { width: rect.width, height: rect.height }
+        ));
+        onSurfaceSizeChange?.({ width: rect.width, height: rect.height });
+      };
 
     updateSize();
 
@@ -558,7 +645,7 @@ export function InfiniteCanvasSurface({
     const observer = new ResizeObserver(() => updateSize());
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [onSurfaceSizeChange]);
 
   const pinnedNodeIds = useMemo(() => {
     const ids = new Set<string>(state.selectedNodeIds);
@@ -584,12 +671,26 @@ export function InfiniteCanvasSurface({
     [state.connections, visibleNodes],
   );
 
+  const configUpstreamSummaries = useMemo(() => {
+    const summaries = new Map<string, ReturnType<typeof summarizeCanvasUpstream>>();
+    visibleNodes.forEach((node) => {
+      if (node.type === "config") {
+        summaries.set(node.id, summarizeCanvasUpstream(state, node.id));
+      }
+    });
+    return summaries;
+  }, [state, visibleNodes]);
+
   const canvasLayerBounds = useMemo(
     () => getCanvasLayerBounds(visibleNodes, 160),
     [visibleNodes],
   );
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
+    if (!shouldHandleCanvasWheel(event.target)) {
+      return;
+    }
+
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) {
       return;
@@ -613,10 +714,6 @@ export function InfiniteCanvasSurface({
   }
 
   function handleCanvasPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) {
-      return;
-    }
-
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("[data-node-id],[data-connection-id],button,textarea,input,select")) {
       return;
@@ -624,9 +721,23 @@ export function InfiniteCanvasSurface({
 
     setConnectionMenu(null);
     setContextMenu(null);
+    const intent = getCanvasSurfacePointerIntent({
+      button: event.button,
+      interactionMode,
+      shiftKey: event.shiftKey,
+    });
+    if (intent === "ignore") {
+      return;
+    }
+    if (intent === "clear-selection") {
+      selectNodeRef.current(null);
+      selectConnectionRef.current(null);
+      return;
+    }
+
     event.currentTarget.setPointerCapture(event.pointerId);
 
-    if (event.shiftKey) {
+    if (intent === "selection") {
       const rect = event.currentTarget.getBoundingClientRect();
       const startWorld = getWorldPoint(event, rect, viewportRef.current);
       dragRef.current = {
@@ -772,6 +883,7 @@ export function InfiniteCanvasSurface({
       });
     });
 
+    const stationaryNodes = nodesRef.current.filter((item) => !selectedNodeIdSet.has(item.id));
     dragRef.current = {
       type: "node",
       nodeIds: selectedNodeIds,
@@ -779,7 +891,8 @@ export function InfiniteCanvasSurface({
       startY: event.clientY,
       initialPositions: getNodePositions(movingNodes),
       movingNodes,
-      stationaryNodes: nodesRef.current.filter((item) => !selectedNodeIdSet.has(item.id)),
+      stationaryNodes,
+      precomputedStationary: precomputeStationaryAnchors(stationaryNodes),
       nodeElements,
       affectedConnections,
       lastPositions: getNodePositions(movingNodes),
@@ -824,7 +937,8 @@ export function InfiniteCanvasSurface({
     dragRef.current = null;
     setConnectionMenu(null);
     setConnectionPreview(null);
-    setGuides([]);
+    const guidesEl4 = getGuidesContainer();
+    if (guidesEl4) clearGuidesDOM(guidesEl4);
     setSelectionRect(null);
     selectNodeRef.current(nodeId);
     setContextMenu({
@@ -834,13 +948,23 @@ export function InfiniteCanvasSurface({
     });
   }
 
+  function handleNodeImageFileChange(nodeId: string, file: File) {
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    if (!node || node.type !== "image") {
+      return;
+    }
+
+    imageFileDropRef.current(file, node.position, node.id);
+  }
+
   function handleConnectionContextMenu(connectionId: string, event: ReactMouseEvent<SVGPathElement>) {
     event.preventDefault();
     event.stopPropagation();
     dragRef.current = null;
     setConnectionMenu(null);
     setConnectionPreview(null);
-    setGuides([]);
+    const guidesEl5 = getGuidesContainer();
+    if (guidesEl5) clearGuidesDOM(guidesEl5);
     setSelectionRect(null);
     selectConnectionRef.current(connectionId);
     setContextMenu({
@@ -865,14 +989,15 @@ export function InfiniteCanvasSurface({
   }
 
   return (
-    <div
-      ref={containerRef}
-      data-cola-canvas-layer="surface"
-      data-cola-drop-target="canvas-image-file"
-      className="absolute inset-0 cursor-grab overflow-hidden"
-      onDragOver={handleCanvasDragOver}
-      onDrop={handleCanvasDrop}
-      onPointerDown={handleCanvasPointerDown}
+      <div
+        ref={containerRef}
+        data-cola-canvas-layer="surface"
+        data-cola-canvas-mode={interactionMode}
+        data-cola-drop-target="canvas-image-file"
+        className={`absolute inset-0 ${getCanvasSurfaceCursor(interactionMode)} overflow-hidden`}
+        onDragOver={handleCanvasDragOver}
+        onDrop={handleCanvasDrop}
+        onPointerDown={handleCanvasPointerDown}
       onWheel={handleWheel}
     >
       <div
@@ -896,15 +1021,22 @@ export function InfiniteCanvasSurface({
             key={node.id}
             node={node}
             selected={state.selectedNodeIds.includes(node.id)}
+            upstreamSummary={configUpstreamSummaries.get(node.id) ?? null}
             onConnectionStart={handleConnectionStart}
+            onConfigChange={onConfigChange}
             onContentChange={onContentChange}
             onContextMenu={handleNodeContextMenu}
+            onInfoOpen={(nodeId) => {
+              selectNodeRef.current(nodeId);
+              setInfoNodeId(nodeId);
+            }}
+            onImageFileChange={handleNodeImageFileChange}
             onOpenGeneration={onOpenGeneration}
             onPointerDown={handleNodePointerDown}
             onRetryGeneration={(nodeId) => retryGenerationRef.current(nodeId)}
           />
         ))}
-        <CanvasGuides connectionPreview={connectionPreview} guides={guides} selectionRect={selectionRect} />
+        <CanvasGuides connectionPreview={connectionPreview} selectionRect={selectionRect} />
       </div>
       {connectionMenu ? (
         <CanvasConnectionMenu
@@ -954,6 +1086,18 @@ export function InfiniteCanvasSurface({
             setContextMenu(null);
           }}
         />
+      ) : null}
+      {infoNodeId ? (
+        (() => {
+          const infoNode = state.nodes.find((node) => node.id === infoNodeId);
+          return infoNode ? (
+            <CanvasNodeInfoDialog
+              node={infoNode}
+              upstreamSummary={summarizeCanvasUpstream(state, infoNode.id)}
+              onClose={() => setInfoNodeId(null)}
+            />
+          ) : null;
+        })()
       ) : null}
     </div>
   );

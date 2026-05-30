@@ -18,6 +18,7 @@ from services.log_service import log_service
 from services.proxy_service import test_proxy
 from services.auth_service import auth_service
 from services.register_service import register_service
+from services.signed_url_service import verify_signed_url
 from services.system_status_service import dashboard_payload, healthz_payload, livez_payload, readyz_payload
 
 
@@ -359,6 +360,23 @@ def create_router(app_version: str) -> APIRouter:
         identity = require_identity(authorization)
         return get_image_download_response(image_path, identity)
 
+    @router.get("/public-images/{image_path:path}", include_in_schema=False)
+    async def get_public_image(image_path: str, expires: int = 0, signature: str = ""):
+        """
+        公开图片访问端点（带签名验证）
+
+        允许通过签名 URL 临时访问图片，无需认证。
+        签名和过期时间由后端生成，确保安全性。
+        """
+        if not signature or not expires:
+            raise HTTPException(status_code=400, detail="missing signature or expires parameter")
+
+        if not verify_signed_url(image_path, expires, signature):
+            raise HTTPException(status_code=403, detail="invalid or expired signature")
+
+        # 签名验证通过，返回图片（无需身份验证）
+        return get_image_download_response(image_path, identity=None)
+
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -378,6 +396,31 @@ def create_router(app_version: str) -> APIRouter:
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         return get_image_download_response(image_path, identity)
+
+    @router.get("/api/images/url/{image_path:path}")
+    async def get_image_url_endpoint(image_path: str, request: Request, authorization: str | None = Header(default=None)):
+        """
+        获取图片的签名 URL
+
+        返回包含原始 URL 和签名 URL 的 JSON 对象，
+        前端可以优先使用签名 URL 进行快速访问。
+        """
+        from services.signed_url_service import generate_signed_image_url
+
+        identity = require_identity(authorization)
+        # 验证用户有权限访问这张图片
+        from services.image_service import require_image_access
+        require_image_access(identity, image_path)
+
+        # 生成签名 URL
+        base_url = resolve_image_base_url(request)
+        signed_url = generate_signed_image_url(image_path, base_url, expires_in=3600)
+
+        return {
+            "url": f"/images/{image_path}",
+            "signed_url": signed_url,
+            "expires_in": 3600
+        }
 
     @router.get("/api/logs")
     async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):

@@ -12,6 +12,7 @@ import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
   { href: "/dashboard", label: "仪表盘" },
+  { href: "/ColaAI", label: "ColaAI" },
   { href: "/studio", label: "创作台" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
@@ -21,6 +22,7 @@ const adminNavItems = [
 ];
 
 const userNavItems = [
+  { href: "/ColaAI", label: "ColaAI" },
   { href: "/studio", label: "创作台" },
   { href: "/chat", label: "对话" },
 ];

@@ -6,13 +6,17 @@ import { CanvasConnectionMenu } from "./canvas-connection-menu";
 import { CanvasContextMenu } from "./canvas-context-menu";
 import { CanvasGenerationPanel } from "./canvas-generation-panel";
 import { CanvasGuides } from "./canvas-guides";
+import { createBlankCanvasState } from "./canvas-home-state";
+import { CANVAS_SHORTCUTS, CanvasMinimapPanel } from "./canvas-minimap-panel";
 import { CanvasNode } from "./canvas-node";
+import { CanvasNodeInfoDialog } from "./canvas-node-info-dialog";
 import { CanvasNodeInspector } from "./canvas-node-inspector";
 import { CanvasToolbar } from "./canvas-toolbar";
+import { getCanvasSurfaceCursor, getCanvasSurfacePointerIntent, shouldHandleCanvasWheel } from "./infinite-canvas-surface";
 import { resetCanvasViewport, setCanvasViewport } from "./canvas-viewport-store";
 import { getCanvasLayerBounds } from "./canvas-visibility";
-import { summarizeCanvasUpstream } from "./canvas-workflow";
-import { CanvasWorkspace } from "./canvas-workspace";
+import { collectCanvasContinuationSettings, getCanvasContinuationInputCounts, summarizeCanvasUpstream } from "./canvas-workflow";
+import { CanvasWorkspace, findOpenCanvasNodePosition, getCanvasContinuationPanelPrompt, getCanvasGenerationLaunchIntent, getCanvasGenerationPanelConfigTargetId } from "./canvas-workspace";
 import { CanvasZoomControls } from "./canvas-zoom-controls";
 import { createInitialCanvasState } from "./use-canvas-store";
 
@@ -46,6 +50,97 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain("参考图片");
     expect(markup).toContain("生成配置");
     expect(markup).toContain("AI 生图结果");
+    expect(markup).toContain('data-cola-node-layout="inline-generation-config"');
+    expect(markup).toContain("生图");
+    expect(markup).toContain("文本");
+    expect(markup).toContain("视频");
+    expect(markup).toContain("提示词 1 个");
+    expect(markup).toContain("参考图 0 张");
+    expect(markup).toContain("预览");
+    expect(markup).toContain("自动 · 1张");
+    expect(markup).toContain('data-cola-action="canvas-config-model"');
+    expect(markup).toContain('data-cola-action="canvas-config-settings"');
+    expect(markup).toContain("开始生成");
+  });
+
+  test("renders canvas config node choices from the ColaAI generate controls", () => {
+    const state = createInitialCanvasState();
+    const configNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      metadata: {
+        prompt: "生成一组视觉方向。",
+        model: "codex-gpt-image-2",
+        size: "16:9",
+        count: 3,
+        status: "idle" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={configNode}
+        selected
+        onConfigChange={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("codex-gpt-image-2");
+    expect(markup).toContain("16:9 · 3张");
+    expect(markup).toContain('data-cola-action="canvas-config-model"');
+    expect(markup).toContain('data-cola-action="canvas-config-settings"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).not.toContain('data-cola-panel="canvas-config-model-options"');
+    expect(markup).not.toContain('data-cola-panel="canvas-config-generation-settings"');
+  });
+
+  test("renders config node input counters from actual upstream canvas links", () => {
+    const state = createInitialCanvasState();
+    const emptyReferenceMarkup = renderToStaticMarkup(
+      <CanvasWorkspace onBack={() => undefined} initialState={state} />,
+    );
+
+    expect(emptyReferenceMarkup).toContain("提示词 1 个");
+    expect(emptyReferenceMarkup).toContain("参考图 0 张");
+
+    const stateWithReferenceImage = {
+      ...state,
+      nodes: state.nodes.map((node) =>
+        node.id === "seed-image"
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+                status: "success" as const,
+              },
+            }
+          : node,
+      ),
+    };
+    const linkedMarkup = renderToStaticMarkup(
+      <CanvasWorkspace onBack={() => undefined} initialState={stateWithReferenceImage} />,
+    );
+
+    expect(linkedMarkup).toContain("提示词 1 个");
+    expect(linkedMarkup).toContain("参考图 1 张");
+    expect(linkedMarkup).not.toContain("参考图 0 张");
+
+    const configNode = state.nodes.find((node) => node.id === "seed-config")!;
+    const isolatedMarkup = renderToStaticMarkup(
+      <CanvasWorkspace
+        onBack={() => undefined}
+        initialState={{
+          ...state,
+          nodes: [{ ...configNode, id: "isolated-config", position: { x: 260, y: 180 } }],
+          connections: [],
+        }}
+      />,
+    );
+
+    expect(isolatedMarkup).toContain("提示词 0 个");
+    expect(isolatedMarkup).toContain("参考图 0 张");
   });
 
   test("renders nodes with drag-friendly styling instead of animated transforms", () => {
@@ -60,8 +155,203 @@ describe("ColaAI canvas components", () => {
       />,
     );
 
+    expect(markup).toContain('data-cola-node-surface="studio-card"');
+    expect(markup).toContain('data-cola-node-header="true"');
+    expect(markup).toContain('data-cola-node-icon-tone="text"');
     expect(markup).toContain("transition-shadow");
     expect(markup).not.toContain("backdrop-blur-xl");
+  });
+
+  test("uses text node title and instructional placeholder for new text nodes", () => {
+    const state = createInitialCanvasState();
+    const textNode = {
+      ...state.nodes[0],
+      title: "文本节点",
+      metadata: { content: "" },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={textNode}
+        selected={false}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("文本节点");
+    expect(markup).toContain("双击编辑创意提示词。");
+    expect(markup).not.toContain("双击编辑文字");
+  });
+
+  test("clips long text node content inside the node bounds", () => {
+    const state = createInitialCanvasState();
+    const textNode = {
+      ...state.nodes[0],
+      metadata: { content: "芙莉莲".repeat(80) },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={textNode}
+        selected
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-node-content="text-preview"');
+    expect(markup).toContain("max-h-[calc(100%-58px)]");
+    expect(markup).toContain("overflow-hidden");
+    expect(markup).toContain("break-words");
+    expect(markup).toContain("[overflow-wrap:anywhere]");
+  });
+
+  test("ignores wheel events from editable canvas targets so text editing can scroll locally", () => {
+    const textarea = { closest: () => ({ tagName: "TEXTAREA" }) } as unknown as EventTarget;
+    const input = { closest: () => ({ tagName: "INPUT" }) } as unknown as EventTarget;
+    const canvasArea = { closest: () => null } as unknown as EventTarget;
+
+    expect(shouldHandleCanvasWheel(textarea)).toBe(false);
+    expect(shouldHandleCanvasWheel(input)).toBe(false);
+    expect(shouldHandleCanvasWheel(canvasArea)).toBe(true);
+  });
+
+  test("keeps node properties hidden until the node info action is used", () => {
+    const state = createInitialCanvasState();
+    const configNode = state.nodes.find((node) => node.id === "seed-config")!;
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={configNode}
+        selected
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-node-layout="inline-generation-config"');
+    expect(markup).toContain('data-cola-action="inline-config-start-generation"');
+    expect(markup).not.toContain('data-cola-panel="canvas-node-property-popover"');
+    expect(markup).not.toContain('data-cola-panel="canvas-node-inline-config"');
+  });
+
+  test("renders a hover info action for text nodes without default properties", () => {
+    const state = createInitialCanvasState();
+    const textNode = state.nodes.find((node) => node.id === "seed-text")!;
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={textNode}
+        selected={false}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-node-toolbar="true"');
+    expect(markup).toContain('data-cola-action="show-node-info"');
+    expect(markup).toContain("group");
+    expect(markup).not.toContain('data-cola-panel="canvas-node-property-popover"');
+    expect(markup).not.toContain('data-cola-panel="canvas-node-inline-config"');
+  });
+
+  test("renders node info as a centered dialog with outside-click close support", () => {
+    const state = createInitialCanvasState();
+    const textNode = state.nodes.find((node) => node.id === "seed-text")!;
+    const markup = renderToStaticMarkup(
+      <CanvasNodeInfoDialog
+        node={textNode}
+        upstreamSummary={summarizeCanvasUpstream(state, textNode.id)}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-panel="canvas-node-property-popover"');
+    expect(markup).toContain('data-cola-backdrop="node-info"');
+    expect(markup).toContain('data-cola-wheel-local="true"');
+    expect(markup).toContain('data-cola-action="node-info-tab"');
+    expect(markup).toContain('data-cola-action="node-json-tab"');
+    expect(markup).toContain('data-cola-action="close-node-info"');
+    expect(markup).toContain("fixed inset-0");
+    expect(markup).toContain("items-center justify-center");
+    expect(markup).toContain("overscroll-contain");
+    expect(markup).toContain("节点信息");
+    expect(markup).toContain("ID");
+    expect(markup).toContain("text");
+    expect(markup).toContain("280 x 170");
+    expect(markup).toContain("160, 170");
+    expect(markup).toContain("提示词");
+    expect(markup).not.toContain("提示词内容");
+  });
+
+  test("renders the minimap as a compact light ColaAI canvas control stack", () => {
+    const state = createInitialCanvasState();
+    const markup = renderToStaticMarkup(
+      <CanvasMinimapPanel
+        nodes={state.nodes}
+        selectedNodeIds={["seed-config"]}
+        onFitView={() => undefined}
+        onViewportChange={() => undefined}
+        onZoomIn={() => undefined}
+        onZoomOut={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-panel="canvas-minimap"');
+    expect(markup).toContain('data-cola-control-surface="studio-map"');
+    expect(markup).toContain('data-cola-minimap-card="true"');
+    expect(markup).toContain('data-cola-zoom-controls="true"');
+    expect(markup).toContain('data-cola-action="toggle-minimap"');
+    expect(markup).toContain('data-cola-action="show-shortcuts"');
+    expect(markup).not.toContain('data-cola-shortcuts-dialog="true"');
+    expect(markup).not.toContain('data-cola-canvas-status="true"');
+    expect(markup).toContain("w-[248px]");
+    expect(markup).toContain("min-w-[48px]");
+    expect(markup).toContain("w-[248px]");
+    expect(markup).toContain("bg-white/92");
+    expect(markup).toContain("隐藏小地图");
+    expect(markup).toContain("快捷键");
+    expect(markup).toContain('data-cola-minimap-selected="true"');
+    expect(markup).not.toContain("bg-[#11161d]/92");
+  });
+
+  test("uses the actual canvas interactions in the shortcut help", () => {
+    expect(CANVAS_SHORTCUTS).toEqual([
+      { key: "指针工具 + 拖拽", description: "框选节点" },
+      { key: "手型工具 + 拖拽", description: "移动画布" },
+      { key: "滚轮", description: "缩放视图" },
+      { key: "Shift + 拖拽", description: "框选节点" },
+      { key: "Delete / Backspace", description: "删除选中" },
+      { key: "Ctrl / Cmd + Z", description: "撤销" },
+      { key: "Ctrl / Cmd + Shift + Z", description: "重做" },
+      { key: "Ctrl / Cmd + A", description: "全选节点" },
+      { key: "Ctrl / Cmd + D", description: "复制选中" },
+      { key: "方向键", description: "微移选中" },
+      { key: "Shift + 方向键", description: "快速微移" },
+      { key: "Esc", description: "取消操作" },
+    ]);
+  });
+
+  test("keeps a far-panned viewport visible inside the minimap bounds", () => {
+    const state = createInitialCanvasState();
+    setCanvasViewport({ x: -2600, y: -2200, k: 1 });
+    const markup = renderToStaticMarkup(
+      <CanvasMinimapPanel
+        nodes={state.nodes}
+        selectedNodeIds={[]}
+        onFitView={() => undefined}
+        onViewportChange={() => undefined}
+        onZoomIn={() => undefined}
+        onZoomOut={() => undefined}
+      />,
+    );
+
+    const viewportRect = markup.match(/data-cola-minimap-viewport="true"[^>]*data-cola-minimap-x="([^"]+)"[^>]*data-cola-minimap-y="([^"]+)"/);
+    expect(viewportRect).not.toBeNull();
+    const [, x, y] = viewportRect ?? ["", "999", "999"];
+    expect(Number(x)).toBeLessThanOrEqual(224);
+    expect(Number(y)).toBeLessThanOrEqual(128);
   });
 
   test("renders node connector handles for workflow linking", () => {
@@ -141,6 +431,34 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain("contain:strict");
   });
 
+  test("uses double click upload for image nodes instead of the corner generation button", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={imageNode}
+        selected
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onImageFileChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-action="double-click-upload-image"');
+    expect(markup).toContain('data-cola-image-upload-surface="true"');
+    expect(markup).toContain('data-cola-image-upload-icon="true"');
+    expect(markup).toContain('data-cola-node-hint="double-click-upload"');
+    expect(markup).toContain('aria-label="双击上传图片"');
+    expect(markup).toContain("双击上传图片");
+    expect(markup).toContain("参考图会跟随画布链路进入继续生成");
+    expect(markup).not.toContain("空图片节点");
+    expect(markup).toContain('accept="image/*"');
+    expect(markup).not.toContain('aria-label="基于节点继续生成"');
+    expect(markup).not.toContain('title="继续生成"');
+  });
+
   test("renders connection layer with GPU compositing hint", () => {
     const state = createInitialCanvasState();
     const bounds = getCanvasLayerBounds(state.nodes);
@@ -154,6 +472,8 @@ describe("ColaAI canvas components", () => {
       />,
     );
     expect(markup).toContain("translateZ(0)");
+    expect(markup).not.toContain("stroke-dasharray");
+    expect(markup).not.toContain("strokeDasharray");
   });
 
   test("renders video placeholder nodes without enabling generation", () => {
@@ -313,11 +633,26 @@ describe("ColaAI canvas components", () => {
 
   test("renders the selected node inspector with upstream context", () => {
     const state = createInitialCanvasState();
-    const selectedNode = state.nodes.find((node) => node.id === "seed-config")!;
+    const stateWithReferenceImage = {
+      ...state,
+      nodes: state.nodes.map((node) =>
+        node.id === "seed-image"
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+                status: "success" as const,
+              },
+            }
+          : node,
+      ),
+    };
+    const selectedNode = stateWithReferenceImage.nodes.find((node) => node.id === "seed-config")!;
     const markup = renderToStaticMarkup(
       <CanvasNodeInspector
         node={selectedNode}
-        upstreamSummary={summarizeCanvasUpstream(state, selectedNode.id)}
+        upstreamSummary={summarizeCanvasUpstream(stateWithReferenceImage, selectedNode.id)}
         onConfigChange={() => undefined}
         onContentChange={() => undefined}
         onImageChange={() => undefined}
@@ -440,29 +775,21 @@ describe("ColaAI canvas components", () => {
         <CanvasToolbar
           canDelete
           canGenerate
+          interactionMode="pointer"
+          canOrganize
           canRedo
           canUndo
           onAddConfig={() => undefined}
           onAddImage={() => undefined}
           onAddText={() => undefined}
           onDelete={() => undefined}
+          onInteractionModeChange={() => undefined}
           onOpenGeneration={() => undefined}
+          onOrganize={() => undefined}
           onRedo={() => undefined}
           onUndo={() => undefined}
         />
         <CanvasZoomControls onFitView={() => undefined} onZoomIn={() => undefined} onZoomOut={() => undefined} />
-        <CanvasGenerationPanel
-          open
-          selectedNode={state.nodes[2]}
-          prompt="基于参考图继续生成"
-          model="gpt-image-2"
-          size="1:1"
-          count={1}
-          submitting={false}
-          onChange={() => undefined}
-          onClose={() => undefined}
-          onSubmit={() => undefined}
-        />
       </div>,
     );
 
@@ -470,14 +797,66 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain('data-cola-state="selected-connection"');
     expect(markup).toContain("pointer-events:stroke");
     expect(markup).toContain('data-cola-panel="canvas-toolbar"');
+    expect(markup).toContain('data-cola-toolbar-style="studio-dock"');
+    expect(markup).toContain('data-cola-toolbar-group="navigation"');
+    expect(markup).toContain('data-cola-toolbar-group="create"');
+    expect(markup).toContain('data-cola-toolbar-group="actions"');
+    expect(markup).toContain('data-cola-action="canvas-tool-pointer"');
+    expect(markup).toContain('data-cola-action="canvas-tool-hand"');
     expect(markup).toContain('data-cola-action="undo-canvas"');
     expect(markup).toContain('data-cola-action="redo-canvas"');
     expect(markup).toContain('data-cola-action="add-config-node"');
     expect(markup).toContain('data-cola-panel="canvas-zoom-controls"');
-    expect(markup).toContain('data-cola-panel="canvas-generation-panel"');
-    expect(markup).toContain("继续生成");
+    expect(markup).not.toContain('data-cola-panel="canvas-generation-panel"');
     expect(markup).toContain("91%");
-    expect(markup).toContain("基于参考图继续生成");
+  });
+
+  test("renders the right-side generation panel with ColaAI generate choices", () => {
+    const state = createInitialCanvasState();
+    const markup = renderToStaticMarkup(
+      <CanvasGenerationPanel
+        open
+        selectedNode={state.nodes[2]}
+        prompt="基于参考图继续生成"
+        model="auto"
+        size="16:9"
+        count={3}
+        submitting={false}
+        onChange={() => undefined}
+        onClose={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-panel="canvas-generation-panel"');
+    expect(markup).toContain('data-cola-panel-style="studio-inspector"');
+    expect(markup).toContain('data-cola-generation-section="summary"');
+    expect(markup).toContain('data-cola-generation-section="prompt"');
+    expect(markup).toContain('data-cola-generation-section="parameters"');
+    expect(markup).toContain('data-cola-generation-section="footer"');
+    expect(markup).toContain("生成配置");
+    expect(markup).toContain("Auto");
+    expect(markup).toContain("gpt-image-2");
+    expect(markup).toContain("codex-gpt-image-2");
+    expect(markup).toContain("9:16");
+    expect(markup).toContain("2:3");
+    expect(markup).toContain("1:1");
+    expect(markup).toContain("3:2");
+    expect(markup).toContain("16:9");
+    expect(markup).toContain("3张");
+    expect(markup).toContain("16:9 · 3张");
+    expect(markup).toContain('data-cola-action="canvas-generation-model-trigger"');
+    expect(markup).toContain('data-cola-generation-model-menu="true"');
+    expect(markup).toContain('data-cola-generation-model-option="gpt-image-2"');
+    expect(markup).toContain("开始生成");
+    expect(markup).toContain("bg-white/96");
+    expect(markup).toContain("sticky bottom-0");
+    expect(markup).toContain("grid-cols-3");
+    expect(markup).not.toContain("<select");
+    expect(markup).not.toContain("延续 ColaAI 当前主题，只重组生图配置结构。");
+    expect(markup).not.toContain("rounded-[28px]");
+    expect(markup).not.toContain("bg-white/90");
+    expect(markup).not.toContain("bg-slate-950 p-1");
   });
 
   test("does not render the generation panel when closed", () => {
@@ -503,14 +882,13 @@ describe("ColaAI canvas components", () => {
   test("renders interaction guides and marquee selection overlay", () => {
     const markup = renderToStaticMarkup(
       <CanvasGuides
-        guides={[{ axis: "vertical", position: 240, start: 120, end: 420 }]}
         connectionPreview={{ from: { x: 100, y: 120 }, to: { x: 280, y: 190 } }}
         selectionRect={{ left: 80, top: 90, right: 360, bottom: 260 }}
       />,
     );
 
     expect(markup).toContain('data-cola-canvas-layer="interaction-guides"');
-    expect(markup).toContain('data-cola-canvas-guide="vertical"');
+    expect(markup).toContain('data-cola-guides-container="true"');
     expect(markup).toContain('data-cola-canvas-connection-preview="true"');
     expect(markup).toContain('data-cola-canvas-selection="marquee"');
   });
@@ -519,14 +897,153 @@ describe("ColaAI canvas components", () => {
     const markup = renderToStaticMarkup(<CanvasWorkspace onBack={() => undefined} />);
 
     expect(markup).toContain('data-cola-panel="canvas-workspace"');
-    expect(markup).toContain('data-cola-canvas="immersive-light"');
+    expect(markup).toContain('data-cola-canvas="floating-studio-light"');
+    expect(markup).toContain('data-cola-canvas-bg="studio-grid"');
+    expect(markup).toContain('data-cola-panel="canvas-topbar"');
+    expect(markup).not.toContain('data-cola-action="canvas-primary-generate"');
     expect(markup).toContain('data-cola-canvas-layer="surface"');
+    expect(markup).toContain('data-cola-canvas-mode="pointer"');
     expect(markup).toContain('data-cola-drop-target="canvas-image-file"');
     expect(markup).toContain('data-cola-panel="canvas-toolbar"');
-    expect(markup).toContain('data-cola-panel="canvas-zoom-controls"');
-    expect(markup).toContain('data-cola-action="canvas-ai-entry"');
+    expect(markup).toContain('data-cola-panel="canvas-minimap"');
+    expect(markup).not.toContain('data-cola-panel="canvas-node-inspector"');
+    expect(markup).not.toContain('data-cola-action="canvas-ai-entry"');
     expect(markup).toContain("未命名画布");
     expect(markup).toContain("创意提示词");
     expect(markup).toContain("生成配置");
+  });
+
+  test("renders a guided starter state when the canvas is blank", () => {
+    const markup = renderToStaticMarkup(
+      <CanvasWorkspace onBack={() => undefined} initialState={createBlankCanvasState()} />,
+    );
+
+    expect(markup).toContain('data-cola-panel="canvas-empty-state"');
+    expect(markup).toContain("从第一个节点开始");
+    expect(markup).toContain('data-cola-action="canvas-empty-add-text"');
+    expect(markup).toContain('data-cola-action="canvas-empty-add-image"');
+    expect(markup).toContain('data-cola-action="canvas-empty-add-config"');
+    expect(markup).toContain('data-cola-action="canvas-empty-back-home"');
+    expect(markup).not.toContain("创意提示词");
+  });
+
+  test("uses pointer mode by default and routes blank-area drags into marquee selection", () => {
+    expect(getCanvasSurfacePointerIntent({ button: 0, interactionMode: "pointer", shiftKey: false })).toBe("selection");
+    expect(getCanvasSurfacePointerIntent({ button: 0, interactionMode: "hand", shiftKey: false })).toBe("canvas");
+    expect(getCanvasSurfacePointerIntent({ button: 0, interactionMode: "pointer", shiftKey: true })).toBe("selection");
+    expect(getCanvasSurfacePointerIntent({ button: 2, interactionMode: "hand", shiftKey: false })).toBe("ignore");
+  });
+
+  test("maps canvas cursor styling to the active interaction mode", () => {
+    expect(getCanvasSurfaceCursor("pointer")).toBe("cursor-default");
+    expect(getCanvasSurfaceCursor("hand")).toBe("cursor-grab");
+  });
+
+  test("finds an open position for newly created canvas nodes instead of stacking them", () => {
+    const viewport = { x: 0, y: 0, k: 1 };
+    const surfaceSize = { width: 1200, height: 800 };
+    const firstPosition = findOpenCanvasNodePosition([], viewport, surfaceSize, { width: 280, height: 170 });
+    const secondPosition = findOpenCanvasNodePosition(
+      [
+        {
+          id: "first-new-text",
+          type: "text",
+          title: "文本节点",
+          position: firstPosition,
+          width: 280,
+          height: 170,
+        },
+      ],
+      viewport,
+      surfaceSize,
+      { width: 280, height: 170 },
+    );
+
+    expect(secondPosition).not.toEqual(firstPosition);
+    expect(secondPosition.x).toBeGreaterThanOrEqual(firstPosition.x + 280);
+  });
+
+  test("clears the continuation prompt when continuing from an existing generation image", () => {
+    const state = createInitialCanvasState();
+    const generationNode = {
+      ...state.nodes.find((node) => node.id === "seed-generation")!,
+      metadata: {
+        prompt: "旧提示词",
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+
+    expect(getCanvasContinuationPanelPrompt(generationNode, "旧提示词", "备用提示词")).toBe("");
+  });
+
+  test("routes config generation directly while generation results open the continuation panel", () => {
+    const state = createInitialCanvasState();
+    const configNode = state.nodes.find((node) => node.id === "seed-config")!;
+    const generationNode = {
+      ...state.nodes.find((node) => node.id === "seed-generation")!,
+      metadata: {
+        prompt: "旧提示词",
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+
+    expect(getCanvasGenerationLaunchIntent(configNode)).toBe("submit");
+    expect(getCanvasGenerationLaunchIntent(generationNode)).toBe("panel");
+  });
+
+  test("counts continuation inputs from the current generated image and newly linked prompts", () => {
+    const state = createInitialCanvasState();
+    const generationNode = {
+      ...state.nodes.find((node) => node.id === "seed-generation")!,
+      metadata: {
+        prompt: "旧提示词",
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+    const nextPromptNode = {
+      ...state.nodes.find((node) => node.id === "seed-text")!,
+      id: "next-prompt",
+      title: "续写提示词",
+      metadata: {
+        content: "保留主体，换成晨光玻璃质感。",
+      },
+    };
+    const continuationState = {
+      ...state,
+      nodes: [
+        ...state.nodes.filter((node) => node.id !== "seed-generation"),
+        generationNode,
+        nextPromptNode,
+      ],
+      connections: [
+        ...state.connections,
+        { id: "next-prompt-to-generation", fromNodeId: nextPromptNode.id, toNodeId: generationNode.id },
+      ],
+    };
+
+    expect(getCanvasContinuationInputCounts(continuationState, generationNode.id, "")).toEqual({
+      promptCount: 1,
+      referenceCount: 1,
+    });
+    expect(collectCanvasContinuationSettings(continuationState, generationNode.id, "", {
+      prompt: "",
+      model: "gpt-image-2",
+      size: "1:1",
+      count: 1,
+    })).toMatchObject({
+      prompt: "保留主体，换成晨光玻璃质感。",
+      referenceImages: [{ nodeId: generationNode.id, title: generationNode.title, imageUrl: generationNode.metadata.imageUrl }],
+    });
+  });
+
+  test("syncs right-side generation panel changes only back to config nodes", () => {
+    const state = createInitialCanvasState();
+
+    expect(getCanvasGenerationPanelConfigTargetId(state.nodes, "seed-config")).toBe("seed-config");
+    expect(getCanvasGenerationPanelConfigTargetId(state.nodes, "seed-image")).toBeNull();
+    expect(getCanvasGenerationPanelConfigTargetId(state.nodes, null)).toBeNull();
   });
 });

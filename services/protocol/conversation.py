@@ -141,6 +141,11 @@ def is_unusable_image_account_error(message: str) -> bool:
     )
 
 
+def is_retryable_image_connection_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return "curl: (35)" in text or "tls connect error" in text or "openssl_internal" in text
+
+
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_usage_limit_error(text):
@@ -148,7 +153,7 @@ def image_stream_error_message(message: str) -> str:
     lower = text.lower()
     if is_checkout_required_error(text):
         return "上游返回 ChatGPT Plus 结账页，当前账号不能生成图片。请换可生成图片的账号，或给账号开通 Plus 后重试。"
-    if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
+    if is_retryable_image_connection_error(lower):
         return "upstream image connection failed, please retry later"
     return text or "image generation failed"
 
@@ -1147,6 +1152,16 @@ def _stream_single_image_outputs_with_pool(
             if not emitted_for_token and is_unusable_image_account_error(last_error):
                 account_service.remove_unusable_image_token(token, "image_unusable", last_error)
                 try_register_after_first_failure("unusable_image_account")
+                continue
+            if not emitted_for_token and is_retryable_image_connection_error(last_error):
+                account_service.mark_image_result(token, False)
+                logger.warning({
+                    "event": "image_stream_retryable_connection_error",
+                    "request_token": token,
+                    "attempted_tokens": len(attempted_tokens),
+                    "error": last_error,
+                })
+                try_register_after_first_failure("connection_error")
                 continue
             account_service.mark_image_result(token, False)
             if try_register_after_first_failure("image_stream_error"):

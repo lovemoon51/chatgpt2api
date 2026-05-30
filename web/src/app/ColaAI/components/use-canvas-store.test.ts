@@ -29,8 +29,10 @@ import {
   selectNodes,
   toggleNodeSelection,
   updateImageNode,
+  updateGenerationNodePayload,
   updateGenerationTaskNode,
   updateGenerationNodeRetrying,
+  updateConfigNode,
   updateNodeContent,
   updateViewport,
 } from "./use-canvas-store";
@@ -81,6 +83,7 @@ describe("use-canvas-store helpers", () => {
     const deleted = deleteSelected(moved);
 
     expect(textNode.title).toBe("文本节点");
+    expect(textNode.metadata?.content).toBe("双击编辑创意提示词。");
     expect(deselected.selectedNodeIds).toEqual([textNode.id]);
     expect(reselected.selectedNodeIds).toEqual([textNode.id, imageNode.id]);
     expect(moved.nodes.find((node) => node.id === textNode.id)?.metadata?.content).toBe("新的提示词内容");
@@ -103,9 +106,25 @@ describe("use-canvas-store helpers", () => {
     const connected = addConnection(withConfig, imageNode.id, configNode.id);
 
     expect(configNode.type).toBe("config");
-    expect(configNode.metadata?.model).toBe("gpt-image-2");
+    expect(configNode.metadata?.model).toBe("auto");
+    expect(configNode.metadata?.size).toBe("智能");
     expect(configNode.metadata?.count).toBe(1);
     expect(connected.connections.some((connection) => connection.fromNodeId === imageNode.id && connection.toNodeId === configNode.id)).toBe(true);
+  });
+
+  test("updates config node generation choices inline", () => {
+    const state = createInitialCanvasState();
+    const updated = updateConfigNode(state, "seed-config", {
+      model: "codex-gpt-image-2",
+      size: "16:9",
+      count: 3,
+    });
+    const configNode = updated.nodes.find((node) => node.id === "seed-config")!;
+
+    expect(configNode.metadata?.model).toBe("codex-gpt-image-2");
+    expect(configNode.metadata?.size).toBe("16:9");
+    expect(configNode.metadata?.count).toBe(3);
+    expect(configNode.metadata?.prompt).toBe("读取上游文本和参考图后生成图片。");
   });
 
   test("updates image node reference data from the node inspector", () => {
@@ -190,6 +209,39 @@ describe("use-canvas-store helpers", () => {
     expect(retryingNode.metadata?.status).toBe("error");
     expect(retryingNode.metadata?.errorDetails).toBe("提交失败");
     expect(retryingNode.metadata?.retrying).toBe(true);
+  });
+
+  test("updates an existing generation node payload without appending a retry result node", () => {
+    const state = createInitialCanvasState();
+    const configNode = state.nodes.find((node) => node.type === "config")!;
+    const failed = appendGenerationNode(state, configNode.id, {
+      imageUrl: "",
+      prompt: "霓虹城市猫咪",
+      sourceTaskId: "task-1",
+      status: "error",
+      errorDetails: "提交失败",
+      attempt: 1,
+    });
+    const failedNode = failed.nodes.at(-1)!;
+    const updated = updateGenerationNodePayload(failed, failedNode.id, {
+      imageUrl: "/api/images/retry-result.png",
+      prompt: "霓虹城市猫咪",
+      sourceTaskId: "task-2",
+      status: "success",
+      model: "gpt-image-2",
+      size: "1:1",
+      attempt: 2,
+    });
+    const sameNode = updated.nodes.find((node) => node.id === failedNode.id)!;
+
+    expect(updated.nodes).toHaveLength(failed.nodes.length);
+    expect(updated.connections).toHaveLength(failed.connections.length);
+    expect(sameNode.metadata?.imageUrl).toBe("/api/images/retry-result.png");
+    expect(sameNode.metadata?.sourceTaskId).toBe("task-2");
+    expect(sameNode.metadata?.status).toBe("success");
+    expect(sameNode.metadata?.errorDetails).toBeUndefined();
+    expect(sameNode.metadata?.attempt).toBe(2);
+    expect(updated.selectedNodeIds).toEqual([failedNode.id]);
   });
 
   test("stacks multiple generation nodes near the source node without overlap", () => {
@@ -321,6 +373,26 @@ describe("use-canvas-store helpers", () => {
 
     expect(loaded?.viewport).toEqual({ x: -40, y: 18, k: 1.25 });
     expect(loaded?.title).toBe("未命名画布");
+  });
+
+  test("normalizes stored config nodes to the compact inline generation card size", () => {
+    const storage = createMemoryStorage();
+    const state = createInitialCanvasState();
+    const legacyState = {
+      ...state,
+      nodes: state.nodes.map((node) => (
+        node.type === "config"
+          ? { ...node, width: 250, height: 186 }
+          : node
+      )),
+    };
+
+    saveCanvasState(storage, legacyState);
+    const loaded = loadCanvasState(storage);
+    const configNode = loaded?.nodes.find((node) => node.type === "config");
+
+    expect(configNode?.width).toBe(430);
+    expect(configNode?.height).toBe(260);
   });
 
   test("undoes and redoes recordable canvas history mutations", () => {

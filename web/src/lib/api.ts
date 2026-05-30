@@ -287,7 +287,7 @@ export type SystemLog = {
 
 export type ImageResponse = {
   created: number;
-  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data: Array<{ b64_json?: string; url?: string; signed_url?: string; revised_prompt?: string }>;
 };
 
 export type ImageTask = {
@@ -312,7 +312,7 @@ export type ImageTask = {
   duration_ms?: number;
   queue_duration_ms?: number;
   total_duration_ms?: number;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data?: Array<{ b64_json?: string; url?: string; signed_url?: string; revised_prompt?: string }>;
   error?: string;
 };
 
@@ -325,6 +325,85 @@ export type ImageTaskTimingPayload = {
   timing_key: string;
   duration_ms: number;
   phase?: string;
+};
+
+export type PromptTemplateVisibility = "private" | "public";
+export type PromptTemplateReviewStatus = "draft" | "pending" | "approved" | "rejected";
+export type PromptTemplateScope = "public" | "private" | "favorites" | "submissions" | "review";
+
+export type PromptTemplatePreviewImage = {
+  url: string;
+  thumbnail_url?: string;
+  source_image_id?: string;
+};
+
+export type PromptTemplate = {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  model: string;
+  size: string;
+  count: number;
+  tags: string[];
+  preview_image: PromptTemplatePreviewImage;
+  owner_id: string;
+  owner_name: string;
+  visibility: PromptTemplateVisibility;
+  review_status: PromptTemplateReviewStatus;
+  review_reason?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  created_at: string;
+  updated_at: string;
+  is_favorited?: boolean;
+};
+
+export type PromptTemplateInput = {
+  title: string;
+  description?: string;
+  prompt: string;
+  model?: string;
+  size?: string;
+  count?: number;
+  tags?: string[];
+  preview_image?: PromptTemplatePreviewImage;
+  visibility?: PromptTemplateVisibility;
+};
+
+export type PromptTemplateReviewInput = {
+  action: "approve" | "reject";
+  reason?: string;
+};
+
+export type PromptTemplateApplyPayload = {
+  prompt: string;
+  model: string;
+  size: string;
+  count: number;
+};
+
+export type PromptTemplateListFilters = {
+  scope?: PromptTemplateScope;
+  q?: string;
+  tag?: string;
+  status?: PromptTemplateReviewStatus | "";
+};
+
+export type PromptTemplateStats = {
+  public: number;
+  private: number;
+  favorites: number;
+  submissions: number;
+  review?: number;
+};
+
+type PromptTemplateListResponse = {
+  items: PromptTemplate[];
+};
+
+type PromptTemplateMutationResponse = {
+  item: PromptTemplate;
 };
 
 export type LoginResponse = {
@@ -927,6 +1006,60 @@ export async function reportImageTaskTiming(taskId: string, payload: ImageTaskTi
       body: payload,
     },
   );
+}
+
+export async function fetchPromptTemplates(filters: PromptTemplateListFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.scope) params.set("scope", filters.scope);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.status) params.set("status", filters.status);
+  return httpRequest<PromptTemplateListResponse>(
+    `/api/prompt-templates${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+}
+
+export async function fetchPromptTemplateStats() {
+  return httpRequest<PromptTemplateStats>("/api/prompt-templates/stats");
+}
+
+export async function createPromptTemplate(payload: PromptTemplateInput) {
+  return httpRequest<PromptTemplateMutationResponse>("/api/prompt-templates", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function updatePromptTemplate(id: string, payload: Partial<PromptTemplateInput>) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: payload,
+  });
+}
+
+export async function deletePromptTemplate(id: string) {
+  return httpRequest<{ ok: boolean }>(`/api/prompt-templates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function favoritePromptTemplate(id: string) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}/favorite`, {
+    method: "POST",
+  });
+}
+
+export async function unfavoritePromptTemplate(id: string) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}/favorite`, {
+    method: "DELETE",
+  });
+}
+
+export async function reviewPromptTemplate(id: string, payload: PromptTemplateReviewInput) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}/review`, {
+    method: "POST",
+    body: payload,
+  });
 }
 
 export async function fetchSettingsConfig() {

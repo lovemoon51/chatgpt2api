@@ -20,6 +20,9 @@ const maxZoom = 4;
 const persistenceDelayMs = 180;
 const duplicateOffset = { x: 48, y: 48 };
 const maxHistoryEntries = 80;
+export const configNodeWidth = 430;
+export const configNodeHeight = 260;
+export type CanvasConfigPatch = Partial<Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count">>;
 
 export type CanvasHistoryState = {
   past: CanvasState[];
@@ -200,12 +203,12 @@ export function createInitialCanvasState(): CanvasState {
     type: "config",
     title: "生成配置",
     position: { x: 860, y: 230 },
-    width: 250,
-    height: 186,
+    width: configNodeWidth,
+    height: configNodeHeight,
     metadata: {
       prompt: "读取上游文本和参考图后生成图片。",
-      model: "gpt-image-2",
-      size: "1:1",
+      model: "auto",
+      size: "智能",
       count: 1,
       status: "idle",
     },
@@ -292,15 +295,39 @@ function createConfigNode(position: CanvasPoint): CanvasNodeData {
     type: "config",
     title: "生成配置",
     position,
-    width: 250,
-    height: 186,
+    width: configNodeWidth,
+    height: configNodeHeight,
     metadata: {
       prompt: "整合上游节点后生成图片。",
-      model: "gpt-image-2",
-      size: "1:1",
+      model: "auto",
+      size: "智能",
       count: 1,
       status: "idle",
     },
+  };
+}
+
+export function normalizeCanvasNode(node: CanvasNodeData): CanvasNodeData {
+  if (node.type !== "config") {
+    return node;
+  }
+
+  const isOversizedInlineConfig = node.width > configNodeWidth || node.height > configNodeHeight;
+  if (!isOversizedInlineConfig && node.width >= configNodeWidth && node.height >= configNodeHeight) {
+    return node;
+  }
+
+  return {
+    ...node,
+    width: configNodeWidth,
+    height: configNodeHeight,
+  };
+}
+
+export function normalizeCanvasState(state: CanvasState): CanvasState {
+  return {
+    ...state,
+    nodes: state.nodes.map(normalizeCanvasNode),
   };
 }
 
@@ -581,7 +608,7 @@ export function updateImageNode(
 export function updateConfigNode(
   state: CanvasState,
   nodeId: string,
-  patch: Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count">,
+  patch: CanvasConfigPatch,
 ): CanvasState {
   return touch({
     ...state,
@@ -747,6 +774,41 @@ export function appendGenerationNode(state: CanvasState, sourceNodeId: string, p
   }, [node.id]));
 }
 
+export function updateGenerationNodePayload(
+  state: CanvasState,
+  nodeId: string,
+  payload: CanvasGenerationPayload,
+): CanvasState {
+  let updated = false;
+  const nodes = state.nodes.map((node) => {
+    if (node.id !== nodeId || node.type !== "generation") {
+      return node;
+    }
+    updated = true;
+    return {
+      ...node,
+      metadata: {
+        ...node.metadata,
+        content: payload.prompt,
+        imageUrl: payload.imageUrl,
+        prompt: payload.prompt,
+        sourceTaskId: payload.sourceTaskId,
+        status: payload.status || (payload.imageUrl ? "success" : "idle"),
+        errorDetails: payload.errorDetails,
+        model: payload.model,
+        size: payload.size,
+        attempt: payload.attempt,
+      },
+    };
+  });
+
+  if (!updated) {
+    return state;
+  }
+
+  return touch(withNodeSelection({ ...state, nodes }, [nodeId]));
+}
+
 export function updateGenerationTaskNode(
   state: CanvasState,
   sourceTaskId: string,
@@ -829,7 +891,7 @@ export function loadCanvasState(storage: CanvasStorageLike): CanvasState | null 
         ? [parsed.selectedNodeId]
         : [];
 
-    return {
+    return normalizeCanvasState({
       title: parsed.title || "未命名画布",
       nodes: parsed.nodes,
       connections: parsed.connections,
@@ -838,7 +900,7 @@ export function loadCanvasState(storage: CanvasStorageLike): CanvasState | null 
       selectedNodeId: selectedNodeIds[0] ?? null,
       selectedConnectionId: parsed.selectedConnectionId ?? null,
       updatedAt: parsed.updatedAt || now(),
-    };
+    });
   } catch {
     return null;
   }
@@ -848,9 +910,12 @@ export function saveCanvasState(storage: CanvasStorageLike, state: CanvasState) 
   storage.setItem(COLA_CANVAS_STORAGE_KEY, JSON.stringify(state));
 }
 
-export function useCanvasStore() {
+export function useCanvasStore(initialStateOverride?: CanvasState) {
   const [history, setHistory] = useState<CanvasHistoryState>(() => {
     const initialState = (() => {
+      if (initialStateOverride) {
+        return normalizeCanvasState(initialStateOverride);
+      }
       if (typeof window === "undefined") {
         return createInitialCanvasState();
       }
@@ -944,6 +1009,8 @@ export function useCanvasStore() {
         applyRecordableMutation((current) => addConnectedNode(current, fromNodeId, nodeType, position)),
       appendGenerationNode: (sourceNodeId: string, payload: CanvasGenerationPayload) =>
         applyRecordableMutation((current) => appendGenerationNode(current, sourceNodeId, payload)),
+      updateGenerationNodePayload: (nodeId: string, payload: CanvasGenerationPayload) =>
+        updateCurrentState((current) => updateGenerationNodePayload(current, nodeId, payload)),
       deleteSelected: () => applyRecordableMutation((current) => deleteSelected(current)),
       disconnectNode: (nodeId: string) => applyRecordableMutation((current) => disconnectNode(current, nodeId)),
       duplicateSelectedNodes: () => applyRecordableMutation((current) => duplicateSelectedNodes(current)),
@@ -963,7 +1030,7 @@ export function useCanvasStore() {
       toggleNodeSelection: (nodeId: string) => applyTransientMutation((current) => toggleNodeSelection(current, nodeId)),
       updateConfigNode: (
         nodeId: string,
-        patch: Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count">,
+        patch: CanvasConfigPatch,
       ) => applyRecordableMutation((current) => updateConfigNode(current, nodeId, patch)),
       updateGenerationTaskNode: (
         sourceTaskId: string,
@@ -978,6 +1045,7 @@ export function useCanvasStore() {
       updateNodeContent: (nodeId: string, content: string) => applyRecordableMutation((current) => updateNodeContent(current, nodeId, content)),
       updateViewport: (viewport: CanvasViewport) => {
         setCanvasViewport(viewport);
+        updateCurrentState((current) => updateViewport(current, viewport));
       },
       undo,
       redo,

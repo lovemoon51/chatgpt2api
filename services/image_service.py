@@ -201,7 +201,10 @@ def get_thumbnail_response(relative_path: str, identity: dict[str, object] | Non
 
 
 def get_image_download_response(relative_path: str, identity: dict[str, object] | None = None) -> FileResponse:
-    require_image_access(identity, relative_path)
+    # 如果 identity 不为 None，则进行权限检查
+    # 如果 identity 为 None，说明是通过签名 URL 访问，跳过权限检查
+    if identity is not None:
+        require_image_access(identity, relative_path)
     path = _safe_image_path(relative_path)
     return FileResponse(path, filename=path.name)
 

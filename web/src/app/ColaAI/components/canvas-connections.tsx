@@ -80,9 +80,8 @@ function CanvasConnectionsComponent({
               d={path}
               fill="none"
               stroke={selected ? "#7c3aed" : "#a78bfa"}
-              strokeDasharray={selected ? "0" : "7 9"}
               strokeLinecap="round"
-              strokeOpacity={selected ? 0.95 : 0.74}
+              strokeOpacity={selected ? 0.95 : 0.82}
               strokeWidth={selected ? 3 : 2}
               className="pointer-events-none"
             />

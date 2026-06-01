@@ -944,6 +944,42 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
+export type ImageDescriptionResult = {
+  description?: string;
+  tags?: string[];
+  prompt?: string;
+  analysis?: {
+    subject?: string;
+    scene?: string;
+    lighting?: string;
+    style?: string;
+    composition?: string;
+    [key: string]: string | undefined;
+  };
+};
+
+export async function createImageDescriptionTask(
+  clientTaskId: string,
+  file: File,
+  prompt?: string,
+  model?: ImageModel,
+) {
+  const formData = new FormData();
+  formData.append("image", file);
+  formData.append("client_task_id", clientTaskId);
+  if (prompt) {
+    formData.append("prompt", prompt);
+  }
+  if (model) {
+    formData.append("model", model);
+  }
+
+  return httpRequest<ImageTask>("/api/image-tasks/descriptions", {
+    method: "POST",
+    body: formData,
+  });
+}
+
 export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",

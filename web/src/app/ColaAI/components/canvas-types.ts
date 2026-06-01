@@ -25,12 +25,12 @@ export type CanvasNodeMetadata = {
     tags?: string[];
     prompt?: string;
     analysis?: {
-      subject?: string;
-      scene?: string;
-      lighting?: string;
-      style?: string;
-      composition?: string;
-      [key: string]: string | undefined;
+      subject: string;
+      scene: string;
+      lighting: string;
+      style: string;
+      composition: string;
+      [key: string]: string;
     };
   };
   model?: "gpt-image-2" | "codex-gpt-image-2" | string;

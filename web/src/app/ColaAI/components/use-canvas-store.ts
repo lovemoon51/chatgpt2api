@@ -22,6 +22,13 @@ const duplicateOffset = { x: 48, y: 48 };
 const maxHistoryEntries = 80;
 export const configNodeWidth = 430;
 export const configNodeHeight = 260;
+export const imageReversePromptInstruction = "根据图片生成结构化中文提示词，包括主体描述、环境、光影、镜头语言、风格关键词。";
+const adaptiveImageVerticalPadding = 32;
+const adaptiveImageHorizontalPadding = 32;
+const adaptiveImageMinWidth = 260;
+const adaptiveImageMaxWidth = 420;
+const adaptiveImageMinHeight = 150;
+const adaptiveImageMaxHeight = 440;
 export type CanvasConfigPatch = Partial<Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count">>;
 
 export type CanvasHistoryState = {
@@ -50,6 +57,28 @@ function createId(prefix: string) {
 
 function touch(state: CanvasState): CanvasState {
   return { ...state, updatedAt: now() };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function getImageAdaptiveNodeSize(naturalWidth: number, naturalHeight: number) {
+  if (!Number.isFinite(naturalWidth) || !Number.isFinite(naturalHeight) || naturalWidth <= 0 || naturalHeight <= 0) {
+    return { width: 280, height: 220 };
+  }
+
+  const ratio = naturalWidth / naturalHeight;
+  const preferredImageArea = ratio >= 1 ? 68000 : 76000;
+  const rawImageWidth = Math.sqrt(preferredImageArea * ratio);
+  const imageWidth = clamp(rawImageWidth, adaptiveImageMinWidth, adaptiveImageMaxWidth);
+  const imageSlotWidth = Math.max(1, imageWidth - adaptiveImageHorizontalPadding);
+  const imageHeight = clamp(imageSlotWidth / ratio, adaptiveImageMinHeight, adaptiveImageMaxHeight);
+
+  return {
+    width: Math.round(imageWidth),
+    height: Math.round(imageHeight + adaptiveImageVerticalPadding),
+  };
 }
 
 function uniqueNodeIds(nodeIds: string[]) {
@@ -282,6 +311,119 @@ function createImageNode(input: { position: CanvasPoint; imageUrl: string; title
       status: input.imageUrl ? "success" : "idle",
     },
   };
+}
+
+export function startImageReversePrompt(state: CanvasState, textNodeId: string): CanvasState {
+  const textNode = state.nodes.find((node) => node.id === textNodeId && node.type === "text");
+  if (!textNode) {
+    return state;
+  }
+
+  const existingReferenceIds = textNode.metadata?.referenceImageNodeIds ?? [];
+  const existingReferenceNodes = existingReferenceIds
+    .map((nodeId) => state.nodes.find((node) => node.id === nodeId && node.type === "image"))
+    .filter((node): node is CanvasNodeData => Boolean(node));
+  const referenceNode = existingReferenceNodes[0] ?? createImageNode({
+    position: {
+      x: textNode.position.x - 240 - 72,
+      y: textNode.position.y,
+    },
+    imageUrl: "",
+    title: "反推参考图",
+  });
+  const referenceNodeIds = uniqueNodeIds([referenceNode.id, ...existingReferenceNodes.map((node) => node.id)]);
+  const hasReferenceNode = state.nodes.some((node) => node.id === referenceNode.id);
+  const hasConnection = state.connections.some(
+    (connection) => connection.fromNodeId === referenceNode.id && connection.toNodeId === textNode.id,
+  );
+
+  return touch(withNodeSelection({
+    ...state,
+    nodes: [
+      ...state.nodes.map((node) =>
+        node.id === textNode.id
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                content: imageReversePromptInstruction,
+                promptMode: "imageReverse" as const,
+                referenceImageNodeIds: referenceNodeIds,
+              },
+            }
+          : node,
+      ),
+      ...(hasReferenceNode ? [] : [referenceNode]),
+    ],
+    connections: hasConnection
+      ? state.connections
+      : [
+          ...state.connections,
+          {
+            id: createId("connection"),
+            fromNodeId: referenceNode.id,
+            toNodeId: textNode.id,
+          },
+        ],
+  }, [textNode.id]));
+}
+
+export function startImageToText(state: CanvasState, textNodeId: string): CanvasState {
+  const textNode = state.nodes.find((node) => node.id === textNodeId && node.type === "text");
+  if (!textNode) {
+    return state;
+  }
+
+  const existingReferenceIds = textNode.metadata?.referenceImageNodeIds ?? [];
+  const existingReferenceNodes = existingReferenceIds
+    .map((nodeId) => state.nodes.find((node) => node.id === nodeId && node.type === "image"))
+    .filter((node): node is CanvasNodeData => Boolean(node));
+  const referenceNode = existingReferenceNodes[0] ?? createImageNode({
+    position: {
+      x: textNode.position.x - 240 - 72,
+      y: textNode.position.y,
+    },
+    imageUrl: "",
+    title: "图生文参考图",
+  });
+  const referenceNodeIds = uniqueNodeIds([referenceNode.id, ...existingReferenceNodes.map((node) => node.id)]);
+  const hasReferenceNode = state.nodes.some((node) => node.id === referenceNode.id);
+  const hasConnection = state.connections.some(
+    (connection) => connection.fromNodeId === referenceNode.id && connection.toNodeId === textNode.id,
+  );
+
+  return touch(withNodeSelection({
+    ...state,
+    nodes: [
+      ...state.nodes.map((node) =>
+        node.id === textNode.id
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                content: "正在分析图片，请稍候...",
+                promptMode: "imageToText" as const,
+                referenceImageNodeIds: referenceNodeIds,
+                status: "loading" as const,
+                errorDetails: undefined,
+                imageTextResult: undefined,
+              },
+            }
+          : node,
+      ),
+      ...(hasReferenceNode ? [] : [referenceNode]),
+    ],
+    connections: hasConnection
+      ? state.connections
+      : [
+          ...state.connections,
+          {
+            id: createId("connection"),
+            fromNodeId: referenceNode.id,
+            toNodeId: textNode.id,
+          },
+        ],
+  }, [textNode.id]));
 }
 
 export function addConfigNode(state: CanvasState, position: CanvasPoint): CanvasState {
@@ -603,6 +745,50 @@ export function updateImageNode(
         : node,
     ),
   });
+}
+
+export function updateNodeImageNaturalSize(
+  state: CanvasState,
+  nodeId: string,
+  naturalWidth: number,
+  naturalHeight: number,
+): CanvasState {
+  if (!Number.isFinite(naturalWidth) || !Number.isFinite(naturalHeight) || naturalWidth <= 0 || naturalHeight <= 0) {
+    return state;
+  }
+
+  let updated = false;
+  const adaptiveSize = getImageAdaptiveNodeSize(naturalWidth, naturalHeight);
+  const nodes = state.nodes.map((node) => {
+    if (node.id !== nodeId || !["generation", "image"].includes(node.type)) {
+      return node;
+    }
+    if (
+      node.width === adaptiveSize.width &&
+      node.height === adaptiveSize.height &&
+      node.metadata?.imageNaturalWidth === naturalWidth &&
+      node.metadata?.imageNaturalHeight === naturalHeight
+    ) {
+      return node;
+    }
+    updated = true;
+    return {
+      ...node,
+      width: adaptiveSize.width,
+      height: adaptiveSize.height,
+      metadata: {
+        ...node.metadata,
+        imageNaturalWidth: naturalWidth,
+        imageNaturalHeight: naturalHeight,
+      },
+    };
+  });
+
+  if (!updated) {
+    return state;
+  }
+
+  return touch({ ...state, nodes });
 }
 
 export function updateConfigNode(
@@ -1002,6 +1188,7 @@ export function useCanvasStore(initialStateOverride?: CanvasState) {
       addTextNode: (position: CanvasPoint) => applyRecordableMutation((current) => addTextNode(current, position)),
       addImageNode: (input: { position: CanvasPoint; imageUrl: string; title?: string }) =>
         applyRecordableMutation((current) => addImageNode(current, input)),
+      startImageReversePrompt: (textNodeId: string) => applyRecordableMutation((current) => startImageReversePrompt(current, textNodeId)),
       addConfigNode: (position: CanvasPoint) => applyRecordableMutation((current) => addConfigNode(current, position)),
       addVideoNode: (position: CanvasPoint) => applyRecordableMutation((current) => addVideoNode(current, position)),
       addConnection: (fromNodeId: string, toNodeId: string) => applyRecordableMutation((current) => addConnection(current, fromNodeId, toNodeId)),
@@ -1022,6 +1209,8 @@ export function useCanvasStore(initialStateOverride?: CanvasState) {
       nudgeSelectedNodes: (delta: CanvasPoint) => applyRecordableMutation((current) => nudgeSelectedNodes(current, delta)),
       resizeNode: (nodeId: string, width: number, height: number) =>
         applyRecordableMutation((current) => resizeNode(current, nodeId, width, height), { coalesceKey: `resize:${nodeId}` }),
+      updateNodeImageNaturalSize: (nodeId: string, naturalWidth: number, naturalHeight: number) =>
+        updateCurrentState((current) => updateNodeImageNaturalSize(current, nodeId, naturalWidth, naturalHeight)),
       renameNode: (nodeId: string, title: string) => applyRecordableMutation((current) => renameNode(current, nodeId, title)),
       selectAllNodes: () => applyTransientMutation((current) => selectAllNodes(current)),
       selectConnection: (connectionId: string | null) => applyTransientMutation((current) => selectConnection(current, connectionId)),

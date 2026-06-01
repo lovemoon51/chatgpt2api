@@ -6,10 +6,13 @@ import {
   addConnectedNode,
   addConnection,
   addImageNode,
+  startImageReversePrompt,
+  startImageToText,
   addTextNode,
   applyCanvasHistoryMutation,
   addVideoNode,
   appendGenerationNode,
+  getImageAdaptiveNodeSize,
   commitCanvasHistory,
   createInitialCanvasState,
   createInitialCanvasHistory,
@@ -32,6 +35,7 @@ import {
   updateGenerationNodePayload,
   updateGenerationTaskNode,
   updateGenerationNodeRetrying,
+  updateNodeImageNaturalSize,
   updateConfigNode,
   updateNodeContent,
   updateViewport,
@@ -140,6 +144,40 @@ describe("use-canvas-store helpers", () => {
     expect(imageNode.metadata?.status).toBe("success");
   });
 
+  test("starts image reverse prompt mode by creating a left reference image node", () => {
+    const state = addTextNode(createInitialCanvasState(), { x: 520, y: 260 });
+    const textNode = state.nodes.at(-1)!;
+    const updated = startImageReversePrompt(state, textNode.id);
+    const updatedTextNode = updated.nodes.find((node) => node.id === textNode.id)!;
+    const referenceNode = updated.nodes.find((node) => node.id === updatedTextNode.metadata?.referenceImageNodeIds?.[0])!;
+
+    expect(referenceNode.type).toBe("image");
+    expect(referenceNode.title).toBe("反推参考图");
+    expect(referenceNode.position.x).toBeLessThan(textNode.position.x);
+    expect(updated.connections.some((connection) => connection.fromNodeId === referenceNode.id && connection.toNodeId === textNode.id)).toBe(true);
+    expect(updatedTextNode.metadata?.promptMode).toBe("imageReverse");
+    expect(updatedTextNode.metadata?.content).toBe("根据图片生成结构化中文提示词，包括主体描述、环境、光影、镜头语言、风格关键词。");
+    expect(updated.selectedNodeIds).toEqual([textNode.id]);
+  });
+
+  test("starts image-to-text mode by creating a left reference image node", () => {
+    const state = addTextNode(createInitialCanvasState(), { x: 520, y: 260 });
+    const textNode = state.nodes.at(-1)!;
+    const updated = startImageToText(state, textNode.id);
+    const updatedTextNode = updated.nodes.find((node) => node.id === textNode.id)!;
+    const referenceNode = updated.nodes.find((node) => node.id === updatedTextNode.metadata?.referenceImageNodeIds?.[0])!;
+
+    expect(referenceNode.type).toBe("image");
+    expect(referenceNode.title).toBe("图生文参考图");
+    expect(referenceNode.position.x).toBeLessThan(textNode.position.x);
+    expect(updated.connections.some((connection) => connection.fromNodeId === referenceNode.id && connection.toNodeId === textNode.id)).toBe(true);
+    expect(updatedTextNode.metadata?.promptMode).toBe("imageToText");
+    expect(updatedTextNode.metadata?.content).toContain("正在分析图片");
+    expect(updatedTextNode.metadata?.status).toBe("loading");
+    expect(updatedTextNode.metadata?.errorDetails).toBeUndefined();
+    expect(updated.selectedNodeIds).toEqual([textNode.id]);
+  });
+
   test("adds video nodes as a disabled placeholder", () => {
     const state = addVideoNode(createInitialCanvasState(), { x: 320, y: 220 });
     const videoNode = state.nodes.at(-1)!;
@@ -189,6 +227,46 @@ describe("use-canvas-store helpers", () => {
     expect(resultNode.metadata?.attempt).toBe(1);
     expect(generated.connections.some((connection) => connection.fromNodeId === configNode.id && connection.toNodeId === resultNode.id)).toBe(true);
     expect(generated.selectedNodeIds).toEqual([resultNode.id]);
+  });
+
+  test("calculates adaptive generation node sizes from image dimensions", () => {
+    const portrait = getImageAdaptiveNodeSize(1024, 1536);
+    const landscape = getImageAdaptiveNodeSize(1536, 864);
+
+    expect(portrait.width).toBeGreaterThanOrEqual(260);
+    expect(portrait.width).toBeLessThanOrEqual(420);
+    expect(portrait.height).toBeGreaterThan(300);
+    expect(portrait.height).toBeGreaterThan(portrait.width);
+    expect(landscape.width).toBeGreaterThan(280);
+    expect(landscape.height).toBeLessThan(portrait.height);
+  });
+
+  test("sizes generation nodes so the image slot matches the loaded image ratio without legacy header space", () => {
+    const size = getImageAdaptiveNodeSize(1122, 1402);
+    const expectedImageSlotHeight = (size.width - 32) / (1122 / 1402);
+
+    expect(size.height).toBe(Math.round(expectedImageSlotHeight + 32));
+  });
+
+  test("resizes generation nodes to the loaded image aspect ratio", () => {
+    const state = createInitialCanvasState();
+    const configNode = state.nodes.find((node) => node.type === "config")!;
+    const generated = appendGenerationNode(state, configNode.id, {
+      imageUrl: "/api/images/portrait-result.png",
+      prompt: "竖版海报",
+      sourceTaskId: "task-portrait",
+      status: "success",
+      size: "9:16",
+    });
+    const resultNode = generated.nodes.at(-1)!;
+    const resized = updateNodeImageNaturalSize(generated, resultNode.id, 1024, 1536);
+    const resizedNode = resized.nodes.find((node) => node.id === resultNode.id)!;
+
+    expect(resizedNode.width).not.toBe(280);
+    expect(resizedNode.height).not.toBe(220);
+    expect(resizedNode.height).toBeGreaterThan(resizedNode.width);
+    expect(resizedNode.metadata?.imageNaturalWidth).toBe(1024);
+    expect(resizedNode.metadata?.imageNaturalHeight).toBe(1536);
   });
 
   test("marks generation nodes as retrying without changing their failed status", () => {

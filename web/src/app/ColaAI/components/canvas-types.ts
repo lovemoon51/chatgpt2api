@@ -18,6 +18,21 @@ export type CanvasNodeMetadata = {
   content?: string;
   imageUrl?: string;
   prompt?: string;
+  promptMode?: "optimize" | "imageReverse" | "imageToText";
+  referenceImageNodeIds?: string[];
+  imageTextResult?: {
+    description?: string;
+    tags?: string[];
+    prompt?: string;
+    analysis?: {
+      subject?: string;
+      scene?: string;
+      lighting?: string;
+      style?: string;
+      composition?: string;
+      [key: string]: string | undefined;
+    };
+  };
   model?: "gpt-image-2" | "codex-gpt-image-2" | string;
   size?: string;
   count?: number;
@@ -26,6 +41,8 @@ export type CanvasNodeMetadata = {
   errorDetails?: string;
   retrying?: boolean;
   attempt?: number;
+  imageNaturalWidth?: number;
+  imageNaturalHeight?: number;
 };
 
 export type CanvasNodeData = {

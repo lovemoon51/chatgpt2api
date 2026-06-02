@@ -9,7 +9,9 @@ import {
   getCanvasHomeEntries,
   getCanvasHomeSummary,
   getCanvasTemplateCards,
+  deleteCanvasLibraryRecords,
   loadCanvasLibraryState,
+  deleteCanvasLibraryRecord,
   saveCanvasLibraryRecord,
   setActiveCanvasId,
 } from "./canvas-home-state";
@@ -155,6 +157,51 @@ describe("canvas-home-state", () => {
     setActiveCanvasId(storage, "canvas-first");
 
     expect(getCanvasHomeSummary(storage).title).toBe("第一张画布");
+  });
+
+  test("deletes a canvas record and promotes the next record when removing the active one", () => {
+    const storage = createMemoryStorage();
+    saveCanvasLibraryRecord(storage, {
+      ...createBlankCanvasState(),
+      title: "第一张画布",
+      updatedAt: "2026-05-29T08:00:00.000Z",
+    }, { canvasId: "canvas-first" });
+    saveCanvasLibraryRecord(storage, {
+      ...createTemplateCanvasState("poster-concept"),
+      title: "海报画布",
+      updatedAt: "2026-05-29T09:00:00.000Z",
+    }, { canvasId: "canvas-second" });
+
+    setActiveCanvasId(storage, "canvas-first");
+    const nextRecords = deleteCanvasLibraryRecord(storage, "canvas-first");
+
+    expect(nextRecords.map((entry) => entry.id)).toEqual(["canvas-second"]);
+    expect(getActiveCanvasId(storage)).toBe("canvas-second");
+    expect(loadCanvasLibraryState(storage, "canvas-first")).toBeNull();
+  });
+
+  test("deletes multiple canvas records in one pass", () => {
+    const storage = createMemoryStorage();
+    saveCanvasLibraryRecord(storage, {
+      ...createBlankCanvasState(),
+      title: "第一张画布",
+      updatedAt: "2026-05-29T08:00:00.000Z",
+    }, { canvasId: "canvas-first" });
+    saveCanvasLibraryRecord(storage, {
+      ...createTemplateCanvasState("poster-concept"),
+      title: "海报画布",
+      updatedAt: "2026-05-29T09:00:00.000Z",
+    }, { canvasId: "canvas-second" });
+    saveCanvasLibraryRecord(storage, {
+      ...createTemplateCanvasState("brand-board"),
+      title: "品牌画布",
+      updatedAt: "2026-05-29T10:00:00.000Z",
+    }, { canvasId: "canvas-third" });
+
+    const nextRecords = deleteCanvasLibraryRecords(storage, ["canvas-first", "canvas-third"]);
+
+    expect(nextRecords.map((entry) => entry.id)).toEqual(["canvas-second"]);
+    expect(getCanvasHomeEntries(storage).map((entry) => entry.id)).toEqual(["canvas-second"]);
   });
 
   test("creates a blank canvas state with a fresh timestamp and default title", () => {

@@ -2,26 +2,25 @@
 
 import { useEffect, useState } from "react";
 
-import { getValidatedAuthSession } from "@/lib/auth-session";
-import type { StoredAuthSession } from "@/store/auth";
+import { getStoredColaAuthSession, type ColaAuthSession } from "@/store/cola-auth";
 import { ColaAIWorkbench } from "./components/cola-ai-workbench";
 
-const publicPreviewSession: StoredAuthSession = {
+const publicPreviewSession: ColaAuthSession = {
   key: "",
-  role: "user",
+  role: "guest",
   subjectId: "public-preview",
   name: "ColaAI",
 };
 
 export default function ColaAIPage() {
-  const [session, setSession] = useState<StoredAuthSession | null>(null);
+  const [session, setSession] = useState<ColaAuthSession | null>(null);
 
   useEffect(() => {
     let active = true;
 
     const loadSession = async () => {
       try {
-        const storedSession = await getValidatedAuthSession();
+        const storedSession = await getStoredColaAuthSession();
         if (active && storedSession) {
           setSession(storedSession);
         }

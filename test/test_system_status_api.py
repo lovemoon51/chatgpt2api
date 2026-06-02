@@ -399,6 +399,42 @@ class SystemStatusApiTests(unittest.TestCase):
         self.assertEqual(captured["tag"], "pet,orange")
         self.assertEqual(captured["sort"], "+size")
 
+    def test_public_discover_images_endpoint_is_anonymous(self):
+        captured: dict[str, object] = {}
+
+        def fake_public_discover_images(*args, **kwargs):
+            captured["args"] = args
+            captured.update(kwargs)
+            return {
+                "items": [
+                    {
+                        "id": "2026/05/20/public.png",
+                        "title": "公共精选图",
+                        "subtitle": "1024 x 1024",
+                        "prompt": "公共提示词",
+                        "imageUrl": "http://testserver/public-images/2026/05/20/public.png?expires=1&signature=test",
+                        "imageFallbackUrl": "http://testserver/public-images/2026/05/20/public.png?expires=1&signature=test",
+                    }
+                ],
+                "groups": [],
+                "page": 1,
+                "page_size": 12,
+                "pages": 1,
+                "total": 1,
+                "has_more": False,
+            }
+
+        with (
+            mock.patch.object(system_module, "resolve_image_base_url", lambda _request: "http://testserver"),
+            mock.patch.object(system_module, "list_public_discover_images", side_effect=fake_public_discover_images),
+        ):
+            response = self.client.get("/api/public/discover/images?page_size=12")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(captured["args"][0], "http://testserver")
+        self.assertEqual(captured["page_size"], 12)
+        self.assertEqual(response.json()["items"][0]["title"], "公共精选图")
+
 
 if __name__ == "__main__":
     unittest.main()

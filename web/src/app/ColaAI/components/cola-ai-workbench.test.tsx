@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  AssetsWorkspace,
   ColaAIWorkbench,
   CreationFeed,
   GenerateComposer,
@@ -14,6 +18,9 @@ import {
   GenerationStage,
   PromptCardArtwork,
   ReferenceDropOverlay,
+  buildCreations,
+  buildImageReversePromptMessages,
+  buildPromptArchitectMessages,
   promptTemplateToPromptCard,
   shouldUseRemotePromptTemplates,
   clearReferencePreviewUrl,
@@ -21,24 +28,41 @@ import {
   handlePromptComposerKeyDown,
   prependGenerateSession,
 } from "./cola-ai-workbench";
+import { buildLandingHeroItems } from "./cola-ai-landing-hero-state";
 import type { ImageTask, PromptTemplate } from "@/lib/api";
 import type { GenerateTask } from "./generate-task-submission";
-import type { StoredAuthSession } from "@/store/auth";
 import { CanvasWorkspace } from "./canvas-workspace";
 
-const session: StoredAuthSession = {
-  key: "test-key",
-  role: "admin",
-  subjectId: "admin",
-  name: "Cola Tester",
-};
+const testDir = dirname(fileURLToPath(import.meta.url));
+const workbenchSource = readFileSync(join(testDir, "cola-ai-workbench.tsx"), "utf-8");
+const globalsSource = readFileSync(join(testDir, "../../globals.css"), "utf-8");
 
-const publicSession: StoredAuthSession = {
+const session = {
+  key: "test-key",
+  role: "creator",
+  subjectId: "cola-user",
+  name: "Cola Tester",
+} as const;
+
+const publicSession = {
   key: "",
-  role: "user",
+  role: "guest",
   subjectId: "public-preview",
   name: "ColaAI",
-};
+} as const;
+
+function extractSideNavMarkup(markup: string) {
+  const panelMarker = 'data-cola-panel="side-nav"';
+  const markerIndex = markup.indexOf(panelMarker);
+  expect(markerIndex).toBeGreaterThanOrEqual(0);
+
+  const asideStart = markup.lastIndexOf("<aside", markerIndex);
+  const asideEnd = markup.indexOf("</aside>", markerIndex);
+  expect(asideStart).toBeGreaterThanOrEqual(0);
+  expect(asideEnd).toBeGreaterThan(asideStart);
+
+  return markup.slice(asideStart, asideEnd + "</aside>".length);
+}
 
 const successTask: ImageTask = {
   id: "task-success-1",
@@ -64,6 +88,7 @@ const creationFeedItem = {
   subtitle: "1024 x 1024",
   prompt: "复用这张作品的视觉风格继续创作。",
   imageUrl: "/api/images/recent-image-1.png",
+  imageFallbackUrl: "/image-thumbnails/recent-image-1.png",
 };
 
 const promptTemplate: PromptTemplate = {
@@ -108,6 +133,58 @@ const failedTaskWithContext: GenerateTask = {
 };
 
 describe("ColaAIWorkbench", () => {
+  test("builds prompt architect chat messages for canvas text optimization", () => {
+    const messages = buildPromptArchitectMessages("生成一张芙莉莲");
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("专业提示词架构师 Prompt Architect"),
+      }),
+      {
+        role: "user",
+        content: "生成一张芙莉莲",
+      },
+    ]);
+  });
+
+  test("builds image reverse messages with multimodal reference images", () => {
+    const messages = buildImageReversePromptMessages("请反推这张海报", [
+      {
+        title: "海报参考图",
+        imageUrl: "data:image/png;base64,AAA",
+      },
+      {
+        title: "待补图参考",
+        imageUrl: "",
+      },
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("图片提示词反推专家"),
+      }),
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining("请反推这张海报"),
+          },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,AAA" },
+          },
+          {
+            type: "text",
+            text: expect.stringContaining("待补图参考"),
+          },
+        ],
+      },
+    ]);
+  });
+
   test("maps prompt templates into prompt library cards", () => {
     expect(promptTemplateToPromptCard(promptTemplate)).toEqual({
       id: "template-product",
@@ -120,7 +197,7 @@ describe("ColaAIWorkbench", () => {
       category: "产品广告",
       useCase: "适合商品首图",
       previewUrl: "/api/images/template-product.png",
-      previewFallbackUrl: "/api/images/template-product.png",
+      previewFallbackUrl: undefined,
       model: "gpt-image-2",
       count: 2,
     });
@@ -160,6 +237,76 @@ describe("ColaAIWorkbench", () => {
 
     expect(markup).toContain('src="/image-thumbnails/original-template.png"');
     expect(markup).toContain("original-template.png");
+  });
+
+  test("builds recent creations with original images first and thumbnail fallback", () => {
+    expect(buildCreations([
+      {
+        rel: "managed-1",
+        name: "recent-image.png",
+        date: "2026-06-01",
+        size: 1024,
+        url: "/images/recent-image.png",
+        thumbnail_url: "/image-thumbnails/recent-image.png",
+        created_at: "2026-06-01T00:00:00Z",
+        width: 1536,
+        height: 1024,
+      },
+    ])).toEqual([
+      {
+        id: "managed-1",
+        title: "最近创作 1",
+        subtitle: "1536 x 1024",
+        prompt: "复用 recent-image 的视觉风格继续创作。",
+        imageUrl: "/images/recent-image.png",
+        imageFallbackUrl: "/image-thumbnails/recent-image.png",
+      },
+    ]);
+  });
+
+  test("falls back to thumbnails for recent creations when the original image is unavailable", () => {
+    expect(buildCreations([
+      {
+        rel: "managed-2",
+        name: "recent-image.png",
+        date: "2026-06-01",
+        size: 1024,
+        url: "",
+        thumbnail_url: "/image-thumbnails/recent-image.png",
+        created_at: "2026-06-01T00:00:00Z",
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        imageUrl: "/image-thumbnails/recent-image.png",
+        imageFallbackUrl: undefined,
+      }),
+    ]);
+  });
+
+  test("builds a five-item landing dataset from recent managed images", () => {
+    const items = buildLandingHeroItems([
+      {
+        rel: "managed-1",
+        name: "hero-1.png",
+        date: "2026-06-02",
+        size: 1024,
+        url: "/images/hero-1.png",
+        thumbnail_url: "/image-thumbnails/hero-1.png",
+        created_at: "2026-06-02T00:00:00Z",
+      },
+      {
+        rel: "managed-2",
+        name: "hero-2.png",
+        date: "2026-06-02",
+        size: 1024,
+        url: "/images/hero-2.png",
+        created_at: "2026-06-02T00:01:00Z",
+      },
+    ]);
+
+    expect(items).toHaveLength(5);
+    expect(items[0].id).toBe("managed-1");
+    expect(items[1].id).toBe("managed-2");
   });
 
   test("selects the first image file from dragged data", () => {
@@ -223,7 +370,7 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain('data-cola-panel="reference-image-name"');
   });
 
-  test("renders the generation composer as a creative instrument panel", () => {
+  test("renders the generation composer as a clear studio composer", () => {
     const noop = () => {};
     const markup = renderToStaticMarkup(
       <GenerateComposer
@@ -247,11 +394,15 @@ describe("ColaAIWorkbench", () => {
       />,
     );
 
-    expect(markup).toContain('data-cola-design="creative-instrument-panel"');
+    expect(markup).toContain('data-cola-design="clear-studio-composer"');
     expect(markup).toContain('data-cola-panel="reference-material-slot"');
     expect(markup).toContain('data-cola-panel="ratio-count-popover"');
     expect(markup).toContain("创作控制台");
     expect(markup).toContain("size-[60px]");
+    expect(markup).toContain("bg-slate-950");
+    expect(markup).not.toContain('data-cola-design="creative-instrument-panel"');
+    expect(markup).not.toContain('data-cola-effect="shimmer-button"');
+    expect(markup).not.toContain("before:bg-gradient-to-r");
   });
 
   test("renders active generation as a developing studio stage", () => {
@@ -850,7 +1001,7 @@ describe("ColaAIWorkbench", () => {
     };
 
     const markup = renderToStaticMarkup(
-      <TaskQueuePopover open role="admin" tasks={[queuedTask]} onClose={() => {}} />,
+      <TaskQueuePopover open role="creator" tasks={[queuedTask]} onClose={() => {}} />,
     );
 
     expect(markup).toContain('data-cola-panel="task-queue-popover"');
@@ -860,7 +1011,7 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("w-[min(360px,calc(100vw-32px))]");
     expect(markup).toContain("任务队列");
     expect(markup).toContain("1 个任务处理中");
-    expect(markup).toContain("管理员");
+    expect(markup).toContain("创作者");
     expect(markup).toContain("排队中的创意提示词");
     expect(markup).toContain("等待生成");
     expect(markup).not.toContain('role="dialog"');
@@ -906,7 +1057,7 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain("第二组结果");
   });
 
-  test("renders the Rova-style discover home by default", () => {
+  test("renders the clear studio discover home by default", () => {
     const markup = renderToStaticMarkup(<ColaAIWorkbench session={session} />);
 
     expect(markup).toContain("ColaAI");
@@ -920,6 +1071,9 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain('data-cola-behavior="drop-reference-image"');
     expect(markup).toContain('data-cola-drop-target="image-reference"');
     expect(markup).toContain('data-cola-panel="discover-hero"');
+    expect(markup).toContain('data-cola-design="clear-studio"');
+    expect(markup).toContain('data-cola-design="clear-studio-composer"');
+    expect(markup).toContain('data-cola-brand="clear-studio"');
     expect(markup).toContain('data-cola-layout="rova-export-hero"');
     expect(markup).toContain('data-cola-panel="composer"');
     expect(markup).toContain('data-cola-variant="rova-compact-hero"');
@@ -964,15 +1118,18 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain('data-cola-background-tile="media-thumb"');
     expect(markup).not.toContain("mix-blend-soft-light");
     expect(markup).toContain('data-cola-effect="sparkle-text"');
-    expect(markup).toContain('data-cola-effect="shimmer-button"');
+    expect(markup).not.toContain('data-cola-effect="shimmer-button"');
+    expect(markup).not.toContain("font-serif");
+    expect(markup).not.toContain("italic tracking-normal");
     expect(markup).toContain('data-cola-action="submit-generation"');
     expect(markup).toContain('data-cola-action="open-prompt-market"');
     expect(markup).toContain('data-cola-panel="mobile-utility-nav"');
     expect(markup).toContain('data-cola-panel="mobile-more-sheet"');
     expect(markup).toContain('data-cola-rail-label="ColaAI"');
-    expect(markup).toContain('data-cola-effect="line-shadow-logo"');
+    expect(markup).toContain('data-cola-brand="clear-studio"');
+    expect(markup).not.toContain('data-cola-effect="line-shadow-logo"');
     expect(markup).toContain('data-cola-action="toggle-language"');
-    expect(markup).toContain('data-cola-action="open-announcement"');
+    expect(markup).not.toContain('data-cola-action="open-announcement"');
     expect(markup).not.toContain('data-cola-action="open-contact"');
     expect(markup).not.toContain('data-cola-action="open-credits"');
     expect(markup).not.toContain('data-cola-action="open-credit-history"');
@@ -1060,6 +1217,120 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain('data-cola-effect="meteor-field"');
   });
 
+  test("hides the public auth bar after login", () => {
+    const markup = renderToStaticMarkup(<ColaAIWorkbench session={session} />);
+
+    expect(markup).not.toContain('data-cola-panel="public-auth-bar"');
+    expect(markup).not.toContain('href="/login"');
+    expect(markup).not.toContain('href="/register"');
+    expect(markup).not.toContain('href="/ColaAI/login"');
+    expect(markup).not.toContain('href="/ColaAI/register"');
+  });
+
+  test("renders a ColaAI-only top-right login and register entry in public preview", () => {
+    const markup = renderToStaticMarkup(<ColaAIWorkbench session={publicSession} />);
+
+    expect(markup).toContain('data-cola-panel="public-auth-bar"');
+    expect(markup).toContain('data-cola-action="public-login"');
+    expect(markup).toContain('data-cola-action="public-register"');
+    expect(markup).toContain('href="/ColaAI/login"');
+    expect(markup).toContain('href="/ColaAI/register"');
+    expect(markup).not.toContain('href="/login"');
+    expect(markup).not.toContain('href="/register"');
+    expect(markup.indexOf("登录")).toBeLessThan(markup.indexOf("注册"));
+    expect(markup).not.toContain("退出");
+    expect(markup).not.toContain('data-cola-panel="floating-topbar"');
+  });
+
+  test("omits API, duplicate modal announcement, and public login actions from the desktop side rail", () => {
+    const markup = renderToStaticMarkup(<ColaAIWorkbench session={publicSession} />);
+    const sideNavMarkup = extractSideNavMarkup(markup);
+    const announcementMatches = sideNavMarkup.match(/公告/g) ?? [];
+
+    expect(sideNavMarkup).toContain("公告");
+    expect(announcementMatches).toHaveLength(1);
+    expect(sideNavMarkup).toContain("设置");
+    expect(sideNavMarkup).toContain("EN");
+    expect(sideNavMarkup).not.toContain("API");
+    expect(sideNavMarkup).not.toContain('data-cola-action="open-announcement"');
+    expect(sideNavMarkup).not.toContain('data-cola-action="open-login"');
+    expect(sideNavMarkup).not.toContain("登录");
+  });
+
+  test("does not import the shared project auth store or old auth validation", () => {
+    expect(workbenchSource).toContain("@/store/cola-auth");
+    expect(workbenchSource).not.toContain("@/store/auth");
+    expect(workbenchSource).not.toContain('href="/login"');
+    expect(workbenchSource).not.toContain('href="/register"');
+    expect(workbenchSource).not.toContain('window.location.href = "/login"');
+  });
+
+  test("renders the landing hero before discover home in discover mode", () => {
+    const markup = renderToStaticMarkup(<ColaAIWorkbench session={session} />);
+
+    expect(markup).toContain('data-cola-panel="discover-stack"');
+    expect(markup).toContain('data-cola-panel="landing-hero"');
+    expect(markup).toContain('data-cola-scroll-sync="scroll-listener animation-frame"');
+    expect(markup).toContain('data-cola-action="scroll-to-discover"');
+    expect(markup).toContain('data-cola-panel="discover-handoff"');
+    expect(markup).toContain('data-cola-panel="discover-home"');
+    expect(markup.indexOf('data-cola-panel="landing-hero"')).toBeLessThan(
+      markup.indexOf('data-cola-panel="discover-home"'),
+    );
+  });
+
+  test("coalesces landing animation updates into scheduled animation frames", () => {
+    expect(workbenchSource).toContain('window.addEventListener("scroll", scheduleLandingHeroSync');
+    expect(workbenchSource).toContain('window.removeEventListener("scroll", scheduleLandingHeroSync');
+    expect(workbenchSource).toContain('window.addEventListener("resize", syncLandingHeroFromResize');
+    expect(workbenchSource).toContain("window.requestAnimationFrame(syncLandingHeroFrame");
+    expect(workbenchSource).not.toContain("window.setInterval(syncLandingHeroFromScroll");
+    expect(workbenchSource).not.toContain("const landingSyncInterval");
+    expect(workbenchSource).not.toContain("requestAnimationFrame(tick)");
+    expect(workbenchSource).not.toContain('scrollToDiscoverHero(reduceMotion ? "auto" : "smooth")');
+  });
+
+  test("calculates landing orbit card slots once and animates cards with compositor transforms", () => {
+    expect(workbenchSource).toContain("writeLandingHeroOrbitLayout");
+    expect(workbenchSource).toContain("landingHeroGeometryRef");
+    expect(workbenchSource).toContain("ResizeObserver");
+    expect(workbenchSource).toContain("timelineLine.offsetWidth");
+    expect(workbenchSource).toContain("stage.offsetWidth");
+    expect(workbenchSource).toContain("--landing-orbit-one-target-left");
+    expect(workbenchSource).toContain("--landing-orbit-four-target-width");
+    expect(workbenchSource).toContain("setLandingHeroStyleProperty(hero, properties.translateX");
+    expect(workbenchSource).toContain("setLandingHeroStyleProperty(hero, properties.scaleX");
+    expect(workbenchSource).not.toContain("set(properties.left, px(current.left))");
+    expect(workbenchSource).not.toContain("set(properties.top, px(current.top))");
+    expect(workbenchSource).not.toContain("set(properties.width, px(current.width))");
+    expect(workbenchSource).not.toContain("set(properties.height, px(current.height))");
+  });
+
+  test("keeps landing hero scroll styles compositor friendly", () => {
+    expect(globalsSource).toContain("--landing-orbit-one-translate-x");
+    expect(globalsSource).toContain("scale(var(--landing-orbit-one-scale-x), var(--landing-orbit-one-scale-y))");
+    expect(globalsSource).toContain("will-change: transform, opacity");
+    expect(globalsSource).not.toContain("filter: blur(var(--landing-copy-blur))");
+    expect(globalsSource).not.toContain("filter: blur(var(--landing-primary-title-blur))");
+    expect(globalsSource).not.toContain("filter: blur(var(--landing-secondary-title-blur))");
+    expect(globalsSource).not.toContain("filter: blur(var(--landing-core-blur))");
+    expect(globalsSource).not.toContain("filter: blur(0.75rem)");
+  });
+
+  test("keeps the discover sticky composer hidden until the discover hero has scrolled past", () => {
+    expect(workbenchSource).toContain('mode !== "discover"');
+    expect(workbenchSource).toContain("entry.boundingClientRect.bottom <= 80");
+    expect(workbenchSource).not.toContain("setStickyVisible(!entry.isIntersecting)");
+  });
+
+  test("renders the discover handoff markers for landing-to-discover snapping", () => {
+    const markup = renderToStaticMarkup(<ColaAIWorkbench session={publicSession} />);
+
+    expect(markup).toContain('data-cola-behavior="landing-to-discover-flow"');
+    expect(markup).toContain('data-cola-panel="discover-handoff"');
+    expect(markup).toContain('data-cola-state="idle"');
+  });
+
   test("renders AI developing placeholders while the recent creation feed loads", () => {
     const markup = renderToStaticMarkup(
       <CreationFeed
@@ -1122,24 +1393,27 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("creation-scroll-card");
   });
 
-  test("renders the selected Rova textarea composer structure", () => {
+  test("renders the selected clear studio textarea composer structure", () => {
     const markup = renderToStaticMarkup(<ColaAIWorkbench session={session} />);
 
     expect(markup).toContain('data-cola-layout="rova-selected-composer"');
+    expect(markup).toContain('data-cola-design="clear-studio-composer"');
     expect(markup).toContain('data-cola-part="composer-input-panel"');
     expect(markup).toContain('data-cola-part="composer-input-row"');
     expect(markup).toContain('data-cola-part="composer-toolbar"');
     expect(markup).toContain('data-cola-fit="rova-homepage-width"');
     expect(markup).toContain("max-w-[960px]");
-    expect(markup).toContain("rounded-[24px]");
-    expect(markup).toContain("shadow-[0_10px_40px_5px_rgba(194,194,194,0.25)]");
+    expect(markup).toContain("rounded-[20px]");
+    expect(markup).toContain("border-slate-200/80");
+    expect(markup).toContain("bg-white/86");
+    expect(markup).toContain("backdrop-blur-xl");
     expect(markup).toContain("px-5 pt-[18px] pb-2");
     expect(markup).toContain("h-[88px]");
     expect(markup).toContain("gap-3");
     expect(markup).toContain("size-11");
     expect(markup).toContain("border-dashed");
-    expect(markup).toContain("bg-[#f5f5f5]");
-    expect(markup).toContain("text-[#bbbbbb]");
+    expect(markup).toContain("bg-slate-50");
+    expect(markup).toContain("text-slate-400");
     expect(markup).toContain("min-h-[88px]");
     expect(markup).toContain("py-2.5");
     expect(markup).toContain("text-[15px]");
@@ -1153,14 +1427,15 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("max-[520px]:w-full");
     expect(markup).toContain("max-[520px]:justify-between");
     expect(markup).toContain("h-7");
-    expect(markup).toContain("bg-[#1a1a1a]");
+    expect(markup).toContain("bg-slate-950");
     expect(markup).toContain("h-[29px]");
     expect(markup).toContain("text-[#555555]");
     expect(markup).toContain("h-[37px]");
     expect(markup).toContain("rounded-[20px]");
     expect(markup).toContain("px-[22px]");
     expect(markup).toContain("text-[13px]");
-    expect(markup).toContain("bg-[linear-gradient(180deg,#3a3a3a_0%,#1a1a1a_100%)]");
+    expect(markup).not.toContain("bg-[linear-gradient(180deg,#3a3a3a_0%,#1a1a1a_100%)]");
+    expect(markup).not.toContain("shadow-[0_10px_40px_5px_rgba(194,194,194,0.25)]");
   });
 
   test("renders a dedicated generate workspace", () => {
@@ -1269,7 +1544,7 @@ describe("ColaAIWorkbench", () => {
 
     expect(markup).toContain('data-cola-mode="prompts"');
     expect(markup).toContain('data-cola-panel="prompt-library"');
-    expect(markup).toContain('data-cola-design="rova-prompt-library"');
+    expect(markup).toContain('data-cola-design="clear-studio-prompt-library"');
     expect(markup).toContain("发现无尽创意");
     expect(markup).toContain("搜索提示词、风格或元素");
     expect(markup).toContain("精选提示词");
@@ -1285,8 +1560,10 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("复制提示词");
     expect(markup).toContain("去生成");
     expect(markup).toContain("加载更多灵感");
-    expect(markup).toContain('data-cola-effect="prompt-meteor-field"');
-    expect(markup).toContain('data-cola-effect="animated-gradient-border"');
+    expect(markup).not.toContain('data-cola-design="rova-prompt-library"');
+    expect(markup).not.toContain('data-cola-effect="prompt-meteor-field"');
+    expect(markup).not.toContain('data-cola-effect="animated-gradient-border"');
+    expect(markup).toContain('data-cola-effect="clear-studio-kicker"');
     expect(markup).toContain("精选提示词库 · 来自 GitHub 开源社区");
     expect(markup).toContain("本地精选");
     expect(markup).toContain("正在同步公开模板库");
@@ -1304,6 +1581,31 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("Videos");
     expect(markup).toContain("Favorites");
     expect(markup).toContain("Videos coming soon");
+  });
+
+  test("renders original images in the assets workspace while keeping thumbnail fallback", () => {
+    const markup = renderToStaticMarkup(
+      <AssetsWorkspace
+        images={[
+          {
+            rel: "managed-asset-1",
+            name: "asset-image.png",
+            date: "2026-06-01",
+            size: 2048,
+            url: "/images/asset-image.png",
+            thumbnail_url: "/image-thumbnails/asset-image.png",
+            created_at: "2026-06-01T00:00:00Z",
+          },
+        ]}
+        creations={[]}
+        onOpenCreation={() => undefined}
+        onCopyImage={() => undefined}
+        onDownloadImage={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('src="/images/asset-image.png"');
+    expect(markup).not.toContain('src="/image-thumbnails/asset-image.png"');
   });
 
   test("renders the API developer console as its own view", () => {
@@ -1377,7 +1679,9 @@ describe("ColaAIWorkbench", () => {
     expect(assetsMarkup).toContain('data-cola-panel="auth-required"');
     expect(assetsMarkup).toContain("需要登录");
     expect(assetsMarkup).toContain("登录后查看图片库");
+    expect(assetsMarkup).toContain('href="/ColaAI/login"');
     expect(developerMarkup).toContain('data-cola-panel="auth-required"');
     expect(developerMarkup).toContain("登录后使用 API");
+    expect(developerMarkup).toContain('href="/ColaAI/login"');
   });
 });

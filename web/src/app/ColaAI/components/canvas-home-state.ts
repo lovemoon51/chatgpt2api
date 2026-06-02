@@ -1,5 +1,11 @@
 import type { CanvasNodeData, CanvasState, CanvasStorageLike } from "./canvas-types";
-import { createInitialCanvasState, loadCanvasState, normalizeCanvasState, saveCanvasState } from "./use-canvas-store";
+import {
+  COLA_CANVAS_STORAGE_KEY,
+  createInitialCanvasState,
+  loadCanvasState,
+  normalizeCanvasState,
+  saveCanvasState,
+} from "./use-canvas-store";
 
 export type CanvasHomeSummary = {
   hasCanvas: boolean;
@@ -297,6 +303,31 @@ export function saveCanvasLibraryRecord(
   }
 
   return nextRecord;
+}
+
+export function deleteCanvasLibraryRecords(storage: CanvasStorageLike, canvasIds: string[]) {
+  const canvasIdSet = new Set(canvasIds);
+  const records = readCanvasLibraryRecords(storage);
+  const nextRecords = records.filter((record) => !canvasIdSet.has(record.id));
+  writeCanvasLibraryRecords(storage, nextRecords);
+
+  const activeCanvasId = storage.getItem(COLA_ACTIVE_CANVAS_ID_STORAGE_KEY);
+  if (nextRecords.length === 0) {
+    storage.removeItem(COLA_ACTIVE_CANVAS_ID_STORAGE_KEY);
+    storage.removeItem(COLA_CANVAS_STORAGE_KEY);
+    return nextRecords;
+  }
+
+  if (activeCanvasId && canvasIdSet.has(activeCanvasId)) {
+    setActiveCanvasId(storage, nextRecords[0].id);
+    saveCanvasState(storage, nextRecords[0].state);
+  }
+
+  return nextRecords;
+}
+
+export function deleteCanvasLibraryRecord(storage: CanvasStorageLike, canvasId: string) {
+  return deleteCanvasLibraryRecords(storage, [canvasId]);
 }
 
 export function getCanvasHomeSummary(storage: CanvasStorageLike): CanvasHomeSummary {

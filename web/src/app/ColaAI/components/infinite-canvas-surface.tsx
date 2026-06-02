@@ -7,6 +7,7 @@ import {
   useState,
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
+  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent,
 } from "react";
@@ -25,7 +26,7 @@ import { getSnappedDelta, precomputeStationaryAnchors, type PrecomputedStationar
 import { getCanvasLayerBounds, getVisibleCanvasConnections, getVisibleCanvasNodes } from "./canvas-visibility";
 import { getCanvasViewport, setCanvasViewport, subscribeCanvasViewport } from "./canvas-viewport-store";
 import type { CanvasCreatableNodeType, CanvasInteractionMode, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
-import { summarizeCanvasUpstream } from "./canvas-workflow";
+import { summarizeCanvasUpstream, type CanvasReferenceImage } from "./canvas-workflow";
 import type { CanvasConfigPatch } from "./use-canvas-store";
 
 type InfiniteCanvasSurfaceProps = {
@@ -40,10 +41,16 @@ type InfiniteCanvasSurfaceProps = {
   onDuplicateSelectedNodes: () => void;
   onFinalizeHistoryBatch: () => void;
   onImageFileDrop: (file: File, position: CanvasPoint, targetNodeId?: string) => void;
+  onImageNaturalSize?: (nodeId: string, width: number, height: number) => void;
   onMoveNode: (nodeId: string, position: CanvasPoint) => void;
   onMoveNodes: (positions: Record<string, CanvasPoint>) => void;
   onNudgeSelectedNodes: (delta: CanvasPoint) => void;
   onOpenGeneration: (nodeId: string) => void;
+  onOptimizeTextPrompt?: (nodeId: string, prompt: string, model: string) => Promise<string>;
+  onReverseImagePrompt?: (nodeId: string, prompt: string, model: string, referenceImages: CanvasReferenceImage[]) => Promise<string>;
+  onStartImageReversePrompt?: (nodeId: string) => void;
+  optimizingTextPromptNodeId?: string | null;
+  textPromptError?: string;
   onRedo: () => void;
   onRenameNode: (nodeId: string, title: string) => void;
   onRetryGeneration: (nodeId: string) => void;
@@ -64,6 +71,8 @@ type DragState =
       startY: number;
       initialViewport: CanvasViewport;
       moved: boolean;
+      clearSelectionOnClick: boolean;
+      cursorTarget: HTMLElement;
     }
   | {
       type: "node";
@@ -139,6 +148,9 @@ export function getCanvasSurfacePointerIntent({
   interactionMode: CanvasInteractionMode;
   shiftKey: boolean;
 }) {
+  if (button === 1) {
+    return "canvas" as const;
+  }
   if (button !== 0) {
     return "ignore" as const;
   }
@@ -153,6 +165,36 @@ export function getCanvasSurfacePointerIntent({
 
 export function getCanvasSurfaceCursor(interactionMode: CanvasInteractionMode) {
   return interactionMode === "hand" ? "cursor-grab" : "cursor-default";
+}
+
+export function setCanvasDragCursor(
+  target: Pick<HTMLElement, "style">,
+  cursor: "default" | "grabbing",
+  rootDocument: Pick<Document, "body" | "documentElement"> = document,
+) {
+  target.style.cursor = cursor;
+  rootDocument.documentElement.style.cursor = cursor;
+  rootDocument.body.style.cursor = cursor;
+}
+
+function startCanvasPanDrag(
+  event: ReactPointerEvent<HTMLElement>,
+  dragRef: MutableRefObject<DragState | null>,
+  clearSelectionOnClick: boolean,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.setPointerCapture(event.pointerId);
+  dragRef.current = {
+    type: "canvas",
+    startX: event.clientX,
+    startY: event.clientY,
+    initialViewport: getCanvasViewport(),
+    moved: false,
+    clearSelectionOnClick,
+    cursorTarget: event.currentTarget,
+  };
+  setCanvasDragCursor(event.currentTarget, "grabbing");
 }
 
 function getWorldPoint(event: Pick<PointerEvent | ReactPointerEvent, "clientX" | "clientY">, rect: DOMRect, viewport: CanvasViewport) {
@@ -196,9 +238,15 @@ export function InfiniteCanvasSurface({
   onDuplicateSelectedNodes,
   onFinalizeHistoryBatch,
   onImageFileDrop,
+  onImageNaturalSize,
   onMoveNodes,
   onNudgeSelectedNodes,
   onOpenGeneration,
+  onOptimizeTextPrompt,
+  onReverseImagePrompt,
+  onStartImageReversePrompt,
+  optimizingTextPromptNodeId,
+  textPromptError,
   onRedo,
   onRenameNode,
   onRetryGeneration,
@@ -292,6 +340,7 @@ export function InfiniteCanvasSurface({
     onDuplicateSelectedNodes,
     onFinalizeHistoryBatch,
     onImageFileDrop,
+    onImageNaturalSize,
     onMoveNodes,
     onNudgeSelectedNodes,
     onOpenGeneration,
@@ -482,12 +531,16 @@ export function InfiniteCanvasSurface({
         }
         setConnectionPreview(null);
       }
-      if (drag?.type === "canvas" && !drag.moved) {
+      if (drag?.type === "canvas" && drag.clearSelectionOnClick && !drag.moved) {
         selectNodeRef.current(null);
         selectConnectionRef.current(null);
       }
       dragRef.current = null;
-      document.body.style.cursor = "default";
+      if (drag?.type === "canvas") {
+        setCanvasDragCursor(drag.cursorTarget, "default");
+      } else {
+        document.body.style.cursor = "default";
+      }
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -536,7 +589,11 @@ export function InfiniteCanvasSurface({
         setConnectionPreview(null);
         setConnectionMenu(null);
         setContextMenu(null);
-        document.body.style.cursor = "default";
+        if (drag?.type === "canvas") {
+          setCanvasDragCursor(drag.cursorTarget, "default");
+        } else {
+          document.body.style.cursor = "default";
+        }
         selectNodeRef.current(null);
         selectConnectionRef.current(null);
         finalizeHistoryBatchRef.current();
@@ -681,6 +738,37 @@ export function InfiniteCanvasSurface({
     return summaries;
   }, [state, visibleNodes]);
 
+  const textReferenceImages = useMemo(() => {
+    const nodesById = new Map(state.nodes.map((node) => [node.id, node]));
+    const referencesByTextNodeId = new Map<string, CanvasReferenceImage[]>();
+
+    state.nodes.forEach((node) => {
+      if (node.type !== "text") {
+        return;
+      }
+      const referenceNodeIds = [
+        ...(node.metadata?.referenceImageNodeIds ?? []),
+        ...state.connections
+          .filter((connection) => connection.toNodeId === node.id)
+          .map((connection) => connection.fromNodeId),
+      ];
+      const references = Array.from(new Set(referenceNodeIds))
+        .map((nodeId) => nodesById.get(nodeId))
+        .filter((referenceNode): referenceNode is CanvasState["nodes"][number] => Boolean(referenceNode && referenceNode.type === "image"))
+        .map((referenceNode) => ({
+          nodeId: referenceNode.id,
+          title: referenceNode.title,
+          imageUrl: referenceNode.metadata?.imageUrl || "",
+        }));
+
+      if (references.length > 0) {
+        referencesByTextNodeId.set(node.id, references);
+      }
+    });
+
+    return referencesByTextNodeId;
+  }, [state]);
+
   const canvasLayerBounds = useMemo(
     () => getCanvasLayerBounds(visibleNodes, 160),
     [visibleNodes],
@@ -729,15 +817,9 @@ export function InfiniteCanvasSurface({
     if (intent === "ignore") {
       return;
     }
-    if (intent === "clear-selection") {
-      selectNodeRef.current(null);
-      selectConnectionRef.current(null);
-      return;
-    }
-
-    event.currentTarget.setPointerCapture(event.pointerId);
 
     if (intent === "selection") {
+      event.currentTarget.setPointerCapture(event.pointerId);
       const rect = event.currentTarget.getBoundingClientRect();
       const startWorld = getWorldPoint(event, rect, viewportRef.current);
       dragRef.current = {
@@ -752,14 +834,7 @@ export function InfiniteCanvasSurface({
       return;
     }
 
-    dragRef.current = {
-      type: "canvas",
-      startX: event.clientX,
-      startY: event.clientY,
-      initialViewport: getCanvasViewport(),
-      moved: false,
-    };
-    document.body.style.cursor = "grabbing";
+    startCanvasPanDrag(event, dragRef, event.button === 0);
   }
 
   function isImageFileDrag(event: ReactDragEvent<HTMLDivElement>) {
@@ -806,6 +881,13 @@ export function InfiniteCanvasSurface({
   }
 
   function handleNodePointerDown(event: ReactPointerEvent<HTMLElement>, nodeId: string) {
+    if (event.button === 1) {
+      setConnectionMenu(null);
+      setContextMenu(null);
+      startCanvasPanDrag(event, dragRef, false);
+      return;
+    }
+
     if (event.button !== 0) {
       return;
     }
@@ -1031,9 +1113,16 @@ export function InfiniteCanvasSurface({
               setInfoNodeId(nodeId);
             }}
             onImageFileChange={handleNodeImageFileChange}
+            onImageNaturalSize={onImageNaturalSize}
             onOpenGeneration={onOpenGeneration}
+            onOptimizeTextPrompt={onOptimizeTextPrompt}
+            onReverseImagePrompt={onReverseImagePrompt}
+            onStartImageReversePrompt={onStartImageReversePrompt}
+            optimizingTextPrompt={optimizingTextPromptNodeId === node.id}
             onPointerDown={handleNodePointerDown}
+            referenceImages={textReferenceImages.get(node.id) ?? []}
             onRetryGeneration={(nodeId) => retryGenerationRef.current(nodeId)}
+            textPromptError={state.selectedNodeIds.includes(node.id) ? textPromptError : ""}
           />
         ))}
         <CanvasGuides connectionPreview={connectionPreview} selectionRect={selectionRect} />

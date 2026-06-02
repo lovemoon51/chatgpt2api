@@ -276,6 +276,28 @@ export type ManagedImageListResponse = {
   pages?: number;
 };
 
+export type PublicDiscoverImage = {
+  id: string;
+  title: string;
+  subtitle: string;
+  prompt: string;
+  imageUrl: string;
+  imageFallbackUrl?: string;
+  path?: string;
+  created_at?: string;
+  tags?: string[];
+};
+
+export type PublicDiscoverImageListResponse = {
+  items: PublicDiscoverImage[];
+  groups: Array<{ date: string; items: PublicDiscoverImage[] }>;
+  total?: number;
+  page?: number;
+  page_size?: number;
+  pages?: number;
+  has_more?: boolean;
+};
+
 export type SystemLog = {
   id: string;
   time: string;
@@ -1165,6 +1187,16 @@ export async function fetchManagedImages(filters: ManagedImageListFilters) {
   if (filters.page_size) params.set("page_size", String(filters.page_size));
   return httpRequest<ManagedImageListResponse>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+}
+
+export async function fetchPublicDiscoverImages(filters: Pick<ManagedImageListFilters, "page" | "page_size"> = {}) {
+  const params = new URLSearchParams();
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  return httpRequest<PublicDiscoverImageListResponse>(
+    `/api/public/discover/images${params.toString() ? `?${params.toString()}` : ""}`,
+    { redirectOnUnauthorized: false },
   );
 }
 

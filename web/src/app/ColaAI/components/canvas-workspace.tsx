@@ -3,7 +3,7 @@
 import { ArrowLeft, Boxes, ImagePlus, Type } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchImageTasks, type ImageTask } from "@/lib/api";
+import { fetchImageTasks, type ImageDescriptionResult, type ImageTask } from "@/lib/api";
 import { computeAutoLayout, computeFitViewport } from "./canvas-auto-layout";
 import { CanvasGenerationPanel } from "./canvas-generation-panel";
 import { createCanvasGenerationTasks } from "./canvas-generation-tasks";
@@ -11,7 +11,7 @@ import { readCanvasImageFile } from "./canvas-image-files";
 import { CanvasMinimapPanel } from "./canvas-minimap-panel";
 import { CanvasToolbar } from "./canvas-toolbar";
 import { getCanvasViewport } from "./canvas-viewport-store";
-import { collectCanvasContinuationSettings, collectCanvasGenerationSettings, getCanvasContinuationInputCounts } from "./canvas-workflow";
+import { collectCanvasContinuationSettings, collectCanvasGenerationSettings, getCanvasContinuationInputCounts, type CanvasReferenceImage } from "./canvas-workflow";
 import { InfiniteCanvasSurface } from "./infinite-canvas-surface";
 import { configNodeHeight, configNodeWidth, useCanvasStore } from "./use-canvas-store";
 import type { CanvasInteractionMode, CanvasNodeData, CanvasNodeStatus, CanvasPoint, CanvasState, CanvasViewport } from "./canvas-types";
@@ -19,6 +19,8 @@ import type { CanvasInteractionMode, CanvasNodeData, CanvasNodeStatus, CanvasPoi
 type CanvasWorkspaceProps = {
   onBack: (state: CanvasState) => void;
   onOpenSourceTask?: (task: CanvasSourceTaskFocus) => void;
+  onOptimizeTextPrompt?: (nodeId: string, prompt: string, model: string) => Promise<string>;
+  onReverseImagePrompt?: (nodeId: string, prompt: string, model: string, referenceImages: CanvasReferenceImage[]) => Promise<string>;
   initialState?: CanvasState;
 };
 
@@ -51,7 +53,6 @@ function createClientTaskId(index: number) {
 
 function imageUrlFromTask(task: ImageTask) {
   const first = task.data?.[0];
-  // 优先使用签名 URL（公开访问，无需认证下载）
   if (first?.signed_url) {
     return first.signed_url;
   }
@@ -62,6 +63,33 @@ function imageUrlFromTask(task: ImageTask) {
     return `data:image/png;base64,${first.b64_json}`;
   }
   return "";
+}
+
+export function formatImageTextResultContent(result: ImageDescriptionResult) {
+  const sections: string[] = [];
+  if (result.description?.trim()) {
+    sections.push("【图片描述】", result.description.trim(), "");
+  }
+  const analysis = result.analysis;
+  if (analysis) {
+    const analysisLines = [
+      analysis.subject ? `主体：${analysis.subject}` : null,
+      analysis.scene ? `场景：${analysis.scene}` : null,
+      analysis.lighting ? `光影：${analysis.lighting}` : null,
+      analysis.style ? `风格：${analysis.style}` : null,
+      analysis.composition ? `构图：${analysis.composition}` : null,
+    ].filter((line): line is string => Boolean(line));
+    if (analysisLines.length > 0) {
+      sections.push("【结构化分析】", ...analysisLines, "");
+    }
+  }
+  if (result.tags?.length) {
+    sections.push("【标签】", result.tags.join("、"), "");
+  }
+  if (result.prompt?.trim()) {
+    sections.push("【可复用提示词】", result.prompt.trim());
+  }
+  return sections.join("\n").trim();
 }
 
 function canvasStatusFromTask(task: ImageTask) {
@@ -158,7 +186,13 @@ export function getCanvasGenerationLaunchIntent(node: CanvasNodeData | null | un
   return node.type === "config" ? "submit" as const : "panel" as const;
 }
 
-export function CanvasWorkspace({ onBack, initialState }: CanvasWorkspaceProps) {
+export function CanvasWorkspace({
+  onBack,
+  onOpenSourceTask: _onOpenSourceTask,
+  onOptimizeTextPrompt,
+  onReverseImagePrompt,
+  initialState,
+}: CanvasWorkspaceProps) {
   const {
     state,
     selectedNode,
@@ -183,6 +217,7 @@ export function CanvasWorkspace({ onBack, initialState }: CanvasWorkspaceProps) 
     selectConnection,
     selectNode,
     selectNodes,
+    startImageReversePrompt,
     toggleNodeSelection,
     updateConfigNode,
     updateNodeContent,
@@ -628,6 +663,9 @@ export function CanvasWorkspace({ onBack, initialState }: CanvasWorkspaceProps) 
         onMoveNodes={moveNodes}
         onNudgeSelectedNodes={nudgeSelectedNodes}
         onOpenGeneration={openGenerationForNode}
+        onOptimizeTextPrompt={onOptimizeTextPrompt}
+        onReverseImagePrompt={onReverseImagePrompt}
+        onStartImageReversePrompt={startImageReversePrompt}
         onRedo={redo}
         onRenameNode={renameNode}
         onRetryGeneration={retryGenerationNode}

@@ -142,3 +142,35 @@ export function getBestImageUrl(imageData: { signed_url?: string; url?: string; 
   // 最后使用需要认证的 URL（需要下载）
   return imageData.url || "";
 }
+
+export type PreviewPriority = "preferOriginal" | "preferThumbnail";
+
+export type PreviewImageSource = {
+  signed_url?: string;
+  url?: string;
+  b64_json?: string;
+  thumbnail_url?: string;
+};
+
+function toPreviewCandidates(imageData: PreviewImageSource, priority: PreviewPriority) {
+  const originalCandidates = [
+    imageData.signed_url,
+    imageData.url,
+    imageData.b64_json ? `data:image/png;base64,${imageData.b64_json}` : "",
+  ];
+
+  if (priority === "preferThumbnail") {
+    return [imageData.thumbnail_url, ...originalCandidates];
+  }
+
+  return [...originalCandidates, imageData.thumbnail_url];
+}
+
+export function getPreferredPreviewUrl(imageData: PreviewImageSource, priority: PreviewPriority): string {
+  return toPreviewCandidates(imageData, priority).find((candidate) => Boolean(candidate)) || "";
+}
+
+export function getPreviewFallbackUrl(imageData: PreviewImageSource, priority: PreviewPriority): string | undefined {
+  const primary = getPreferredPreviewUrl(imageData, priority);
+  return toPreviewCandidates(imageData, priority).find((candidate) => Boolean(candidate) && candidate !== primary);
+}

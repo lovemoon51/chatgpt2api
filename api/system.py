@@ -12,7 +12,14 @@ from services.account_service import account_service
 from services.auth_audit_service import auth_audit_service, key_hint, source_hint
 from services.backup_service import BackupError, backup_service
 from services.config import config
-from services.image_service import delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
+from services.image_service import (
+    delete_images,
+    download_images_zip,
+    get_image_download_response,
+    get_thumbnail_response,
+    list_images,
+    list_public_discover_images,
+)
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
@@ -348,6 +355,14 @@ def create_router(app_version: str) -> APIRouter:
             mode=mode.strip(),
             model=model.strip(),
             sort=sort_value,
+        )
+
+    @router.get("/api/public/discover/images")
+    async def get_public_discover_images(request: Request, page: int = 1, page_size: int = 12):
+        return list_public_discover_images(
+            resolve_image_base_url(request),
+            page=page,
+            page_size=page_size,
         )
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)

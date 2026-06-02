@@ -30,12 +30,20 @@ describe("CanvasHome", () => {
         onOpenCanvas={() => undefined}
         onCreateBlank={() => undefined}
         onSelectTemplate={() => undefined}
+        onDeleteCanvas={() => undefined}
+        selectedCanvasIds={[]}
+        onToggleCanvasSelection={() => undefined}
+        onToggleAllCanvasSelection={() => undefined}
+        onDeleteSelectedCanvases={() => undefined}
       />,
     );
 
     expect(markup).toContain('data-cola-panel="canvas-home"');
+    expect(markup).toContain('data-cola-design="clear-studio-canvas-home"');
     expect(markup).toContain("fixed inset-0");
     expect(markup).toContain('data-cola-section="canvas-library"');
+    expect(markup).toContain("border-slate-200/80");
+    expect(markup).toContain("bg-white/84");
     expect(markup).toContain('data-cola-card="current-canvas"');
     expect(markup).toContain('data-cola-canvas-id="canvas-brand"');
     expect(markup).toContain('data-cola-section="canvas-templates"');
@@ -51,6 +59,7 @@ describe("CanvasHome", () => {
     expect(markup).toContain("品牌关键词");
     expect(markup).toContain("材质参考");
     expect(markup).toContain("输出目标");
+    expect(markup).not.toContain("rounded-[34px]");
   });
 
   test("renders the first-time empty-state copy when no canvas exists", () => {
@@ -61,6 +70,11 @@ describe("CanvasHome", () => {
         onOpenCanvas={() => undefined}
         onCreateBlank={() => undefined}
         onSelectTemplate={() => undefined}
+        onDeleteCanvas={() => undefined}
+        selectedCanvasIds={[]}
+        onToggleCanvasSelection={() => undefined}
+        onToggleAllCanvasSelection={() => undefined}
+        onDeleteSelectedCanvases={() => undefined}
       />,
     );
 
@@ -95,6 +109,11 @@ describe("CanvasHome", () => {
         onOpenCanvas={() => undefined}
         onCreateBlank={() => undefined}
         onSelectTemplate={() => undefined}
+        onDeleteCanvas={() => undefined}
+        selectedCanvasIds={[]}
+        onToggleCanvasSelection={() => undefined}
+        onToggleAllCanvasSelection={() => undefined}
+        onDeleteSelectedCanvases={() => undefined}
       />,
     );
 
@@ -103,5 +122,7 @@ describe("CanvasHome", () => {
     expect(markup).toContain("空白草稿");
     expect(markup).toContain('data-cola-canvas-id="canvas-brand"');
     expect(markup).toContain('data-cola-canvas-id="canvas-blank"');
+    expect(markup).toContain("删除画布");
+    expect(markup).toContain("全选");
   });
 });

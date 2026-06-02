@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -25,6 +26,7 @@ import {
   ImagePlus,
   Languages,
   Library,
+  LogIn,
   LogOut,
   Menu,
   PanelLeft,
@@ -44,10 +46,12 @@ import {
 import { PromptMarketModal } from "@/app/studio/components/prompt-market-modal";
 import { AuthenticatedImage } from "@/components/authenticated-image";
 import { ImageLightbox } from "@/components/image-lightbox";
+import webConfig from "@/constants/common-env";
 import {
   downloadSingleImage,
   fetchImageTasks,
   fetchManagedImages,
+  fetchPublicDiscoverImages,
   fetchPromptTemplateStats,
   fetchPromptTemplates,
   type ImageModel,
@@ -57,9 +61,15 @@ import {
   type PromptTemplateStats,
   type PromptTemplateApplyPayload,
 } from "@/lib/api";
-import { downloadImageUrl, fetchImageFile } from "@/lib/image-fetch";
+import {
+  downloadImageUrl,
+  fetchImageBlob,
+  fetchImageFile,
+  getPreferredPreviewUrl,
+  getPreviewFallbackUrl,
+} from "@/lib/image-fetch";
 import { cn } from "@/lib/utils";
-import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+import { clearStoredColaAuthSession, type ColaAuthSession } from "@/store/cola-auth";
 import {
   deleteImageConversation,
   listImageConversations,
@@ -68,8 +78,29 @@ import {
   type ImageConversation,
 } from "@/store/image-conversations";
 import { CanvasHome } from "./canvas-home";
+import { ColaAILandingHero } from "./cola-ai-landing-hero";
+import {
+  buildLandingHeroItems,
+  buildPublicDiscoverLandingHeroItems,
+  getLandingHeroScrollMotion,
+  shouldSnapLandingHeroToDiscover,
+  type LandingHeroScrollMotion,
+  type LandingHeroStageState,
+} from "./cola-ai-landing-hero-state";
+import {
+  colaButtonClass,
+  colaCardClass,
+  colaFocusClass,
+  colaInputShellClass,
+  colaMutedPanelClass,
+  colaPanelClass,
+  colaShellClass,
+  colaSurfaceClass,
+} from "./cola-ai-style";
 import {
   createBlankCanvasState,
+  deleteCanvasLibraryRecord,
+  deleteCanvasLibraryRecords,
   createTemplateCanvasState,
   getActiveCanvasId,
   getCanvasHomeEntries,
@@ -94,12 +125,13 @@ import {
 } from "./generate-task-submission";
 import { RovaMediaBackground } from "./rova-media-background";
 import type { CanvasState } from "./canvas-types";
+import type { CanvasReferenceImage } from "./canvas-workflow";
 import { loadCanvasState, saveCanvasState } from "./use-canvas-store";
 
 type WorkbenchMode = "discover" | "generate" | "prompts" | "assets" | "developer" | "notice" | "settings" | "canvas";
 
 type ColaAIWorkbenchProps = {
-  session: StoredAuthSession;
+  session: ColaAuthSession;
   initialMode?: WorkbenchMode;
 };
 
@@ -118,6 +150,7 @@ type CreationItem = {
   subtitle: string;
   prompt: string;
   imageUrl: string;
+  imageFallbackUrl?: string;
 };
 
 const creationFeedSkeletonIndexes = Array.from({ length: 12 }, (_, index) => index);
@@ -149,6 +182,158 @@ type GeneratedTaskImage = {
 };
 
 const COLA_ACTIVE_GENERATE_SESSION_STORAGE_KEY = "chatgpt2api:colaai_active_generate_conversation_id";
+const promptArchitectSystemPrompt = `你现在是一名「专业提示词架构师 Prompt Architect」。
+
+你的核心任务不是直接完成用户的创作需求，而是帮助用户把模糊、简单、随意的想法，转化为高质量、结构化、可直接用于 AI 生成内容的提示词。
+
+你需要具备以下能力：
+
+1. 需求理解能力
+你要准确理解用户想要生成的内容，包括但不限于：
+- 图片提示词
+- 视频提示词
+- UI / 网页设计提示词
+- 文案提示词
+- 产品 PRD 提示词
+- 前端开发提示词
+- 角色设定提示词
+- 故事分镜提示词
+- 商业分析提示词
+- Agent / 工作流提示词
+
+2. 主动补全能力
+当用户给出的信息不完整时，你需要根据常见创作逻辑主动补全合理细节，例如：
+- 风格
+- 画面主体
+- 构图
+- 场景
+- 光影
+- 材质
+- 情绪氛围
+- 功能结构
+- 用户体验
+- 技术要求
+- 输出格式
+- 限制条件
+
+但你不能胡乱扩展，所有补全都必须服务于用户原始目标。
+
+3. 提示词优化能力
+你要把用户的原始描述优化成：
+- 目标明确
+- 结构清晰
+- 细节丰富
+- 可执行性强
+- 适合 AI 理解
+- 减少歧义
+- 更容易得到高质量结果的提示词
+
+4. 输出格式要求
+每次输出时，优先采用以下结构：
+
+【优化后的提示词】
+直接给出可复制使用的完整提示词。
+
+【设计思路】
+简要说明为什么这样优化，说明加入了哪些关键元素。
+
+【可选增强方向】
+给出 3-5 个可继续加强的方向，例如：
+- 更高级的视觉风格
+- 更强的商业感
+- 更适合普通用户
+- 更适合移动端
+- 更适合生成图片 / 视频 / 代码
+- 更适合 Claude / GPT / Midjourney / ComfyUI / Flux / SD
+
+5. 语言风格
+你的表达要专业、清晰、直接，不要废话。
+用户如果只想要提示词，你就只输出提示词。
+用户如果需要解释，你再补充说明。
+
+6. 重要原则
+- 不要直接替用户完成最终作品，除非用户明确要求。
+- 重点是生成「能驱动另一个 AI 完成任务」的高质量提示词。
+- 遇到模糊需求时，优先给出一个默认高质量版本，而不是频繁追问。
+- 如果用户要求“优化提示词”，你要直接给出更强版本。
+- 如果用户要求“生成提示词”，你要直接生成完整可用版本。
+- 如果用户要求“拆解提示词”，你要把提示词拆成结构模块。
+
+你的最终目标是：让用户只需要复制你生成的提示词，就能让另一个 AI 准确、高质量地完成任务。`;
+
+export function buildPromptArchitectMessages(prompt: string) {
+  return [
+    { role: "system" as const, content: promptArchitectSystemPrompt },
+    { role: "user" as const, content: prompt.trim() },
+  ];
+}
+
+type CanvasReferenceImageMessageInput = {
+  title: string;
+  imageUrl?: string;
+};
+
+async function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error ?? new Error("读取参考图失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function normalizeCanvasReferenceImageForChat(image: CanvasReferenceImage) {
+  const rawUrl = image.imageUrl.trim();
+  if (!rawUrl) {
+    return { title: image.title, imageUrl: "" };
+  }
+  if (rawUrl.startsWith("data:")) {
+    return { title: image.title, imageUrl: rawUrl };
+  }
+
+  const blob = await fetchImageBlob(rawUrl);
+  return {
+    title: image.title,
+    imageUrl: await blobToDataUrl(blob),
+  };
+}
+
+export function buildImageReversePromptMessages(prompt: string, referenceImages: CanvasReferenceImageMessageInput[]) {
+  const attachedImages = referenceImages.filter((image) => image.imageUrl?.trim());
+  const missingImages = referenceImages.filter((image) => !image.imageUrl?.trim());
+  return [
+    {
+      role: "system" as const,
+      content: "你是一名图片提示词反推专家。请根据用户给出的图片引用和目标要求，输出结构化中文提示词。不要套用 Prompt Architect 的通用优化格式；只围绕图片内容生成可用于图片生成模型的提示词。",
+    },
+    {
+      role: "user" as const,
+      content: [
+        {
+          type: "text" as const,
+          text: [
+            prompt.trim(),
+            "",
+            attachedImages.length > 0
+              ? `已附上 ${attachedImages.length} 张参考图，请直接根据图片内容反推提示词。`
+              : "暂无可读取的图片引用，请先根据文字要求给出适合用户补图后的结构化提示词模板。",
+            missingImages.length > 0 ? `以下参考图仍待补充：${missingImages.map((image) => image.title).join("、")}` : "",
+            "",
+            "输出要求：使用中文，覆盖主体描述、环境、光影、镜头语言、风格关键词；如果有多张图片，请分别提取要点后再整合为一段可复制提示词。",
+          ].filter(Boolean).join("\n"),
+        },
+        ...attachedImages.map((image) => ({
+          type: "image_url" as const,
+          image_url: { url: image.imageUrl!.trim() },
+        })),
+        ...missingImages.map((image) => ({
+          type: "text" as const,
+          text: `待补图参考：${image.title}`,
+        })),
+      ],
+    },
+  ];
+}
 
 export type GenerateSession = {
   id: string;
@@ -433,6 +618,27 @@ const imageModelOptions: Array<{
   },
 ];
 
+function colaApiPath(path: string) {
+  const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
+  return `${baseUrl}${path}`;
+}
+
+function extractPromptArchitectResponse(payload: unknown) {
+  const parsed = payload as {
+    error?: string | { message?: string };
+    choices?: Array<{
+      message?: { content?: string };
+      delta?: { content?: string };
+    }>;
+  };
+  if (parsed?.error) {
+    const message = typeof parsed.error === "string" ? parsed.error : parsed.error.message;
+    throw new Error(message || "提示词优化失败");
+  }
+  const choice = parsed?.choices?.[0];
+  return String(choice?.message?.content ?? choice?.delta?.content ?? "").trim();
+}
+
 function normalizeImageModel(model: string | null | undefined): GenerateImageModel {
   return model === "gpt-image-2" || model === "codex-gpt-image-2" ? model : "auto";
 }
@@ -659,7 +865,7 @@ const lowerNavItems = [
   { key: "api", label: "API", icon: Boxes, mode: "developer" },
   { key: "notice", label: "公告", icon: Bell, mode: "notice" },
   { key: "settings", label: "设置", icon: Settings, mode: "settings" },
-  { key: "logout", label: "退出", icon: LogOut },
+  { key: "logout", label: "退出", icon: LogOut, authOnly: true },
 ] as const;
 
 const mobilePrimaryItems = [
@@ -740,14 +946,14 @@ export function promptTemplateToPromptCard(template: PromptTemplate): PromptCard
     ratio: template.size || "1:1",
     category: promptTagCategoryMap[primaryTag] || "精选提示词",
     useCase: formatPromptTemplateUseCase(template.description),
-    previewUrl: previewImage.thumbnail_url || previewImage.url || "",
-    previewFallbackUrl: previewImage.url || undefined,
+    previewUrl: getPreferredPreviewUrl(previewImage, "preferThumbnail"),
+    previewFallbackUrl: getPreviewFallbackUrl(previewImage, "preferThumbnail"),
     model: template.model,
     count: template.count,
   };
 }
 
-function buildCreations(images: ManagedImage[]) {
+export function buildCreations(images: ManagedImage[]) {
   if (images.length === 0) {
     return fallbackCreations;
   }
@@ -757,7 +963,8 @@ function buildCreations(images: ManagedImage[]) {
     title: `最近创作 ${index + 1}`,
     subtitle: image.width && image.height ? `${image.width} x ${image.height}` : "图片库",
     prompt: `复用 ${image.name.replace(/\.[^.]+$/, "") || "这张作品"} 的视觉风格继续创作。`,
-    imageUrl: image.thumbnail_url || image.url,
+    imageUrl: getPreferredPreviewUrl(image, "preferOriginal"),
+    imageFallbackUrl: getPreviewFallbackUrl(image, "preferOriginal"),
   }));
 }
 
@@ -853,21 +1060,52 @@ function BrandLogo({ className }: { className?: string }) {
   return (
     <div
       aria-label="ColaAI"
+      data-cola-brand="clear-studio"
       data-cola-rail-label="ColaAI"
-      data-cola-effect="line-shadow-logo"
-      className={cn("relative text-center font-serif font-semibold italic tracking-normal text-slate-950", className)}
+      className={cn("relative text-center font-sans font-semibold tracking-[-0.04em] text-slate-950", className)}
     >
       <span className="sr-only">ColaAI</span>
       <span aria-hidden="true" className="relative z-10">
-        Cola<span className="font-sans text-[0.78em] not-italic text-sky-500">AI</span>
+        Cola<span className="text-[0.78em] text-cyan-600">AI</span>
       </span>
       <span
         aria-hidden="true"
-        className="absolute inset-x-0 top-1 text-transparent [-webkit-text-stroke:1px_rgba(15,23,42,0.22)]"
+        className="absolute inset-x-0 top-1 text-transparent [-webkit-text-stroke:1px_rgba(15,23,42,0.14)]"
       >
-        Cola<span className="font-sans text-[0.78em] not-italic">AI</span>
+        Cola<span className="text-[0.78em]">AI</span>
       </span>
     </div>
+  );
+}
+
+function PublicAuthBar() {
+  return (
+    <nav
+      aria-label="登录和注册"
+      data-cola-panel="public-auth-bar"
+      className={cn(
+        "fixed right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-40 flex items-center gap-1 rounded-full p-1 text-sm",
+        "border border-slate-200/80 bg-white/86 shadow-[0_18px_54px_-40px_rgba(15,23,42,0.52)] ring-1 ring-white/80 backdrop-blur-xl",
+        "sm:right-5 sm:top-[calc(env(safe-area-inset-top)+1rem)]",
+      )}
+    >
+      <Link
+        href="/ColaAI/login"
+        data-cola-action="public-login"
+        className={colaButtonClass("ghost", "h-9 px-3 text-xs font-semibold text-slate-600 hover:bg-white hover:text-slate-950 sm:px-4 sm:text-sm")}
+      >
+        <LogIn className="size-3.5" />
+        登录
+      </Link>
+      <Link
+        href="/ColaAI/register"
+        data-cola-action="public-register"
+        className={colaButtonClass("primary", "h-9 px-3 text-xs font-semibold sm:px-4 sm:text-sm")}
+      >
+        <UserPlus className="size-3.5" />
+        注册
+      </Link>
+    </nav>
   );
 }
 
@@ -921,7 +1159,7 @@ function RovaComposer({
   const modelPopover = (
     <div
       data-cola-panel="image-model-settings"
-      className="absolute bottom-[62px] left-5 z-50 w-[min(360px,calc(100vw-32px))] overflow-y-auto rounded-[18px] border border-black/5 bg-white p-3 text-left shadow-[0_18px_58px_-38px_rgba(15,23,42,0.38)] max-[520px]:left-1/2 max-[520px]:-translate-x-1/2"
+      className={colaSurfaceClass("overlay", "absolute bottom-[62px] left-5 z-50 w-[min(360px,calc(100vw-32px))] overflow-y-auto p-3 text-left max-[520px]:left-1/2 max-[520px]:-translate-x-1/2")}
       style={{
         opacity: modelOpen ? 1 : 0,
         pointerEvents: modelOpen ? "auto" : "none",
@@ -964,7 +1202,7 @@ function RovaComposer({
   const ratioCountPopover = (
     <div
       data-cola-panel="studio-generation-settings"
-      className="absolute bottom-[62px] left-[158px] z-50 max-h-[min(420px,70dvh)] w-[min(360px,calc(100vw-32px))] overflow-y-auto rounded-[18px] border border-black/5 bg-white p-3 text-left shadow-[0_18px_58px_-38px_rgba(15,23,42,0.38)] max-[520px]:left-1/2 max-[520px]:-translate-x-1/2"
+      className={colaSurfaceClass("overlay", "absolute bottom-[62px] left-[158px] z-50 max-h-[min(420px,70dvh)] w-[min(360px,calc(100vw-32px))] overflow-y-auto p-3 text-left max-[520px]:left-1/2 max-[520px]:-translate-x-1/2")}
       style={{
         opacity: settingsOpen ? 1 : 0,
         pointerEvents: settingsOpen ? "auto" : "none",
@@ -1050,11 +1288,13 @@ function RovaComposer({
   return (
     <div
       data-cola-panel="composer"
+      data-cola-design="clear-studio-composer"
       data-cola-density="rova-compact"
       data-cola-layout="rova-selected-composer"
       data-cola-fit="rova-homepage-width"
       className={cn(
-        "relative w-full max-w-[960px] overflow-visible rounded-[24px] border border-[#e8e8e8] bg-[#fcfcfc] text-left shadow-[0_10px_40px_5px_rgba(194,194,194,0.25)]",
+        colaInputShellClass,
+        "relative w-full max-w-[960px] overflow-visible text-left",
         sticky && "shadow-[0_18px_60px_-42px_rgba(15,23,42,0.42)]",
       )}
     >
@@ -1063,7 +1303,7 @@ function RovaComposer({
           <button
             type="button"
             data-cola-action="upload-reference"
-            className="mt-0.5 grid size-11 shrink-0 place-items-center rounded-xl border border-dashed border-[#dddddd] bg-[#f5f5f5] text-[#bbbbbb] transition hover:border-[#d2d2d2] hover:bg-[#f1f1f1] hover:text-[#777777]"
+            className={cn("mt-0.5 grid size-11 shrink-0 place-items-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-slate-400 transition hover:border-cyan-200 hover:bg-cyan-50/60 hover:text-cyan-700", colaFocusClass)}
             aria-label={hasReferenceName ? "更换参考图" : "上传参考图"}
             onClick={() => fileInputRef.current?.click()}
           >
@@ -1109,7 +1349,7 @@ function RovaComposer({
             type="button"
             data-cola-control="image-model"
             data-cola-fit="nowrap-chip"
-            className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-2xl bg-[#1a1a1a] px-3 text-xs font-medium text-white transition hover:bg-[#252525]"
+            className={colaButtonClass("primary", "h-7 px-3 py-0 text-xs font-medium")}
             onClick={() => {
               setModelOpen((open) => !open);
               setSettingsOpen(false);
@@ -1172,13 +1412,11 @@ function RovaComposer({
           <button
             type="button"
             aria-label="生成"
-            data-cola-effect="shimmer-button"
             data-cola-action="submit-generation"
-            className="relative inline-flex h-[37px] shrink-0 items-center justify-center gap-1 overflow-hidden rounded-[20px] bg-[linear-gradient(180deg,#3a3a3a_0%,#1a1a1a_100%)] px-[22px] text-[13px] font-medium text-white shadow-[inset_-4px_-6px_25px_rgba(201,201,201,0.08),inset_4px_4px_10px_rgba(29,29,29,0.24)] transition hover:bg-[#222222] disabled:cursor-not-allowed disabled:opacity-70"
+            className={colaButtonClass("primary", "h-[37px] px-[22px] py-0 text-[13px] font-medium")}
             disabled={isGenerating}
             onClick={onGenerate}
           >
-            <span className="absolute inset-y-[-30%] left-[-22%] w-10 rotate-12 bg-white/20" />
             <Send className="relative z-10 hidden size-3.5 sm:inline" />
             <span className="relative z-10">{isGenerating ? "提交中" : "生成"}</span>
           </button>
@@ -1240,8 +1478,8 @@ export function GenerateComposer({
       data-cola-panel="generate-composer"
       data-cola-variant="rova-large-generate"
       data-cola-density="bottom-compact"
-      data-cola-design="creative-instrument-panel"
-      className="relative mx-auto w-full max-w-[1164px] overflow-visible rounded-[24px] border border-teal-950/[0.08] bg-white/90 text-left shadow-[0_28px_84px_-58px_rgba(15,23,42,0.78)] ring-1 ring-white/80 backdrop-blur-2xl before:pointer-events-none before:absolute before:inset-x-5 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-teal-300/70 before:to-transparent"
+      data-cola-design="clear-studio-composer"
+      className={cn(colaInputShellClass, "relative mx-auto w-full max-w-[1164px] overflow-visible text-left")}
     >
       <div data-cola-part="generate-input-panel" className="relative px-6 pt-5 pb-3 max-[560px]:px-4 max-[560px]:pt-4">
         <div data-cola-part="generate-input-row" className="flex min-h-[116px] gap-4 max-[560px]:min-h-[128px] max-[560px]:gap-3">
@@ -1265,10 +1503,11 @@ export function GenerateComposer({
               data-cola-action="upload-reference"
               data-cola-state={referenceImage ? "has-reference" : "empty"}
               className={cn(
-                "group grid size-full place-items-center overflow-hidden rounded-[18px] border text-slate-400 transition duration-200 focus:outline-none focus:ring-4 focus:ring-teal-100/80",
+                "group grid size-full place-items-center overflow-hidden rounded-[18px] border text-slate-400 transition duration-200",
+                colaFocusClass,
                 referenceImage
                   ? "border-white bg-white shadow-[0_16px_34px_-24px_rgba(15,23,42,0.62)] ring-1 ring-slate-200/80"
-                  : "border-dashed border-slate-300 bg-[linear-gradient(180deg,rgba(255,255,255,0.82),rgba(240,253,250,0.62))] hover:border-teal-300 hover:bg-teal-50/70 hover:text-teal-700",
+                  : "border-dashed border-slate-300 bg-slate-50/80 hover:border-cyan-300 hover:bg-cyan-50/70 hover:text-cyan-700",
               )}
               aria-label={referenceImage ? `更换参考图 ${referenceImage.name}` : "上传参考图"}
               onClick={() => fileInputRef.current?.click()}
@@ -1311,7 +1550,7 @@ export function GenerateComposer({
             ) : null}
           </div>
 
-          <div className="relative min-w-0 flex-1 rounded-[20px] bg-gradient-to-b from-white/20 to-white/0">
+          <div className="relative min-w-0 flex-1 rounded-[20px] bg-white/20">
             <div className="mb-1 flex items-center justify-between gap-3 pr-1">
               <span className="text-[11px] font-semibold text-slate-400">创作控制台</span>
               <span className="hidden text-[11px] font-medium text-teal-700/70 sm:inline">Prompt first</span>
@@ -1389,13 +1628,11 @@ export function GenerateComposer({
           <button
             type="button"
             aria-label="生成"
-            data-cola-effect="shimmer-button"
             data-cola-action="submit-generation"
-            className="relative inline-flex h-[46px] shrink-0 items-center justify-center gap-2 overflow-hidden rounded-full bg-[linear-gradient(135deg,#111418_0%,#0f766e_100%)] px-7 text-sm font-semibold text-white shadow-[inset_-4px_-6px_25px_rgba(255,255,255,0.07),inset_4px_4px_10px_rgba(5,46,42,0.22),0_18px_40px_-28px_rgba(15,118,110,0.82)] transition hover:-translate-y-px hover:brightness-105 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+            className={colaButtonClass("primary", "h-[46px] px-7 py-0")}
             disabled={isGenerating}
             onClick={onGenerate}
           >
-            <span className="absolute inset-y-[-30%] left-[-22%] w-10 rotate-12 bg-white/20" />
             <Send className="relative z-10 size-4" />
             <span className="relative z-10">{isGenerating ? "提交中" : "生成"}</span>
           </button>
@@ -1404,7 +1641,7 @@ export function GenerateComposer({
 
       <div
         data-cola-panel="image-model-settings"
-        className="absolute bottom-[84px] left-6 z-50 w-[min(392px,calc(100vw-32px))] overflow-y-auto rounded-[20px] border border-teal-950/[0.08] bg-white/96 p-4 text-left shadow-[0_24px_64px_-42px_rgba(15,23,42,0.54)] ring-1 ring-white/80 backdrop-blur-xl max-[560px]:left-1/2 max-[560px]:-translate-x-1/2"
+        className={colaSurfaceClass("overlay", "absolute bottom-[84px] left-6 z-50 w-[min(392px,calc(100vw-32px))] overflow-y-auto p-4 text-left max-[560px]:left-1/2 max-[560px]:-translate-x-1/2")}
         style={{
           opacity: modelOpen ? 1 : 0,
           pointerEvents: modelOpen ? "auto" : "none",
@@ -1452,7 +1689,7 @@ export function GenerateComposer({
       <div
         data-cola-panel="studio-generation-settings"
         data-cola-popover="ratio-count"
-        className="absolute bottom-[84px] left-[160px] z-50 max-h-[min(440px,70dvh)] w-[min(372px,calc(100vw-32px))] overflow-y-auto rounded-[20px] border border-teal-950/[0.08] bg-white/96 p-4 text-left shadow-[0_24px_64px_-42px_rgba(15,23,42,0.54)] ring-1 ring-white/80 backdrop-blur-xl max-[560px]:left-1/2 max-[560px]:-translate-x-1/2"
+        className={colaSurfaceClass("overlay", "absolute bottom-[84px] left-[160px] z-50 max-h-[min(440px,70dvh)] w-[min(372px,calc(100vw-32px))] overflow-y-auto p-4 text-left max-[560px]:left-1/2 max-[560px]:-translate-x-1/2")}
         style={{
           opacity: settingsOpen ? 1 : 0,
           pointerEvents: settingsOpen ? "auto" : "none",
@@ -1579,6 +1816,7 @@ function ImageTile({
             {item.imageUrl ? (
               <AuthenticatedImage
                 src={item.imageUrl}
+                fallbackSrc={item.imageFallbackUrl}
                 alt={item.title}
                 className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.045]"
                 loadingMotion="static"
@@ -1672,6 +1910,8 @@ export function CreationFeed({
   flushTop = false,
   isLoading = false,
   isRefreshing = false,
+  title = "最近创作",
+  subtitle = "来自你的灵感",
   onOpen,
   onUsePrompt,
   onCopyPrompt,
@@ -1680,6 +1920,8 @@ export function CreationFeed({
   flushTop?: boolean;
   isLoading?: boolean;
   isRefreshing?: boolean;
+  title?: string;
+  subtitle?: string;
   onOpen: (item: CreationItem) => void;
   onUsePrompt: (prompt: string) => void;
   onCopyPrompt: (prompt: string) => void;
@@ -1690,7 +1932,7 @@ export function CreationFeed({
     <section data-cola-panel="creation-feed" data-cola-state={feedState} className={cn(flushTop ? "mt-0" : "mt-10", "pb-12")}>
       <div className={cn(flushTop ? "mb-[28px]" : "mb-5", "text-center")}>
         <div className="inline-flex items-center justify-center gap-2">
-          <h2 className="text-[28px] font-medium leading-9 tracking-normal text-[#1a1a1a]">最近创作</h2>
+          <h2 className="text-[28px] font-medium leading-9 tracking-normal text-[#1a1a1a]">{title}</h2>
           {isRefreshing && (
             <span
               data-cola-effect="creation-feed-sync"
@@ -1701,7 +1943,7 @@ export function CreationFeed({
             </span>
           )}
         </div>
-        <p className="mt-[5px] text-sm leading-5 text-[#999999]">来自你的灵感</p>
+        <p className="mt-[5px] text-sm leading-5 text-[#999999]">{subtitle}</p>
       </div>
       {isLoading && creations.length === 0 ? (
         <CreationFeedSkeleton />
@@ -2306,12 +2548,12 @@ function getQueueTaskStatusLabel(task: GenerateTask) {
 
 export function TaskQueuePopover({
   open,
-  role = "user",
+  role = "creator",
   tasks,
   onClose,
 }: {
   open: boolean;
-  role?: StoredAuthSession["role"];
+  role?: ColaAuthSession["role"];
   tasks: GenerateTask[];
   onClose: () => void;
 }) {
@@ -2346,7 +2588,7 @@ export function TaskQueuePopover({
             </p>
           </div>
           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">
-            {role === "admin" ? "管理员" : "用户"}
+            {role === "guest" ? "访客" : "创作者"}
           </span>
         </div>
         <div className="max-h-[288px] space-y-2 overflow-y-auto p-3">
@@ -2780,6 +3022,7 @@ function DiscoverHome({
   isGenerating,
   stickyVisible,
   creations,
+  isPublicPreview,
   creationFeedStatus = "idle",
   onPromptChange,
   onCountChange,
@@ -2805,6 +3048,7 @@ function DiscoverHome({
   isGenerating: boolean;
   stickyVisible: boolean;
   creations: CreationItem[];
+  isPublicPreview: boolean;
   creationFeedStatus?: CreationFeedStatus;
   onPromptChange: (prompt: string) => void;
   onCountChange: (count: number) => void;
@@ -2951,7 +3195,7 @@ function DiscoverHome({
           <span
             aria-hidden="true"
             data-cola-effect="sparkle-text"
-            className="relative inline-block px-[0.06em] font-serif text-[1.25em] font-normal italic text-[#1a1a1a]"
+            className="relative inline-block px-[0.06em] font-sans text-[1.12em] font-semibold tracking-[-0.045em] text-slate-950"
           >
             创造
           </span>
@@ -2995,6 +3239,8 @@ function DiscoverHome({
       <CreationFeed
         flushTop
         creations={creations}
+        title={isPublicPreview ? "公共精选" : "最近创作"}
+        subtitle={isPublicPreview ? "来自 ColaAI 社区" : "来自你的灵感"}
         isLoading={creationFeedStatus === "loading"}
         isRefreshing={creationFeedStatus === "refreshing"}
         onOpen={onOpenCreation}
@@ -3052,7 +3298,7 @@ export function GenerateWorkspace({
   generationError,
   focusedTaskId,
   focusedCanvasTask,
-  queueUserRole = "user",
+  queueUserRole = "creator",
   onPromptChange,
   onCountChange,
   onQualityChange,
@@ -3085,7 +3331,7 @@ export function GenerateWorkspace({
   generationError: string;
   focusedTaskId?: string;
   focusedCanvasTask?: GenerateTaskDiagnosticsSnapshot | null;
-  queueUserRole?: StoredAuthSession["role"];
+  queueUserRole?: ColaAuthSession["role"];
   onPromptChange: (prompt: string) => void;
   onCountChange: (count: number) => void;
   onQualityChange: (quality: string) => void;
@@ -3352,25 +3598,16 @@ function PromptLibrary({
   return (
     <main
       data-cola-panel="prompt-library"
-      data-cola-design="rova-prompt-library"
+      data-cola-design="clear-studio-prompt-library"
       className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-14 md:pl-[104px] md:pr-8 md:pt-[84px]"
     >
-      <div data-cola-effect="prompt-meteor-field" aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
-        {[0, 1, 2, 3, 4].map((item) => (
-          <span
-            key={item}
-            className="absolute h-px w-24 -rotate-45 bg-gradient-to-r from-transparent via-violet-300/50 to-transparent"
-            style={{ left: `${12 + item * 18}%`, top: `${12 + item * 7}%` }}
-          />
-        ))}
-      </div>
       <section className="mx-auto max-w-[1180px]">
         <div className="mx-auto max-w-[880px] text-center">
           <div
-            data-cola-effect="animated-gradient-border"
-            className="mx-auto mb-5 inline-flex items-center gap-2 rounded-full border border-transparent bg-[linear-gradient(#fff,#fff)_padding-box,linear-gradient(135deg,#a78bfa,#f472b6,#fbbf24,#60a5fa)_border-box] px-4 py-1.5 text-xs font-medium text-slate-500"
+            data-cola-effect="clear-studio-kicker"
+            className="mx-auto mb-5 inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/84 px-4 py-1.5 text-xs font-medium text-slate-500 shadow-[0_12px_32px_-28px_rgba(15,23,42,0.48)]"
           >
-            <Sparkles className="size-3.5 text-amber-400" />
+            <Sparkles className="size-3.5 text-cyan-500" />
             精选提示词库 · 来自 GitHub 开源社区
           </div>
           <h1 className="text-[clamp(34px,5vw,64px)] font-medium leading-[1.04] tracking-[-0.04em] text-slate-950">发现无尽创意</h1>
@@ -3463,7 +3700,7 @@ function PromptLibrary({
               key={card.id}
               data-cola-card="prompt-template"
               data-cola-prompt-id={card.id}
-              className="group flex min-h-[430px] flex-col rounded-[24px] border border-white/82 bg-white/72 p-3 shadow-[0_16px_50px_-44px_rgba(15,23,42,0.72)] ring-1 ring-slate-950/[0.03] backdrop-blur-xl transition hover:-translate-y-1 hover:bg-white/86 hover:shadow-[0_24px_70px_-52px_rgba(15,23,42,0.8)] active:translate-y-0"
+              className={cn(colaCardClass, "group flex min-h-[430px] flex-col p-3")}
               style={{ animationDelay: `${index * 50}ms` }}
             >
               <PromptCardArtwork card={card} />
@@ -3492,7 +3729,7 @@ function PromptLibrary({
                   <button
                     type="button"
                     data-cola-action="copy-library-prompt"
-                    className="flex-1 rounded-full bg-white px-3 py-2 text-xs font-medium text-slate-600 ring-1 ring-black/5 transition hover:bg-slate-50 active:scale-[0.98]"
+                    className={colaButtonClass("secondary", "flex-1 px-3 py-2 text-xs font-medium")}
                     onClick={() => onCopyPrompt(card.prompt)}
                   >
                     复制提示词
@@ -3500,7 +3737,7 @@ function PromptLibrary({
                   <button
                     type="button"
                     data-cola-action="use-library-prompt"
-                    className="flex-1 rounded-full bg-slate-950 px-3 py-2 text-xs font-semibold text-white shadow-[0_14px_34px_-25px_rgba(15,23,42,0.9)] transition hover:bg-slate-800 active:scale-[0.98]"
+                    className={colaButtonClass("primary", "flex-1 px-3 py-2 text-xs")}
                     onClick={() => onUsePrompt(card.prompt)}
                   >
                     去生成
@@ -3527,7 +3764,7 @@ function PromptLibrary({
           <button
             type="button"
             data-cola-action="clear-prompt-filters"
-            className="mt-5 rounded-full bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 active:scale-[0.98]"
+            className={colaButtonClass("primary", "mt-5")}
             onClick={clearPromptFilters}
           >
             清除筛选
@@ -3539,7 +3776,7 @@ function PromptLibrary({
           <button
             type="button"
             data-cola-action="load-more-prompts"
-            className="rounded-full bg-white/74 px-5 py-2.5 text-sm font-medium text-slate-600 ring-1 ring-black/5 transition hover:-translate-y-0.5 hover:bg-white active:translate-y-0"
+            className={colaButtonClass("secondary")}
             onClick={() => setVisiblePage((page) => page + 1)}
           >
             加载更多灵感
@@ -3551,7 +3788,7 @@ function PromptLibrary({
   );
 }
 
-function AssetsWorkspace({
+export function AssetsWorkspace({
   images,
   creations,
   onOpenCreation,
@@ -3565,7 +3802,7 @@ function AssetsWorkspace({
   onDownloadImage: (image: ManagedImage) => void;
 }) {
   return (
-    <main data-cola-panel="assets-workspace" className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
+    <main data-cola-panel="assets-workspace" data-cola-design="clear-studio-assets" className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
       <section className="mx-auto max-w-[1180px]">
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -3598,7 +3835,13 @@ function AssetsWorkspace({
             {images.map((image) => (
               <article key={image.rel || image.url} className="overflow-hidden rounded-[18px] bg-white/80 ring-1 ring-black/5">
                 <div className="aspect-square overflow-hidden bg-slate-100">
-                  <AuthenticatedImage src={image.thumbnail_url || image.url} fallbackSrc={image.url} alt={image.name} className="h-full w-full object-cover" loadingMotion="static" />
+                  <AuthenticatedImage
+                    src={getPreferredPreviewUrl(image, "preferOriginal")}
+                    fallbackSrc={getPreviewFallbackUrl(image, "preferOriginal")}
+                    alt={image.name}
+                    className="h-full w-full object-cover"
+                    loadingMotion="static"
+                  />
                 </div>
                 <div className="flex items-center justify-between gap-2 p-2">
                   <span className="min-w-0 truncate text-xs font-medium text-slate-600">{image.name}</span>
@@ -3634,7 +3877,7 @@ function AssetsWorkspace({
 
 function DeveloperConsole() {
   return (
-    <main data-cola-panel="developer-console" className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
+    <main data-cola-panel="developer-console" data-cola-design="clear-studio-utility" className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
       <section className="mx-auto max-w-[1180px]">
         <div className="mb-7 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -3642,7 +3885,7 @@ function DeveloperConsole() {
             <h1 className="mt-1 text-4xl font-semibold tracking-[-0.03em] text-slate-950 sm:text-5xl">开发者控制台</h1>
             <p className="mt-3 max-w-[560px] text-sm leading-6 text-slate-500">把 ColaAI 的图片生成能力接入你的应用，查看接口调用、任务队列和密钥状态。</p>
           </div>
-          <button type="button" className="w-fit rounded-full bg-slate-950 px-4 py-2 text-sm font-semibold text-white">创建密钥</button>
+          <button type="button" className={colaButtonClass("primary", "w-fit")}>创建密钥</button>
         </div>
 
         <div className="mb-6 flex gap-0 border-b border-slate-200">
@@ -3731,24 +3974,22 @@ Authorization: Bearer cola_sk_...
 function AuthRequiredPanel({
   title,
   message,
-  onLogin,
 }: {
   title: string;
   message: string;
-  onLogin: () => void;
 }) {
   return (
-    <main data-cola-panel="auth-required" className="relative z-10 mx-auto grid min-h-dvh w-full max-w-[1400px] place-items-center px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
-      <section className="w-full max-w-[520px] rounded-[28px] border border-white/80 bg-white/78 p-6 text-center shadow-[0_24px_80px_-54px_rgba(15,23,42,0.75)]">
+    <main data-cola-panel="auth-required" data-cola-design="clear-studio-utility" className="relative z-10 mx-auto grid min-h-dvh w-full max-w-[1400px] place-items-center px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
+      <section className={colaSurfaceClass("raised", "w-full max-w-[520px] p-6 text-center")}>
         <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-slate-950 text-white">
           <Library className="size-5" />
         </div>
         <p className="mt-5 text-sm font-medium text-slate-500">需要登录</p>
         <h1 className="mt-2 text-3xl font-semibold tracking-[-0.03em] text-slate-950">{title}</h1>
         <p className="mx-auto mt-3 max-w-[360px] text-sm leading-6 text-slate-500">{message}</p>
-        <button type="button" className="mt-6 rounded-full bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white" onClick={onLogin}>
+        <Link href="/ColaAI/login" className={colaButtonClass("primary", "mt-6")}>
           去登录
-        </button>
+        </Link>
       </section>
     </main>
   );
@@ -3774,7 +4015,7 @@ function AnnouncementCenter() {
   ];
 
   return (
-    <main data-cola-panel="announcement-center" className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
+    <main data-cola-panel="announcement-center" data-cola-design="clear-studio-utility" className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]">
       <section className="mx-auto max-w-[980px]">
         <div className="text-center">
           <p className="text-sm font-medium text-slate-500">公告</p>
@@ -3783,12 +4024,14 @@ function AnnouncementCenter() {
         </div>
         <div className="mt-8 space-y-3">
           {notices.map((notice) => (
-            <article key={notice.title} className="rounded-[24px] border border-white/80 bg-white/72 p-5 shadow-[0_18px_60px_-50px_rgba(15,23,42,0.72)]">
+            <article key={notice.title} className={colaCardClass}>
+              <div className="p-5">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <h2 className="text-lg font-semibold text-slate-950">{notice.title}</h2>
                 <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">{notice.time}</span>
               </div>
               <p className="mt-3 text-sm leading-6 text-slate-500">{notice.body}</p>
+              </div>
             </article>
           ))}
         </div>
@@ -3801,6 +4044,7 @@ function SettingsWorkspace() {
   return (
     <main
       data-cola-panel="settings-workspace"
+      data-cola-design="clear-studio-utility"
       className="relative z-10 mx-auto min-h-dvh w-full max-w-[1400px] px-4 pb-28 pt-16 md:pl-[104px] md:pr-8 md:pt-[92px]"
     >
       <section className="mx-auto max-w-[980px]">
@@ -3830,7 +4074,7 @@ function MobileMoreSheet({
 }: {
   open: boolean;
   isPublicPreview: boolean;
-  session: StoredAuthSession;
+  session: ColaAuthSession;
   onClose: () => void;
   onLogin: () => void;
   onLogout: () => void;
@@ -3849,6 +4093,7 @@ function MobileMoreSheet({
   return (
     <div
       data-cola-panel="mobile-more-sheet"
+      data-cola-design="clear-studio-utility"
       className={cn(
         "fixed inset-0 z-50 md:hidden",
         open ? "pointer-events-auto" : "pointer-events-none",
@@ -3858,13 +4103,13 @@ function MobileMoreSheet({
       <button type="button" aria-label="关闭更多菜单" className={cn("absolute inset-0 bg-black/30 transition", open ? "opacity-100" : "opacity-0")} onClick={onClose} />
       <div
         className={cn(
-          "absolute inset-x-0 bottom-0 rounded-t-[22px] bg-white p-5 shadow-[0_-20px_60px_-34px_rgba(15,23,42,0.9)] transition duration-300",
+          "absolute inset-x-0 bottom-0 rounded-t-[22px] border border-slate-200/80 bg-white/96 p-5 shadow-[0_-20px_60px_-34px_rgba(15,23,42,0.9)] ring-1 ring-white/80 backdrop-blur-xl transition duration-300",
           open ? "translate-y-0 opacity-100" : "translate-y-full opacity-0",
         )}
       >
         <span className="mx-auto mb-4 block h-1 w-9 rounded-full bg-slate-200" />
         {isPublicPreview ? (
-          <button type="button" className="mb-4 w-full rounded-[14px] bg-slate-950 px-4 py-3 text-sm font-semibold text-white" onClick={onLogin}>
+          <button type="button" className={colaButtonClass("primary", "mb-4 w-full rounded-[14px] py-3")} onClick={onLogin}>
             登录 / 注册
           </button>
         ) : (
@@ -3951,6 +4196,346 @@ function LightweightDialog({
   return null;
 }
 
+const landingHeroIdleMotion: LandingHeroScrollMotion = {
+  progress: 0,
+  coreProgress: 0,
+  orbitProgress: 0,
+  titleProgress: 0,
+  timelineProgress: 0,
+  exitProgress: 0,
+  stageState: "idle",
+};
+
+const landingOrbitCardNames = ["one", "two", "three", "four"] as const;
+const landingOrbitSlotGap = 10;
+const landingOrbitBaseOffset = 140;
+const landingOrbitExtraY = [0, 55, 0, 55] as const;
+
+type LandingOrbitCardName = (typeof landingOrbitCardNames)[number];
+const landingOrbitGeometryProperties: Record<
+  LandingOrbitCardName,
+  {
+    left: string;
+    top: string;
+    width: string;
+    height: string;
+    targetLeft: string;
+    targetWidth: string;
+    translateX: string;
+    translateY: string;
+    scaleX: string;
+    scaleY: string;
+    exitX: string;
+    exitY: string;
+  }
+> = {
+  one: {
+    left: "--landing-orbit-one-left",
+    top: "--landing-orbit-one-top",
+    width: "--landing-orbit-one-width",
+    height: "--landing-orbit-one-height",
+    targetLeft: "--landing-orbit-one-target-left",
+    targetWidth: "--landing-orbit-one-target-width",
+    translateX: "--landing-orbit-one-translate-x",
+    translateY: "--landing-orbit-one-translate-y",
+    scaleX: "--landing-orbit-one-scale-x",
+    scaleY: "--landing-orbit-one-scale-y",
+    exitX: "--landing-orbit-one-exit-x",
+    exitY: "--landing-orbit-one-exit-y",
+  },
+  two: {
+    left: "--landing-orbit-two-left",
+    top: "--landing-orbit-two-top",
+    width: "--landing-orbit-two-width",
+    height: "--landing-orbit-two-height",
+    targetLeft: "--landing-orbit-two-target-left",
+    targetWidth: "--landing-orbit-two-target-width",
+    translateX: "--landing-orbit-two-translate-x",
+    translateY: "--landing-orbit-two-translate-y",
+    scaleX: "--landing-orbit-two-scale-x",
+    scaleY: "--landing-orbit-two-scale-y",
+    exitX: "--landing-orbit-two-exit-x",
+    exitY: "--landing-orbit-two-exit-y",
+  },
+  three: {
+    left: "--landing-orbit-three-left",
+    top: "--landing-orbit-three-top",
+    width: "--landing-orbit-three-width",
+    height: "--landing-orbit-three-height",
+    targetLeft: "--landing-orbit-three-target-left",
+    targetWidth: "--landing-orbit-three-target-width",
+    translateX: "--landing-orbit-three-translate-x",
+    translateY: "--landing-orbit-three-translate-y",
+    scaleX: "--landing-orbit-three-scale-x",
+    scaleY: "--landing-orbit-three-scale-y",
+    exitX: "--landing-orbit-three-exit-x",
+    exitY: "--landing-orbit-three-exit-y",
+  },
+  four: {
+    left: "--landing-orbit-four-left",
+    top: "--landing-orbit-four-top",
+    width: "--landing-orbit-four-width",
+    height: "--landing-orbit-four-height",
+    targetLeft: "--landing-orbit-four-target-left",
+    targetWidth: "--landing-orbit-four-target-width",
+    translateX: "--landing-orbit-four-translate-x",
+    translateY: "--landing-orbit-four-translate-y",
+    scaleX: "--landing-orbit-four-scale-x",
+    scaleY: "--landing-orbit-four-scale-y",
+    exitX: "--landing-orbit-four-exit-x",
+    exitY: "--landing-orbit-four-exit-y",
+  },
+};
+type LandingOrbitBox = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+type LandingHeroOrbitLayout = {
+  lineWidth: number;
+  exitDistance: number;
+  cards: Record<LandingOrbitCardName, {
+    start: LandingOrbitBox;
+    target: LandingOrbitBox;
+  }>;
+};
+
+function clampMotionProgress(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function mixLandingOrbitValue(start: number, end: number, progress: number) {
+  return start + (end - start) * progress;
+}
+
+function px(value: number) {
+  return `${value.toFixed(2)}px`;
+}
+
+function setLandingHeroStyleProperty(hero: HTMLElement, name: string, value: string | number) {
+  const nextValue = String(value);
+  if (hero.style.getPropertyValue(name) !== nextValue) {
+    hero.style.setProperty(name, nextValue);
+  }
+}
+
+function getLandingOrbitStartBox({
+  index,
+  stageWidth,
+  stageHeight,
+  viewportWidth,
+  rootFontSize,
+}: {
+  index: number;
+  stageWidth: number;
+  stageHeight: number;
+  viewportWidth: number;
+  rootFontSize: number;
+}): LandingOrbitBox {
+  const isMobile = viewportWidth <= 640;
+  const width = isMobile ? rootFontSize * 9 : Math.min(viewportWidth * 0.19, 230);
+  const height = isMobile ? rootFontSize * 15 : 188;
+  const topPercents = isMobile ? [0.4, 0.36, 0.11, 0.08] : [0.35, 0.32, 0.11, 0.08];
+  const sidePercents = isMobile ? [0.05, 0.05, 0.08, 0.04] : [0.05, 0.05, 0.08, 0.04];
+
+  if (index === 0) {
+    return { left: stageWidth * sidePercents[0], top: stageHeight * topPercents[0], width, height };
+  }
+  if (index === 1) {
+    return { left: stageWidth - stageWidth * sidePercents[1] - width, top: stageHeight * topPercents[1], width, height };
+  }
+  if (index === 2) {
+    return { left: stageWidth * sidePercents[2], top: stageHeight - stageHeight * topPercents[2] - height, width, height };
+  }
+  return { left: stageWidth - stageWidth * sidePercents[3] - width, top: stageHeight - stageHeight * topPercents[3] - height, width, height };
+}
+
+function getLandingOrbitTargetBoxes({
+  stageWidth,
+  lineLeft,
+  lineTop,
+  lineWidth,
+  rootFontSize,
+  isMobile,
+}: {
+  stageWidth: number;
+  lineLeft: number;
+  lineTop: number;
+  lineWidth: number;
+  rootFontSize: number;
+  isMobile: boolean;
+}): LandingOrbitBox[] {
+  if (isMobile) {
+    const widthPercents = [0.58, 0.52, 0.48, 0.42];
+    let cursorLeft = lineLeft;
+    return widthPercents.map((widthPercent, index) => {
+      const width = stageWidth * widthPercent;
+      const box = {
+        left: cursorLeft,
+        top: lineTop - (landingOrbitBaseOffset + landingOrbitExtraY[index]),
+        width,
+        height: rootFontSize * 15,
+      };
+      cursorLeft += width + 4;
+      return box;
+    });
+  }
+
+  const usableWidth = Math.max(lineWidth - landingOrbitSlotGap * (landingOrbitCardNames.length - 1), 1);
+  const slotWidth = usableWidth / landingOrbitCardNames.length;
+
+  return landingOrbitCardNames.map((_, index) => ({
+    left: lineLeft + index * (slotWidth + landingOrbitSlotGap),
+    top: lineTop - (landingOrbitBaseOffset + landingOrbitExtraY[index]),
+    width: slotWidth,
+    height: 96,
+  }));
+}
+
+function writeLandingHeroOrbitLayout(hero: HTMLElement): LandingHeroOrbitLayout | null {
+  const stage = hero.querySelector<HTMLElement>(".orbit_stage");
+  const timelineLine = hero.querySelector<HTMLElement>(".timeline_line");
+  if (!stage || !timelineLine) {
+    return null;
+  }
+
+  const stageWidth = stage.offsetWidth;
+  const stageHeight = stage.offsetHeight;
+  const lineLeft = timelineLine.offsetLeft;
+  const lineTop = timelineLine.offsetTop;
+  const lineWidth = timelineLine.offsetWidth;
+  if (stageWidth <= 0 || stageHeight <= 0 || lineWidth <= 0) {
+    return null;
+  }
+
+  const view = hero.ownerDocument.defaultView;
+  const viewportWidth = view?.innerWidth ?? stageWidth;
+  const rootFontSize = Number.parseFloat(view?.getComputedStyle(hero.ownerDocument.documentElement).fontSize || "16") || 16;
+  const isMobile = viewportWidth <= 640;
+  const targetBoxes = getLandingOrbitTargetBoxes({ stageWidth, lineLeft, lineTop, lineWidth, rootFontSize, isMobile });
+  const exitDistance = stageWidth * 0.8;
+  const cards = {} as LandingHeroOrbitLayout["cards"];
+
+  setLandingHeroStyleProperty(hero, "--landing-timeline-width", px(lineWidth));
+
+  landingOrbitCardNames.forEach((name: LandingOrbitCardName, index) => {
+    const start = getLandingOrbitStartBox({ index, stageWidth, stageHeight, viewportWidth, rootFontSize });
+    const target = targetBoxes[index];
+    const properties = landingOrbitGeometryProperties[name];
+
+    cards[name] = { start, target };
+    setLandingHeroStyleProperty(hero, properties.left, px(start.left));
+    setLandingHeroStyleProperty(hero, properties.top, px(start.top));
+    setLandingHeroStyleProperty(hero, properties.width, px(start.width));
+    setLandingHeroStyleProperty(hero, properties.height, px(start.height));
+    setLandingHeroStyleProperty(hero, properties.targetLeft, px(target.left));
+    setLandingHeroStyleProperty(hero, properties.targetWidth, px(target.width));
+  });
+
+  return { lineWidth, exitDistance, cards };
+}
+
+function writeLandingHeroOrbitMotion(
+  hero: HTMLElement,
+  layout: LandingHeroOrbitLayout | null,
+  orbitProgress: number,
+  exitProgress: number,
+) {
+  if (!layout) {
+    return;
+  }
+
+  const orbit = clampMotionProgress(orbitProgress);
+  const exit = clampMotionProgress(exitProgress);
+
+  landingOrbitCardNames.forEach((name: LandingOrbitCardName, index) => {
+    const card = layout.cards[name];
+    const properties = landingOrbitGeometryProperties[name];
+    const current = {
+      left: mixLandingOrbitValue(card.start.left, card.target.left, orbit),
+      top: mixLandingOrbitValue(card.start.top, card.target.top, orbit),
+      width: mixLandingOrbitValue(card.start.width, card.target.width, orbit),
+      height: mixLandingOrbitValue(card.start.height, card.target.height, orbit),
+    };
+    const exitDirection = index < 2 ? -1 : 1;
+    const scaleX = card.start.width > 0 ? current.width / card.start.width : 1;
+    const scaleY = card.start.height > 0 ? current.height / card.start.height : 1;
+
+    setLandingHeroStyleProperty(hero, properties.translateX, px(current.left - card.start.left));
+    setLandingHeroStyleProperty(hero, properties.translateY, px(current.top - card.start.top));
+    setLandingHeroStyleProperty(hero, properties.scaleX, scaleX.toFixed(4));
+    setLandingHeroStyleProperty(hero, properties.scaleY, scaleY.toFixed(4));
+    setLandingHeroStyleProperty(hero, properties.exitX, px(exitDirection * layout.exitDistance * exit));
+    setLandingHeroStyleProperty(hero, properties.exitY, px(40 * exit));
+  });
+}
+
+function writeLandingHeroMotionStyle(
+  hero: HTMLElement,
+  motion: LandingHeroScrollMotion,
+  layout: LandingHeroOrbitLayout | null = null,
+) {
+  const orbit = motion.orbitProgress;
+  const timeline = motion.timelineProgress;
+  const exit = motion.exitProgress;
+
+  setLandingHeroStyleProperty(hero, "--landing-progress", motion.progress.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-core-progress", motion.coreProgress.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-orbit-progress", orbit.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-title-progress", motion.titleProgress.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-timeline-progress", timeline.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-exit-progress", exit.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-copy-opacity", Math.max(0, 1 - exit * 1.08).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-copy-y", `${(-16 * motion.titleProgress - 28 * exit).toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-copy-scale", (1 - exit * 0.2).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-primary-title-opacity", (1 - motion.titleProgress).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-primary-title-rotate", `${(-75 * motion.titleProgress).toFixed(2)}deg`);
+  setLandingHeroStyleProperty(hero, "--landing-primary-title-y", `${(-42 * motion.titleProgress - 16 * exit).toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-primary-title-z", `${(-90 * motion.titleProgress).toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-secondary-title-opacity", motion.titleProgress.toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-secondary-title-rotate", `${(75 * (1 - motion.titleProgress)).toFixed(2)}deg`);
+  setLandingHeroStyleProperty(hero, "--landing-secondary-title-y", `${(42 * (1 - motion.titleProgress) - 16 * exit).toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-secondary-title-z", `${(90 * (1 - motion.titleProgress)).toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-core-y", `${(-34 * motion.coreProgress - 22 * exit).toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-core-scale", (1 + motion.coreProgress * 0.25 - exit * 0.9).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-core-opacity", Math.max(0, 1 - exit * 1.18).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-timeline-opacity", Math.max(0, 0.1 + timeline * 0.95 - exit * 0.95).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-line-opacity", Math.max(0, timeline - exit * 0.95).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-cursor-x", px((layout?.lineWidth ?? 0) * timeline));
+  setLandingHeroStyleProperty(hero, "--landing-cursor-scale", (timeline * (1 - exit)).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-cursor-opacity", Math.max(0, timeline - exit).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-mark-opacity", (0.18 + timeline * 0.82).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-orbit-one-rotate", `${(-10 + orbit * 10 - exit * 4).toFixed(2)}deg`);
+  setLandingHeroStyleProperty(hero, "--landing-orbit-one-scale", (1 - orbit * 0.08 - exit * 0.16).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-orbit-two-rotate", `${(8 - orbit * 8 + exit * 4).toFixed(2)}deg`);
+  setLandingHeroStyleProperty(hero, "--landing-orbit-two-scale", (1 - orbit * 0.08 - exit * 0.16).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-orbit-three-rotate", `${(7 - orbit * 7 - exit * 3).toFixed(2)}deg`);
+  setLandingHeroStyleProperty(hero, "--landing-orbit-three-scale", (1 - orbit * 0.08 - exit * 0.16).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-orbit-four-rotate", `${(-8 + orbit * 8 + exit * 3).toFixed(2)}deg`);
+  setLandingHeroStyleProperty(hero, "--landing-orbit-four-scale", (1 - orbit * 0.08 - exit * 0.16).toFixed(4));
+  setLandingHeroStyleProperty(hero, "--landing-orbit-card-opacity", Math.max(0, 1 - exit * 1.15).toFixed(4));
+  writeLandingHeroOrbitMotion(hero, layout, orbit, exit);
+}
+
+function writeLandingHeroPinState(hero: HTMLElement, viewportHeight: number) {
+  const rect = hero.getBoundingClientRect();
+  const heroHeight = Math.max(hero.offsetHeight, viewportHeight);
+  const pinEnd = Math.max(heroHeight - viewportHeight, 0);
+  const heroScrollY = Math.min(Math.max(-rect.top, 0), pinEnd);
+  const pinState = rect.top > 0 ? "before" : heroScrollY >= pinEnd ? "after" : "pinned";
+
+  if (hero.getAttribute("data-cola-pin-state") !== pinState) {
+    hero.setAttribute("data-cola-pin-state", pinState);
+  }
+  setLandingHeroStyleProperty(hero, "--landing-pin-left", `${rect.left.toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-pin-width", `${rect.width.toFixed(2)}px`);
+  setLandingHeroStyleProperty(hero, "--landing-pin-height", `${viewportHeight.toFixed(2)}px`);
+
+  return { heroHeight, heroScrollY };
+}
+
 function CreationPreviewDialog({
   item,
   onClose,
@@ -3971,7 +4556,13 @@ function CreationPreviewDialog({
       <div className="grid w-full max-w-[1000px] gap-5 md:grid-cols-[1fr_300px]" onClick={(event) => event.stopPropagation()}>
         <div className="overflow-hidden rounded-[14px] bg-white/8">
           {item.imageUrl ? (
-            <AuthenticatedImage src={item.imageUrl} alt={item.title} className="max-h-[82dvh] w-full object-contain" loadingMotion="static" />
+            <AuthenticatedImage
+              src={item.imageUrl}
+              fallbackSrc={item.imageFallbackUrl}
+              alt={item.title}
+              className="max-h-[82dvh] w-full object-contain"
+              loadingMotion="static"
+            />
           ) : (
             <div className="aspect-[4/5] bg-gradient-to-br from-sky-200 via-violet-200 to-rose-200" />
           )}
@@ -4015,6 +4606,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   const [dialog, setDialog] = useState<WorkbenchDialog>(null);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [images, setImages] = useState<ManagedImage[]>([]);
+  const [publicDiscoverImages, setPublicDiscoverImages] = useState<CreationItem[]>([]);
   const [creationFeedStatus, setCreationFeedStatus] = useState<CreationFeedStatus>("idle");
   const [submittedTasks, setSubmittedTasks] = useState<GenerateTask[]>([]);
   const [generateSessions, setGenerateSessions] = useState<GenerateSession[]>(() => [initialGenerateSession]);
@@ -4036,21 +4628,41 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     }
   });
   const [selectedCreation, setSelectedCreation] = useState<CreationItem | null>(null);
+  const [selectedCanvasIds, setSelectedCanvasIds] = useState<string[]>([]);
   const [stickyVisible, setStickyVisible] = useState(false);
+  const [landingHeroState, setLandingHeroState] = useState<LandingHeroStageState>("idle");
   const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
   const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
+  const [canvasLibraryRevision, setCanvasLibraryRevision] = useState(0);
+  const landingHeroRef = useRef<HTMLElement | null>(null);
+  const landingSnapLockRef = useRef(false);
+  const landingHeroStateRef = useRef<LandingHeroStageState>("idle");
+  const landingHeroGeometryRef = useRef<LandingHeroOrbitLayout | null>(null);
+  const lastDiscoverScrollYRef = useRef(0);
   const referenceDragDepthRef = useRef(0);
   const referencePreviewUrlRef = useRef("");
   const generateConversationsRef = useRef<ImageConversation[]>([]);
 
   const isPublicPreview = !session.key.trim();
-  const creations = useMemo(() => buildCreations(images), [images]);
+  const publicDiscoverCreations = useMemo(
+    () => (publicDiscoverImages.length > 0 ? publicDiscoverImages : fallbackCreations),
+    [publicDiscoverImages],
+  );
+  const creations = useMemo(
+    () => isPublicPreview ? publicDiscoverCreations : buildCreations(images),
+    [images, isPublicPreview, publicDiscoverCreations],
+  );
+  const landingHeroItems = useMemo(
+    () => isPublicPreview ? buildPublicDiscoverLandingHeroItems(publicDiscoverCreations) : buildLandingHeroItems(images),
+    [images, isPublicPreview, publicDiscoverCreations],
+  );
   const canvasTemplates = useMemo(() => getCanvasTemplateCards(), []);
   const activeTaskIds = useMemo(
     () => submittedTasks.filter((task) => !terminalTaskStatuses.has(task.status)).map((task) => task.id),
     [submittedTasks],
   );
   const canvasHomeEntries = useMemo(() => {
+    void canvasLibraryRevision;
     const storage = typeof window === "undefined"
       ? {
         getItem: () => null,
@@ -4059,7 +4671,12 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       }
       : window.localStorage;
     return getCanvasHomeEntries(storage);
-  }, [activeCanvasId, canvasSubview, mode]);
+  }, [canvasLibraryRevision]);
+
+  useEffect(() => {
+    const visibleCanvasIds = new Set(canvasHomeEntries.map((entry) => entry.id));
+    setSelectedCanvasIds((current) => current.filter((canvasId) => visibleCanvasIds.has(canvasId)));
+  }, [canvasHomeEntries]);
 
   const applyGenerateConversations = useCallback((conversations: ImageConversation[], preferredActiveId?: string) => {
     generateConversationsRef.current = conversations;
@@ -4075,22 +4692,37 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   }, []);
 
   const loadRecentCreations = useCallback(async () => {
-    if (isPublicPreview) {
-      setImages([]);
-      setCreationFeedStatus("idle");
-      return;
-    }
-
-    setCreationFeedStatus((current) => (images.length > 0 || current === "refreshing" ? "refreshing" : "loading"));
+    const hasCurrentCreations = isPublicPreview ? publicDiscoverImages.length > 0 : images.length > 0;
+    setCreationFeedStatus((current) => (hasCurrentCreations || current === "refreshing" ? "refreshing" : "loading"));
     try {
-      const result = await fetchManagedImages({ page_size: 12 });
-      setImages(result.items);
+      if (isPublicPreview) {
+        const result = await fetchPublicDiscoverImages({ page_size: 12 });
+        setPublicDiscoverImages(result.items);
+      } else {
+        const result = await fetchManagedImages({ page_size: 12 });
+        setImages(result.items);
+      }
     } catch {
-      setImages((current) => current);
+      if (isPublicPreview) {
+        setPublicDiscoverImages((current) => current);
+      } else {
+        setImages((current) => current);
+      }
     } finally {
       setCreationFeedStatus("idle");
     }
-  }, [images.length, isPublicPreview]);
+  }, [images.length, isPublicPreview, publicDiscoverImages.length]);
+
+  const scrollToDiscoverHero = useCallback((behavior: ScrollBehavior = "smooth") => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const discoverHero = document.getElementById("cola-discover-hero");
+    if (!discoverHero) {
+      return;
+    }
+    discoverHero.scrollIntoView({ behavior, block: "start" });
+  }, []);
 
   useEffect(() => {
     generateConversationsRef.current = generateConversations;
@@ -4135,24 +4767,30 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   useEffect(() => {
     let active = true;
 
-    if (isPublicPreview) {
-      setImages([]);
-      setCreationFeedStatus("idle");
-      return () => {
-        active = false;
-      };
-    }
-
     const loadImages = async () => {
       setCreationFeedStatus("loading");
       try {
+        if (isPublicPreview) {
+          const result = await fetchPublicDiscoverImages({ page_size: 12 });
+          if (active) {
+            setImages([]);
+            setPublicDiscoverImages(result.items);
+          }
+          return;
+        }
+
         const result = await fetchManagedImages({ page_size: 12 });
         if (active) {
+          setPublicDiscoverImages([]);
           setImages(result.items);
         }
       } catch {
         if (active) {
-          setImages((current) => current);
+          if (isPublicPreview) {
+            setPublicDiscoverImages((current) => current);
+          } else {
+            setImages((current) => current);
+          }
         }
       } finally {
         if (active) {
@@ -4226,20 +4864,168 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   }, [canvasSubview, mode]);
 
   useEffect(() => {
+    if (mode !== "discover") {
+      setStickyVisible(false);
+      return;
+    }
+
     const hero = document.getElementById("cola-discover-hero");
     if (!hero || typeof IntersectionObserver === "undefined") {
+      setStickyVisible(false);
       return;
     }
 
     const observer = new IntersectionObserver(
       ([entry]) => {
-        setStickyVisible(!entry.isIntersecting);
+        setStickyVisible(entry.boundingClientRect.bottom <= 80);
       },
       { threshold: 0, rootMargin: "-80px 0px 0px 0px" },
     );
     observer.observe(hero);
     return () => observer.disconnect();
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "discover" || typeof window === "undefined") {
+      setLandingHeroState("idle");
+      if (landingHeroRef.current) {
+        landingHeroRef.current.setAttribute("data-cola-pin-state", "before");
+        landingHeroGeometryRef.current = writeLandingHeroOrbitLayout(landingHeroRef.current);
+        writeLandingHeroMotionStyle(landingHeroRef.current, landingHeroIdleMotion, landingHeroGeometryRef.current);
+      }
+      landingHeroStateRef.current = "idle";
+      landingHeroGeometryRef.current = null;
+      landingSnapLockRef.current = false;
+      lastDiscoverScrollYRef.current = 0;
+      return;
+    }
+
+    let frame = 0;
+    let active = true;
+
+    const refreshLandingHeroLayout = () => {
+      const hero = landingHeroRef.current;
+      landingHeroGeometryRef.current = hero ? writeLandingHeroOrbitLayout(hero) : null;
+    };
+
+    const updateDiscoverHandoff = (measurements?: {
+      currentScrollY: number;
+      heroHeight: number;
+      viewportHeight: number;
+    }) => {
+      const hero = landingHeroRef.current;
+      const discoverHero = document.getElementById("cola-discover-hero");
+      if (!hero || !discoverHero) {
+        return false;
+      }
+
+      const currentScrollY = measurements?.currentScrollY ?? window.scrollY;
+      const viewportHeight = measurements?.viewportHeight ?? window.innerHeight;
+      const pinMeasurement = writeLandingHeroPinState(hero, viewportHeight);
+      const heroHeight = pinMeasurement.heroHeight;
+      const goingDown = currentScrollY > lastDiscoverScrollYRef.current;
+      lastDiscoverScrollYRef.current = currentScrollY;
+
+      const heroScrollY = pinMeasurement.heroScrollY;
+      const motion = getLandingHeroScrollMotion({
+        scrollY: heroScrollY,
+        heroHeight,
+        viewportHeight,
+      });
+      const layout = landingHeroGeometryRef.current ?? writeLandingHeroOrbitLayout(hero);
+      landingHeroGeometryRef.current = layout;
+      writeLandingHeroMotionStyle(hero, motion, layout);
+      if (motion.stageState !== landingHeroStateRef.current) {
+        landingHeroStateRef.current = motion.stageState;
+        setLandingHeroState(motion.stageState);
+      }
+
+      const discoverViewportTop = discoverHero.getBoundingClientRect().top;
+
+      if (
+        shouldSnapLandingHeroToDiscover({
+          goingDown,
+          snapLocked: landingSnapLockRef.current,
+          heroScrollY,
+          heroHeight,
+          viewportHeight,
+          discoverViewportTop,
+        })
+      ) {
+        landingSnapLockRef.current = true;
+        scrollToDiscoverHero("smooth");
+        window.setTimeout(() => {
+          landingSnapLockRef.current = false;
+        }, 420);
+      }
+
+      if (!goingDown && motion.progress < 0.28) {
+        landingSnapLockRef.current = false;
+      }
+
+      return true;
+    };
+
+    const syncLandingHeroFrame = () => {
+      frame = 0;
+      if (!active) {
+        return;
+      }
+
+      const hero = landingHeroRef.current;
+      const viewportHeight = window.innerHeight;
+      const currentScrollY = window.scrollY;
+      const heroHeight = hero ? Math.max(hero.offsetHeight, viewportHeight) : 0;
+      updateDiscoverHandoff({
+        currentScrollY,
+        heroHeight,
+        viewportHeight,
+      });
+    };
+
+    const scheduleLandingHeroSync = () => {
+      if (frame) {
+        return;
+      }
+      frame = window.requestAnimationFrame(syncLandingHeroFrame);
+    };
+
+    const syncLandingHeroFromResize = () => {
+      refreshLandingHeroLayout();
+      scheduleLandingHeroSync();
+    };
+
+    refreshLandingHeroLayout();
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      const hero = landingHeroRef.current;
+      const stage = hero?.querySelector<HTMLElement>(".orbit_stage") ?? null;
+      const timelineLine = hero?.querySelector<HTMLElement>(".timeline_line") ?? null;
+      resizeObserver = new ResizeObserver(syncLandingHeroFromResize);
+      if (hero) {
+        resizeObserver.observe(hero);
+      }
+      if (stage) {
+        resizeObserver.observe(stage);
+      }
+      if (timelineLine) {
+        resizeObserver.observe(timelineLine);
+      }
+    }
+
+    window.addEventListener("scroll", scheduleLandingHeroSync, { passive: true });
+    window.addEventListener("resize", syncLandingHeroFromResize);
+    scheduleLandingHeroSync();
+    return () => {
+      active = false;
+      resizeObserver?.disconnect();
+      window.removeEventListener("scroll", scheduleLandingHeroSync);
+      window.removeEventListener("resize", syncLandingHeroFromResize);
+      if (frame) {
+        window.cancelAnimationFrame(frame);
+      }
+    };
+  }, [mode, scrollToDiscoverHero]);
 
   useEffect(() => () => clearReferencePreviewUrl(referencePreviewUrlRef), []);
 
@@ -4264,15 +5050,15 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
 
   const handleLogin = useCallback(() => {
     if (typeof window !== "undefined") {
-      window.location.href = "/login";
+      window.location.href = "/ColaAI/login";
     }
   }, []);
 
   const handleLogout = useCallback(() => {
     void (async () => {
-      await clearStoredAuthSession();
+      await clearStoredColaAuthSession();
       if (typeof window !== "undefined") {
-        window.location.href = "/login";
+        window.location.href = "/ColaAI/login";
       }
     })();
   }, []);
@@ -4537,6 +5323,75 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     setMode("generate");
   }, [activeGenerateSessionId, generateSessions]);
 
+  const handleOptimizeCanvasTextPrompt = useCallback(async (_nodeId: string, text: string, model: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return "";
+    }
+    if (!session.key.trim()) {
+      throw new Error("请先登录后再使用 GPT 优化提示词。");
+    }
+
+    const response = await fetch(colaApiPath("/v1/chat/completions"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model.trim() || "auto",
+        stream: false,
+        messages: buildPromptArchitectMessages(trimmed),
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(errorText || `提示词优化失败 (${response.status})`);
+    }
+
+    const optimizedPrompt = extractPromptArchitectResponse(await response.json());
+    if (!optimizedPrompt) {
+      throw new Error("上游返回为空，请稍后重试。");
+    }
+    return optimizedPrompt;
+  }, [session.key]);
+
+  const handleReverseCanvasImagePrompt = useCallback(async (_nodeId: string, text: string, model: string, referenceImages: CanvasReferenceImage[]) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return "";
+    }
+    if (!session.key.trim()) {
+      throw new Error("请先登录后再使用 GPT 图片反推。");
+    }
+
+    const resolvedReferenceImages = await Promise.all(referenceImages.map((image) => normalizeCanvasReferenceImageForChat(image)));
+    const response = await fetch(colaApiPath("/v1/chat/completions"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model.trim() || "auto",
+        stream: false,
+        messages: buildImageReversePromptMessages(trimmed, resolvedReferenceImages),
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(errorText || `图片反推失败 (${response.status})`);
+    }
+
+    const reversedPrompt = extractPromptArchitectResponse(await response.json());
+    if (!reversedPrompt) {
+      throw new Error("上游返回为空，请稍后重试。");
+    }
+    return reversedPrompt;
+  }, [session.key]);
+
   const clearFocusedGenerateTask = useCallback(() => {
     setFocusedGenerateTaskId("");
     setFocusedCanvasTask(null);
@@ -4618,6 +5473,52 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     handleOpenCanvasEditor();
   }, [handleOpenCanvasEditor, persistCanvasDraft]);
 
+  const handleDeleteCanvasRecord = useCallback((canvasId: string) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      deleteCanvasLibraryRecord(window.localStorage, canvasId);
+      setSelectedCanvasIds((current) => current.filter((selectedCanvasId) => selectedCanvasId !== canvasId));
+      setActiveCanvasIdState(getActiveCanvasId(window.localStorage));
+      setCanvasLibraryRevision((current) => current + 1);
+    } catch {
+      // Ignore storage errors and keep the library usable.
+    }
+  }, []);
+
+  const handleToggleCanvasSelection = useCallback((canvasId: string) => {
+    setSelectedCanvasIds((current) => (
+      current.includes(canvasId)
+        ? current.filter((selectedCanvasId) => selectedCanvasId !== canvasId)
+        : [...current, canvasId]
+    ));
+  }, []);
+
+  const handleToggleAllCanvasSelection = useCallback(() => {
+    setSelectedCanvasIds((current) => (
+      canvasHomeEntries.length > 0 && current.length === canvasHomeEntries.length
+        ? []
+        : canvasHomeEntries.map((entry) => entry.id)
+    ));
+  }, [canvasHomeEntries]);
+
+  const handleDeleteSelectedCanvases = useCallback(() => {
+    if (typeof window === "undefined" || selectedCanvasIds.length === 0) {
+      return;
+    }
+
+    try {
+      deleteCanvasLibraryRecords(window.localStorage, selectedCanvasIds);
+      setActiveCanvasIdState(getActiveCanvasId(window.localStorage));
+      setSelectedCanvasIds([]);
+      setCanvasLibraryRevision((current) => current + 1);
+    } catch {
+      // Ignore storage errors and keep the library usable.
+    }
+  }, [selectedCanvasIds]);
+
   return (
     <>
       <section
@@ -4625,7 +5526,8 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         data-cola-drop-scope="global-reference-image"
         data-cola-performance="paint-optimized"
         data-cola-mode={mode}
-        className="relative min-h-dvh overflow-hidden bg-[#fbfdff] text-slate-950"
+        data-cola-design="clear-studio"
+        className={cn("relative isolate min-h-dvh overflow-hidden", colaShellClass)}
         onDragEnter={handleReferenceDragEnter}
         onDragOver={handleReferenceDragOver}
         onDragLeave={handleReferenceDragLeave}
@@ -4633,11 +5535,15 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       >
         <RovaMediaBackground />
         <ReferenceDropOverlay active={isReferenceDragActive} />
+        {isPublicPreview ? <PublicAuthBar /> : null}
 
         <aside
           data-cola-panel="side-nav"
           data-cola-behavior="rova-glass-rail"
-          className="fixed left-4 top-[30px] z-40 hidden h-[calc(100dvh-60px)] w-[72px] flex-col items-center rounded-2xl border border-black/10 bg-white/38 py-5 shadow-[inset_0_4px_4px_rgba(255,255,255,0.26),0_8px_32px_rgba(15,23,42,0.04)] md:flex"
+          className={cn(
+            "fixed left-4 top-1/2 z-40 hidden h-[calc(100dvh-60px)] w-[72px] -translate-y-1/2 flex-col items-center py-5 md:flex",
+            colaPanelClass,
+          )}
         >
           <BrandLogo className="mb-6 text-[26px]" />
 
@@ -4661,7 +5567,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
                     setMode(item.key);
                   }}
                 >
-                  <span className={cn("grid size-9 place-items-center rounded-[14px] transition", active && "text-slate-950")}>
+                  <span className={cn("grid size-9 place-items-center rounded-[14px] transition", active && "bg-slate-950 text-white shadow-[0_14px_34px_-24px_rgba(15,23,42,0.88)]")}>
                     <Icon className="size-4" />
                   </span>
                   {item.label}
@@ -4671,7 +5577,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
           </nav>
 
           <nav className="flex flex-col items-center gap-3">
-            {lowerNavItems.map((item) => {
+            {lowerNavItems.filter((item) => item.key !== "api" && (!("authOnly" in item) || !isPublicPreview)).map((item) => {
               const Icon = item.icon;
               const active = "mode" in item && item.mode === mode;
               return (
@@ -4694,15 +5600,6 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
             })}
             <button
               type="button"
-              data-cola-action="open-announcement"
-              className="grid w-full place-items-center gap-1 text-[11px] font-medium text-slate-500 transition hover:text-slate-900"
-              onClick={() => openDialog("announcement")}
-            >
-              <Bell className="size-4" />
-              公告
-            </button>
-            <button
-              type="button"
               data-cola-action="toggle-language"
               className="grid w-full place-items-center gap-1 text-[11px] font-medium text-slate-500 transition hover:text-slate-900"
               onClick={handleToggleLanguage}
@@ -4710,23 +5607,15 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
               <Languages className="size-4" />
               {language === "zh" ? "EN" : "中文"}
             </button>
-            {isPublicPreview ? (
-              <button
-                type="button"
-                data-cola-action="open-login"
-                className="grid w-full place-items-center gap-1 text-[11px] font-medium text-slate-950 transition hover:text-slate-700"
-                onClick={handleLogin}
-              >
-                <UserPlus className="size-4" />
-                登录
-              </button>
-            ) : null}
           </nav>
         </aside>
 
         <nav
           data-cola-panel="mobile-nav"
-          className="fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-40 grid grid-cols-4 rounded-2xl border border-black/10 bg-white/90 px-2 py-2 shadow-[0_18px_55px_-42px_rgba(15,23,42,0.82)] md:hidden"
+          className={cn(
+            "fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-40 grid grid-cols-4 px-2 py-2 md:hidden",
+            colaPanelClass,
+          )}
         >
           {mobilePrimaryItems.map((item) => {
             const Icon = item.icon;
@@ -4762,9 +5651,12 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
 
         <nav
           data-cola-panel="mobile-utility-nav"
-          className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+4.65rem)] z-40 hidden grid-cols-4 gap-1 rounded-2xl border border-black/10 bg-white/82 px-2 py-2 shadow-[0_18px_50px_-42px_rgba(15,23,42,0.75)] md:hidden"
+          className={cn(
+            "fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+4.65rem)] z-40 hidden grid-cols-4 gap-1 px-2 py-2 md:hidden",
+            colaPanelClass,
+          )}
         >
-          {lowerNavItems.map((item) => {
+          {lowerNavItems.filter((item) => !("authOnly" in item) || !isPublicPreview).map((item) => {
             const Icon = item.icon;
             const active = "mode" in item && item.mode === mode;
             return (
@@ -4786,32 +5678,48 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         </nav>
 
         {mode === "discover" && (
-          <DiscoverHome
-            prompt={prompt}
-            count={count}
-            quality={quality}
-            ratio={ratio}
-            imageModel={imageModel}
-            publicMode={publicMode}
-            referenceImage={referenceImage}
-            isGenerating={isGenerating}
-            stickyVisible={stickyVisible}
-            creations={creationFeedStatus === "loading" && images.length === 0 ? [] : creations}
-            creationFeedStatus={creationFeedStatus}
-            onPromptChange={setPrompt}
-            onCountChange={setCount}
-            onQualityChange={setQuality}
-            onRatioChange={setRatio}
-            onImageModelChange={setImageModel}
-            onPublicChange={setPublicMode}
-            onReferenceFileChange={handleReferenceFileChange}
-            onOpenPrompts={openPromptMarket}
-            onGenerate={handleGenerate}
-            onOpenCreation={setSelectedCreation}
-            onUsePrompt={handleUsePrompt}
-            onCopyPrompt={handleCopyPrompt}
-            onRefreshCreations={loadRecentCreations}
-          />
+          <div
+            data-cola-panel="discover-stack"
+            data-cola-behavior="landing-to-discover-flow"
+            data-cola-scroll-sync="scroll-listener animation-frame"
+            className="relative flex flex-col"
+          >
+            <ColaAILandingHero
+              items={landingHeroItems}
+              stageState={landingHeroState}
+              heroRef={landingHeroRef}
+              onScrollToDiscover={() => scrollToDiscoverHero("smooth")}
+            />
+            <div data-cola-panel="discover-handoff" className="landing-hero__handoff relative">
+              <DiscoverHome
+                prompt={prompt}
+                count={count}
+                quality={quality}
+                ratio={ratio}
+                imageModel={imageModel}
+                publicMode={publicMode}
+                referenceImage={referenceImage}
+                isGenerating={isGenerating}
+                stickyVisible={stickyVisible}
+                creations={creationFeedStatus === "loading" && images.length === 0 ? [] : creations}
+                isPublicPreview={isPublicPreview}
+                creationFeedStatus={creationFeedStatus}
+                onPromptChange={setPrompt}
+                onCountChange={setCount}
+                onQualityChange={setQuality}
+                onRatioChange={setRatio}
+                onImageModelChange={setImageModel}
+                onPublicChange={setPublicMode}
+                onReferenceFileChange={handleReferenceFileChange}
+                onOpenPrompts={openPromptMarket}
+                onGenerate={handleGenerate}
+                onOpenCreation={setSelectedCreation}
+                onUsePrompt={handleUsePrompt}
+                onCopyPrompt={handleCopyPrompt}
+                onRefreshCreations={loadRecentCreations}
+              />
+            </div>
+          </div>
         )}
 
         {mode === "generate" && (
@@ -4854,7 +5762,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         {mode === "prompts" && <PromptLibrary onUsePrompt={handleUsePrompt} onCopyPrompt={handleCopyPrompt} />}
 
         {mode === "assets" && isPublicPreview && (
-          <AuthRequiredPanel title="图片库" message="登录后查看图片库，管理最近生成结果和可复用素材。" onLogin={handleLogin} />
+          <AuthRequiredPanel title="图片库" message="登录后查看图片库，管理最近生成结果和可复用素材。" />
         )}
 
         {mode === "assets" && !isPublicPreview && (
@@ -4868,7 +5776,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         )}
 
         {mode === "developer" && isPublicPreview && (
-          <AuthRequiredPanel title="开发者控制台" message="登录后使用 API，查看密钥、任务队列和接口调用状态。" onLogin={handleLogin} />
+          <AuthRequiredPanel title="开发者控制台" message="登录后使用 API，查看密钥、任务队列和接口调用状态。" />
         )}
 
         {mode === "developer" && !isPublicPreview && <DeveloperConsole />}
@@ -4876,20 +5784,30 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         {mode === "notice" && <AnnouncementCenter />}
 
         {mode === "settings" && <SettingsWorkspace />}
+
+        {mode === "canvas" && canvasSubview === "home" && (
+          <CanvasHome
+            canvases={canvasHomeEntries}
+            templates={canvasTemplates}
+            onOpenCanvas={handleOpenCanvasRecord}
+            onCreateBlank={handleCreateBlankCanvas}
+            onSelectTemplate={handleCreateTemplateCanvas}
+            onDeleteCanvas={handleDeleteCanvasRecord}
+            selectedCanvasIds={selectedCanvasIds}
+            onToggleCanvasSelection={handleToggleCanvasSelection}
+            onToggleAllCanvasSelection={handleToggleAllCanvasSelection}
+            onDeleteSelectedCanvases={handleDeleteSelectedCanvases}
+          />
+        )}
       </section>
 
-      {mode === "canvas" && canvasSubview === "home" && (
-        <CanvasHome
-          canvases={canvasHomeEntries}
-          templates={canvasTemplates}
-          onOpenCanvas={handleOpenCanvasRecord}
-          onCreateBlank={handleCreateBlankCanvas}
-          onSelectTemplate={handleCreateTemplateCanvas}
-        />
-      )}
-
       {mode === "canvas" && canvasSubview === "editor" && (
-        <CanvasWorkspace onBack={handleOpenCanvasHome} onOpenSourceTask={handleOpenCanvasSourceTask} />
+        <CanvasWorkspace
+          onBack={handleOpenCanvasHome}
+          onOpenSourceTask={handleOpenCanvasSourceTask}
+          onOptimizeTextPrompt={handleOptimizeCanvasTextPrompt}
+          onReverseImagePrompt={handleReverseCanvasImagePrompt}
+        />
       )}
 
       <MobileMoreSheet
@@ -4914,7 +5832,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       <PromptMarketModal
         open={promptMarketOpen}
         onOpenChange={setPromptMarketOpen}
-        isAdmin={session.role === "admin"}
+        isAdmin={false}
         darkMode={false}
         onApplyTemplate={handleApplyTemplate}
       />

@@ -13,10 +13,12 @@ export type CanvasNodeType = "text" | "image" | "video" | "config" | "generation
 export type CanvasCreatableNodeType = Exclude<CanvasNodeType, "generation">;
 
 export type CanvasNodeStatus = "idle" | "loading" | "success" | "error";
+export type CanvasImageOption = "panorama" | "multiAngle" | "lighting" | "grid" | "upscale" | "slice";
 
 export type CanvasNodeMetadata = {
   content?: string;
   imageUrl?: string;
+  imageOptions?: CanvasImageOption[];
   prompt?: string;
   promptMode?: "optimize" | "imageReverse" | "imageToText";
   referenceImageNodeIds?: string[];

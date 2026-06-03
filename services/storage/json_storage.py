@@ -10,11 +10,13 @@ from services.storage.base import StorageBackend
 class JSONStorageBackend(StorageBackend):
     """本地 JSON 文件存储后端"""
 
-    def __init__(self, file_path: Path, auth_keys_path: Path | None = None):
+    def __init__(self, file_path: Path, auth_keys_path: Path | None = None, users_path: Path | None = None):
         self.file_path = file_path
         self.auth_keys_path = auth_keys_path or file_path.with_name("auth_keys.json")
+        self.users_path = users_path or file_path.with_name("users.json")
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         self.auth_keys_path.parent.mkdir(parents=True, exist_ok=True)
+        self.users_path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _load_json_list(file_path: Path) -> list[dict[str, Any]]:
@@ -62,6 +64,26 @@ class JSONStorageBackend(StorageBackend):
             encoding="utf-8",
         )
 
+    def load_users(self) -> list[dict[str, Any]]:
+        """从 JSON 文件加载普通用户数据"""
+        if not self.users_path.exists():
+            return []
+        try:
+            data = json.loads(self.users_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, Exception):
+            return []
+        if isinstance(data, dict):
+            data = data.get("items")
+        return data if isinstance(data, list) else []
+
+    def save_users(self, users: list[dict[str, Any]]) -> None:
+        """保存普通用户数据到 JSON 文件"""
+        self.users_path.parent.mkdir(parents=True, exist_ok=True)
+        self.users_path.write_text(
+            json.dumps({"items": users}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def health_check(self) -> dict[str, Any]:
         """健康检查"""
         try:
@@ -75,6 +97,8 @@ class JSONStorageBackend(StorageBackend):
                 "file_path": str(self.file_path),
                 "auth_keys_file_exists": self.auth_keys_path.exists(),
                 "auth_keys_file_path": str(self.auth_keys_path),
+                "users_file_exists": self.users_path.exists(),
+                "users_file_path": str(self.users_path),
             }
         except Exception as e:
             return {
@@ -92,4 +116,6 @@ class JSONStorageBackend(StorageBackend):
             "file_exists": self.file_path.exists(),
             "auth_keys_file_path": str(self.auth_keys_path),
             "auth_keys_file_exists": self.auth_keys_path.exists(),
+            "users_file_path": str(self.users_path),
+            "users_file_exists": self.users_path.exists(),
         }

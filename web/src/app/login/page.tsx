@@ -11,28 +11,7 @@ import { Input } from "@/components/ui/input";
 import { login } from "@/lib/api";
 import { getFriendlyErrorMessage } from "@/lib/error-messages";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
-import { getDefaultRouteForRole, setStoredAuthSession, type StoredAuthLimits } from "@/store/auth";
-
-type LoginLimitsPayload = {
-  requests_per_day?: number | null;
-  images_per_day?: number | null;
-  concurrency?: number | null;
-  models?: string[];
-};
-
-function normalizeLoginLimits(value: unknown): StoredAuthLimits | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  const limits = value as LoginLimitsPayload;
-  return {
-    requestsPerDay: typeof limits.requests_per_day === "number" || limits.requests_per_day === null ? limits.requests_per_day : undefined,
-    imagesPerDay: typeof limits.images_per_day === "number" || limits.images_per_day === null ? limits.images_per_day : undefined,
-    concurrency: typeof limits.concurrency === "number" || limits.concurrency === null ? limits.concurrency : undefined,
-    models: Array.isArray(limits.models) ? limits.models : undefined,
-  };
-}
+import { createStoredAuthSessionFromLoginResponse, setStoredAuthSession } from "@/store/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -43,21 +22,20 @@ export default function LoginPage() {
   const handleLogin = async () => {
     const normalizedLoginValue = authKey.trim();
     if (!normalizedLoginValue) {
-      toast.error("请输入用户密钥或访问码");
+      toast.error("请输入管理员密钥");
       return;
     }
 
     setIsSubmitting(true);
     try {
       const data = await login(normalizedLoginValue);
-      await setStoredAuthSession({
-        key: data.access_token || normalizedLoginValue,
-        role: data.role,
-        subjectId: data.subject_id,
-        name: data.name,
-        limits: normalizeLoginLimits((data as { limits?: unknown }).limits),
-      });
-      router.replace(getDefaultRouteForRole(data.role));
+      if (data.role !== "admin") {
+        toast.error("普通用户请在 ColaAI 内登录。");
+        router.replace("/ColaAI/login");
+        return;
+      }
+      await setStoredAuthSession(createStoredAuthSessionFromLoginResponse(normalizedLoginValue, data));
+      router.replace("/accounts");
     } catch (error) {
       toast.error(getFriendlyErrorMessage(error, "登录失败"));
     } finally {
@@ -82,14 +60,14 @@ export default function LoginPage() {
               <LockKeyhole className="size-5" />
             </div>
             <div className="space-y-2">
-              <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">请输入管理员分配的用户密钥，或使用已开通的访问码进入创作台。</p>
+              <h1 className="text-3xl font-semibold tracking-tight text-stone-950">后台管理登录</h1>
+              <p className="text-sm leading-6 text-stone-500">此入口仅供管理员使用。普通用户请在 ColaAI 内登录和激活访问码。</p>
             </div>
           </div>
 
           <div className="space-y-3">
             <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
-              用户密钥或访问码
+              管理员密钥
             </label>
             <Input
               id="auth-key"
@@ -101,7 +79,7 @@ export default function LoginPage() {
                   void handleLogin();
                 }
               }}
-              placeholder="输入用户密钥或访问码"
+              placeholder="输入管理员密钥"
               className="h-13 rounded-2xl border-stone-200 bg-white px-4"
             />
           </div>
@@ -112,7 +90,7 @@ export default function LoginPage() {
             disabled={isSubmitting}
           >
             {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-            登录
+            登录后台
           </Button>
         </CardContent>
       </Card>

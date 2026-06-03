@@ -4,7 +4,15 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from api.support import openai_response_from_http_exception, openai_usage_limit_exception, require_identity, resolve_image_base_url
+from api.support import (
+    consume_persistent_image_quota,
+    image_credit_cost,
+    normalize_image_resolution,
+    openai_response_from_http_exception,
+    openai_usage_limit_exception,
+    require_identity,
+    resolve_image_base_url,
+)
 from services.content_filter import check_request
 from services.image_task_service import ImageTaskCancelError, ImageTaskNotFound, ImageTaskQueueFull, image_task_service
 from services.log_service import LoggedCall
@@ -16,6 +24,8 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+    resolution: str | None = None
+    public: bool = False
 
 
 class ImageTaskTimingRequest(BaseModel):
@@ -26,6 +36,12 @@ class ImageTaskTimingRequest(BaseModel):
 
 def _parse_task_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _acquire_image_usage_limit(identity: dict[str, object], model: str, *, amount: int = 1):
+    release = usage_limit_service.acquire(identity, model=model, kind="image")
+    consume_persistent_image_quota(identity, release, amount=amount)
+    return release
 
 
 async def filter_or_log(call: LoggedCall, text: str) -> None:
@@ -41,11 +57,13 @@ def create_router() -> APIRouter:
 
     @router.get("/api/image-tasks")
     async def list_image_tasks(
+        request: Request,
         ids: str = Query(default=""),
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids))
+        base_url = resolve_image_base_url(request)
+        return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids), base_url)
 
     @router.get("/api/image-tasks/queue")
     async def get_image_task_queue_overview(
@@ -96,6 +114,8 @@ def create_router() -> APIRouter:
     ):
         identity = require_identity(authorization)
         try:
+            resolution = normalize_image_resolution(body.resolution, strict=True)
+            credit_amount = image_credit_cost(resolution, strict=True)
             await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
             return await run_in_threadpool(
                 image_task_service.submit_generation,
@@ -104,8 +124,10 @@ def create_router() -> APIRouter:
                 prompt=body.prompt,
                 model=body.model,
                 size=body.size,
+                resolution=resolution,
+                public=body.public,
                 base_url=resolve_image_base_url(request),
-                acquire_usage_limit=lambda: usage_limit_service.acquire(identity, model=body.model, kind="image"),
+                acquire_usage_limit=lambda: _acquire_image_usage_limit(identity, body.model, amount=credit_amount),
             )
         except UsageLimitError as exc:
             return openai_response_from_http_exception(openai_usage_limit_exception(exc))
@@ -124,9 +146,13 @@ def create_router() -> APIRouter:
         prompt: str = Form(...),
         model: str = Form(default="gpt-image-2"),
         size: str | None = Form(default=None),
+        resolution: str | None = Form(default=None),
+        public: bool = Form(default=False),
     ):
         identity = require_identity(authorization)
         try:
+            normalized_resolution = normalize_image_resolution(resolution, strict=True)
+            credit_amount = image_credit_cost(normalized_resolution, strict=True)
             await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
             uploads = [*(image or []), *(image_list or [])]
             if not uploads:
@@ -144,9 +170,11 @@ def create_router() -> APIRouter:
                 prompt=prompt,
                 model=model,
                 size=size,
+                resolution=normalized_resolution,
+                public=public,
                 base_url=resolve_image_base_url(request),
                 images=images,
-                acquire_usage_limit=lambda: usage_limit_service.acquire(identity, model=model, kind="image"),
+                acquire_usage_limit=lambda: _acquire_image_usage_limit(identity, model, amount=credit_amount),
             )
         except UsageLimitError as exc:
             return openai_response_from_http_exception(openai_usage_limit_exception(exc))

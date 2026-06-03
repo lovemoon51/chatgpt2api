@@ -7,17 +7,32 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.support import extract_bearer_token, require_admin, require_identity, resolve_image_base_url
+from api.support import (
+    call_auth_with_login_ip,
+    client_ip_from_request,
+    extract_bearer_token,
+    require_admin,
+    require_identity,
+    resolve_image_base_url,
+)
 from services.account_service import account_service
 from services.auth_audit_service import auth_audit_service, key_hint, source_hint
 from services.backup_service import BackupError, backup_service
 from services.config import config
-from services.image_service import delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
+from services.image_service import (
+    delete_images,
+    download_images_zip,
+    get_image_download_response,
+    get_thumbnail_response,
+    list_images,
+    list_public_discover_images,
+)
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 from services.auth_service import auth_service
 from services.register_service import register_service
+from services.signed_url_service import verify_signed_url
 from services.system_status_service import dashboard_payload, healthz_payload, livez_payload, readyz_payload
 
 
@@ -111,6 +126,15 @@ class ProxyTestRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     login: str = ""
+    email: str = ""
+    password: str = ""
+
+
+class ActivationRequest(BaseModel):
+    email: str = ""
+    password: str = ""
+    access_code: str = ""
+    name: str = ""
 
 
 class ImageDeleteRequest(BaseModel):
@@ -125,6 +149,18 @@ class ImageDownloadRequest(BaseModel):
 class ImageTagsRequest(BaseModel):
     path: str
     tags: list[str]
+
+class ImagePublicVisibilityRequest(BaseModel):
+    public: bool
+    start_date: str = ""
+    end_date: str = ""
+    search: str = ""
+    q: str = ""
+    tag: str = ""
+    tags: list[str] | str = []
+    owner: str = ""
+    mode: str = ""
+    model: str = ""
 
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
@@ -215,29 +251,11 @@ def _image_task_service():
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/auth/login")
-    async def login(body: LoginRequest | None = None, authorization: str | None = Header(default=None)):
-        login_value = str(body.login if body else "").strip()
-        bearer_token = extract_bearer_token(authorization)
-        if login_value:
-            identity = None
-            if login_value == str(config.auth_key or "").strip():
-                identity = {"id": "admin", "name": "管理员", "role": "admin"}
-            if identity is None:
-                identity = auth_service.authenticate(login_value)
-            if identity is None:
-                identity = auth_service.authenticate_session_token(login_value)
-            if identity is None and bool(config.get_auth_settings().get("username_login_enabled")):
-                identity = auth_service.authenticate_user_name(login_value)
-            if identity is None:
-                raise HTTPException(status_code=401, detail={"error": "密钥或用户名称无效，请重新输入"})
-        else:
-            identity = require_identity(authorization)
-        credential = bearer_token or login_value
+    def _auth_payload(identity: dict[str, object], *, credential: str = "") -> dict[str, object]:
         access_token = credential
         if identity.get("role") == "user":
             access_token = auth_service.create_session_token(identity)
-        payload = {
+        payload: dict[str, object] = {
             "ok": True,
             "version": app_version,
             "role": identity.get("role"),
@@ -246,8 +264,67 @@ def create_router(app_version: str) -> APIRouter:
             "access_token": access_token,
         }
         if identity.get("role") == "user":
+            payload["email"] = identity.get("email") or ""
             payload["limits"] = identity.get("limits") or {}
         return payload
+
+    @router.post("/auth/login")
+    async def login(
+        request: Request,
+        body: LoginRequest | None = None,
+        authorization: str | None = Header(default=None),
+    ):
+        login_value = str(body.login if body else "").strip()
+        email = str(body.email if body else "").strip()
+        password = str(body.password if body else "")
+        bearer_token = extract_bearer_token(authorization)
+        login_ip = client_ip_from_request(request)
+        if email or password:
+            identity = call_auth_with_login_ip(auth_service.authenticate_password, email, password, login_ip=login_ip)
+            if identity is None:
+                raise HTTPException(status_code=401, detail={"error": "邮箱或密码无效，请重新输入"})
+        elif login_value:
+            identity = None
+            if login_value == str(config.auth_key or "").strip():
+                identity = {"id": "admin", "name": "管理员", "role": "admin"}
+            if identity is None:
+                identity = call_auth_with_login_ip(auth_service.authenticate, login_value, login_ip=login_ip)
+            if identity is None:
+                identity = call_auth_with_login_ip(auth_service.authenticate_session_token, login_value, login_ip=login_ip)
+            if identity is None and bool(config.get_auth_settings().get("username_login_enabled")):
+                identity = call_auth_with_login_ip(auth_service.authenticate_user_name, login_value, login_ip=login_ip)
+            if identity is None:
+                raise HTTPException(status_code=401, detail={"error": "密钥或用户名称无效，请重新输入"})
+        else:
+            identity = require_identity(authorization, login_ip=login_ip)
+        credential = bearer_token or login_value
+        return _auth_payload(identity, credential=credential)
+
+    @router.post("/auth/activate")
+    async def activate(request: Request, body: ActivationRequest | None = None):
+        if body is None:
+            raise HTTPException(status_code=400, detail={"error": "请输入邮箱、密码和访问码"})
+        try:
+            identity = auth_service.activate_user(
+                body.access_code,
+                email=body.email,
+                password=body.password,
+                name=body.name,
+                login_ip=client_ip_from_request(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return _auth_payload(identity)
+
+    @router.post("/api/auth/checkin")
+    async def check_in(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        if identity.get("role") != "user":
+            raise HTTPException(status_code=403, detail={"error": "只有普通用户可以签到"})
+        try:
+            return auth_service.check_in(str(identity.get("id") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.get("/version")
     async def get_version():
@@ -349,6 +426,14 @@ def create_router(app_version: str) -> APIRouter:
             sort=sort_value,
         )
 
+    @router.get("/api/public/discover/images")
+    async def get_public_discover_images(request: Request, page: int = 1, page_size: int = 12):
+        return list_public_discover_images(
+            resolve_image_base_url(request),
+            page=page,
+            page_size=page_size,
+        )
+
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
@@ -358,6 +443,23 @@ def create_router(app_version: str) -> APIRouter:
     async def get_protected_image(image_path: str, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         return get_image_download_response(image_path, identity)
+
+    @router.get("/public-images/{image_path:path}", include_in_schema=False)
+    async def get_public_image(image_path: str, expires: int = 0, signature: str = ""):
+        """
+        公开图片访问端点（带签名验证）
+
+        允许通过签名 URL 临时访问图片，无需认证。
+        签名和过期时间由后端生成，确保安全性。
+        """
+        if not signature or not expires:
+            raise HTTPException(status_code=400, detail="missing signature or expires parameter")
+
+        if not verify_signed_url(image_path, expires, signature):
+            raise HTTPException(status_code=403, detail="invalid or expired signature")
+
+        # 签名验证通过，返回图片（无需身份验证）
+        return get_image_download_response(image_path, identity=None)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
@@ -378,6 +480,31 @@ def create_router(app_version: str) -> APIRouter:
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         return get_image_download_response(image_path, identity)
+
+    @router.get("/api/images/url/{image_path:path}")
+    async def get_image_url_endpoint(image_path: str, request: Request, authorization: str | None = Header(default=None)):
+        """
+        获取图片的签名 URL
+
+        返回包含原始 URL 和签名 URL 的 JSON 对象，
+        前端可以优先使用签名 URL 进行快速访问。
+        """
+        from services.signed_url_service import generate_signed_image_url
+
+        identity = require_identity(authorization)
+        # 验证用户有权限访问这张图片
+        from services.image_service import require_image_access
+        require_image_access(identity, image_path)
+
+        # 生成签名 URL
+        base_url = resolve_image_base_url(request)
+        signed_url = generate_signed_image_url(image_path, base_url, expires_in=3600)
+
+        return {
+            "url": f"/images/{image_path}",
+            "signed_url": signed_url,
+            "expires_in": 3600
+        }
 
     @router.get("/api/logs")
     async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
@@ -498,5 +625,44 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         count = delete_tag(tag)
         return {"ok": True, "removed_from": count}
+
+    @router.post("/api/images/public-visibility")
+    async def update_images_public_visibility(body: ImagePublicVisibilityRequest, request: Request, authorization: str | None = Header(default=None)):
+        identity = require_admin(authorization)
+        raw_tags = body.tags if isinstance(body.tags, list) else [body.tags]
+        tag_values = [
+            item.strip()
+            for item in ",".join(part for part in [body.tag, *raw_tags] if part).split(",")
+            if item.strip()
+        ]
+        result = list_images(
+            resolve_image_base_url(request),
+            start_date=body.start_date.strip(),
+            end_date=body.end_date.strip(),
+            identity=identity,
+            page=1,
+            page_size=0,
+            search=body.search.strip() or body.q.strip(),
+            tag=",".join(dict.fromkeys(tag_values)),
+            owner=body.owner.strip(),
+            mode=body.mode.strip(),
+            model=body.model.strip(),
+        )
+        updated = 0
+        public_tags = {"public", "discover"}
+        for item in result.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("rel") or item.get("path") or "").strip().lstrip("/")
+            if not path:
+                continue
+            current_tags = [str(tag or "").strip() for tag in item.get("tags", []) if str(tag or "").strip()] if isinstance(item.get("tags"), list) else []
+            if body.public:
+                next_tags = list(dict.fromkeys([*current_tags, "public", "discover"]))
+            else:
+                next_tags = [tag for tag in current_tags if tag not in public_tags]
+            set_tags(path, next_tags)
+            updated += 1
+        return {"ok": True, "updated": updated, "public": body.public}
 
     return router

@@ -20,6 +20,7 @@ from services.usage_limit_service import UsageLimitError, usage_limit_service
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 REFRESH_ALL_ACCOUNTS_LOG_TITLE = "一键刷新所有账号信息和额度"
+IMAGE_RESOLUTION_CREDIT_COSTS = {"1k": 1, "2k": 2, "4k": 3}
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -29,11 +30,49 @@ def extract_bearer_token(authorization: str | None) -> str:
     return value.strip()
 
 
+def client_ip_from_request(request: Request | None) -> str:
+    if request is None:
+        return ""
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    return str(request.client.host if request.client else "").strip()
+
+
+def normalize_image_resolution(value: object, *, strict: bool = False) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return "1k"
+    if normalized in IMAGE_RESOLUTION_CREDIT_COSTS:
+        return normalized
+    if strict:
+        raise ValueError("resolution must be one of 1k, 2k, 4k")
+    return "1k"
+
+
+def image_credit_cost(value: object, *, strict: bool = False) -> int:
+    return IMAGE_RESOLUTION_CREDIT_COSTS[normalize_image_resolution(value, strict=strict)]
+
+
 def _legacy_admin_identity(token: str) -> dict[str, object] | None:
     auth_key = str(config.auth_key or "").strip()
     if auth_key and token == auth_key:
         return {"id": "admin", "name": "管理员", "role": "admin"}
     return None
+
+
+def call_auth_with_login_ip(method: Callable[..., dict[str, object] | None], *args: object, login_ip: str = "") -> dict[str, object] | None:
+    if not login_ip:
+        return method(*args)
+    try:
+        return method(*args, login_ip=login_ip)
+    except TypeError as exc:
+        if "login_ip" not in str(exc):
+            raise
+        return method(*args)
 
 
 def require_identity(
@@ -42,6 +81,7 @@ def require_identity(
     source: str = "",
     interface: str = "api",
     subject_role: str = "identity",
+    login_ip: str = "",
 ) -> dict[str, object]:
     token = extract_bearer_token(authorization)
     auth_source = source_hint(token, source)
@@ -52,7 +92,11 @@ def require_identity(
             detail={"error": "认证失败次数过多，请稍后再试"},
             headers={"Retry-After": str(retry_after)},
         )
-    identity = _legacy_admin_identity(token) or auth_service.authenticate(token) or auth_service.authenticate_session_token(token)
+    identity = (
+        _legacy_admin_identity(token)
+        or call_auth_with_login_ip(auth_service.authenticate, token, login_ip=login_ip)
+        or call_auth_with_login_ip(auth_service.authenticate_session_token, token, login_ip=login_ip)
+    )
     if identity is None:
         reason = "missing_bearer_token" if not token else "invalid_or_disabled_key"
         blocked, retry_after = auth_audit_service.record_failure(
@@ -179,11 +223,29 @@ def _raise_usage_limit(exc: UsageLimitError) -> None:
     raise openai_usage_limit_exception(exc) from exc
 
 
-@contextmanager
-def enforce_usage_limits(identity: dict[str, object], endpoint: str, model: str, kind: str) -> Iterator[None]:
+def consume_persistent_image_quota(identity: dict[str, object], release: Callable[[], None], *, amount: int = 1) -> None:
+    if str(identity.get("role") or "").strip().lower() != "user":
+        return
     try:
-        with usage_limit_service.reserve(identity, model=model, kind=kind):
+        auth_service.consume_image_quota(str(identity.get("id") or ""), amount=amount)
+    except ValueError as exc:
+        release()
+        message = str(exc) or "image total limit exceeded"
+        status_code = 403 if "disabled" in message else 429
+        raise UsageLimitError(message, status_code=status_code) from exc
+
+
+@contextmanager
+def enforce_usage_limits(identity: dict[str, object], endpoint: str, model: str, kind: str, *, amount: int = 1) -> Iterator[None]:
+    release: Callable[[], None] = lambda: None
+    try:
+        release = usage_limit_service.acquire(identity, model=model, kind=kind)
+        if kind == "image":
+            consume_persistent_image_quota(identity, release, amount=amount)
+        try:
             yield
+        finally:
+            release()
     except UsageLimitError as exc:
         _raise_usage_limit(exc)
 
@@ -197,10 +259,12 @@ async def _release_after_stream(body_iterator, release: Callable[[], None]) -> I
 
 
 @contextmanager
-def usage_limited_call(identity: dict[str, object], endpoint: str, model: str, kind: str) -> Iterator[Callable[[], None]]:
+def usage_limited_call(identity: dict[str, object], endpoint: str, model: str, kind: str, *, amount: int = 1) -> Iterator[Callable[[], None]]:
     try:
         limiter = usage_limit_service.reserve(identity, model=model, kind=kind)
         limiter.__enter__()
+        if kind == "image":
+            consume_persistent_image_quota(identity, lambda: limiter.__exit__(None, None, None), amount=amount)
     except UsageLimitError as exc:
         _raise_usage_limit(exc)
 

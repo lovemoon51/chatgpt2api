@@ -280,6 +280,55 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual(payloads[0]["source_task_id"], "source-task")
 
+    def test_task_payload_and_public_item_include_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payloads = []
+
+            def handler(payload):
+                payloads.append(payload)
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="resolution-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size="1:1",
+                resolution="4k",
+                base_url="http://local.test",
+            )
+
+            task = wait_for_task(service, OWNER, "resolution-task", "success")
+
+            self.assertEqual(payloads[0]["resolution"], "4k")
+            self.assertEqual(task["resolution"], "4k")
+
+    def test_edit_task_payload_and_public_item_include_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payloads = []
+
+            def handler(payload):
+                payloads.append(payload)
+                return {"data": [{"url": "http://example.test/edit.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_edit(
+                OWNER,
+                client_task_id="edit-resolution-task",
+                prompt="edit cat",
+                model="gpt-image-2",
+                size="1:1",
+                resolution="2k",
+                base_url="http://local.test",
+                images=[(b"image", "image.png", "image/png")],
+            )
+
+            task = wait_for_task(service, OWNER, "edit-resolution-task", "success")
+
+            self.assertEqual(payloads[0]["resolution"], "2k")
+            self.assertEqual(task["resolution"], "2k")
+
     def test_single_worker_leaves_later_tasks_queued(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             started = Event()

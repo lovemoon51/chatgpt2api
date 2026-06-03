@@ -33,3 +33,4 @@ git_cache/
 .codex-runtime-logs/
 runtime-logs/
 utils/output/
+.superpowers/

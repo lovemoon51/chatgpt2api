@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime
 from threading import Lock
 from typing import Iterator
 
@@ -16,12 +15,7 @@ class UsageLimitError(ValueError):
 class UsageLimitService:
     def __init__(self) -> None:
         self._lock = Lock()
-        self._counts: dict[tuple[str, str, str], int] = {}
         self._active: dict[str, int] = {}
-
-    @staticmethod
-    def _today() -> str:
-        return datetime.now().strftime("%Y-%m-%d")
 
     @staticmethod
     def _key_id(identity: dict[str, object]) -> str:
@@ -68,8 +62,6 @@ class UsageLimitService:
         if not key_id:
             return lambda: None
 
-        count_name = "images_per_day" if kind == "image" else "requests_per_day"
-        counter_kind = "image" if kind == "image" else "request"
         with self._lock:
             self.check_model(identity, model)
             limits = identity.get("limits")
@@ -77,13 +69,7 @@ class UsageLimitService:
             active = self._active.get(key_id, 0)
             if concurrency_limit is not None and active >= concurrency_limit:
                 raise UsageLimitError("concurrency limit exceeded", status_code=429)
-            day_limit = self._limit_value(limits, count_name)
-            count_key = (key_id, self._today(), counter_kind)
-            used = self._counts.get(count_key, 0)
-            if day_limit is not None and used >= day_limit:
-                raise UsageLimitError(f"{counter_kind} daily limit exceeded", status_code=429)
             self._active[key_id] = active + 1
-            self._counts[count_key] = used + 1
 
         released = False
 
@@ -111,7 +97,6 @@ class UsageLimitService:
 
     def reset(self) -> None:
         with self._lock:
-            self._counts.clear()
             self._active.clear()
 
 

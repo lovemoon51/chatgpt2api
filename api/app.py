@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from api import accounts, ai, image_tasks, openai_keys, register, system
+from api import accounts, ai, image_tasks, openai_keys, prompt_market, register, system
 from api.support import resolve_web_asset, start_auto_register_watcher, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(accounts.create_router())
     app.include_router(openai_keys.create_router())
     app.include_router(image_tasks.create_router())
+    app.include_router(prompt_market.create_router())
     app.include_router(register.create_router())
     app.include_router(system.create_router(app_version))
     @app.api_route(

@@ -141,6 +141,11 @@ def is_unusable_image_account_error(message: str) -> bool:
     )
 
 
+def is_retryable_image_connection_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return "curl: (35)" in text or "tls connect error" in text or "openssl_internal" in text
+
+
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_usage_limit_error(text):
@@ -148,7 +153,7 @@ def image_stream_error_message(message: str) -> str:
     lower = text.lower()
     if is_checkout_required_error(text):
         return "上游返回 ChatGPT Plus 结账页，当前账号不能生成图片。请换可生成图片的账号，或给账号开通 Plus 后重试。"
-    if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
+    if is_retryable_image_connection_error(lower):
         return "upstream image connection failed, please retry later"
     return text or "image generation failed"
 
@@ -216,6 +221,7 @@ def save_image_bytes(
     mode: str = "",
     source_task_id: str = "",
     revised_prompt: str = "",
+    public: bool = False,
 ) -> str:
     config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
@@ -226,6 +232,7 @@ def save_image_bytes(
     file_path.write_bytes(image_data)
     relative_path = f"{relative_dir.as_posix()}/{filename}"
     record_image_owner(relative_path, owner_identity)
+    public_tags = ["public", "discover"] if public else None
     try:
         from services.image_asset_service import upsert_asset
 
@@ -239,9 +246,17 @@ def save_image_bytes(
             mode=mode,
             source_task_id=source_task_id,
             revised_prompt=revised_prompt,
+            tags=public_tags,
         )
     except Exception:
         pass
+    if public:
+        try:
+            from services.image_tags_service import set_tags
+
+            set_tags(relative_path, ["public", "discover"])
+        except Exception:
+            pass
     return f"{(base_url or config.base_url)}/images/{relative_path}"
 
 
@@ -364,6 +379,7 @@ def format_image_result(
     size: str | None = None,
     mode: str = "",
     source_task_id: str = "",
+    public: bool = False,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
@@ -381,6 +397,7 @@ def format_image_result(
             mode=mode,
             source_task_id=source_task_id,
             revised_prompt=revised_prompt,
+            public=public,
         )
         if response_format == "b64_json":
             data.append({
@@ -407,12 +424,14 @@ class ConversationRequest:
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
+    resolution: str | None = None
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
     owner_identity: dict[str, object] | None = None
     mode: str = ""
     source_task_id: str = ""
+    public: bool = False
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     image_poll_timeout_secs: int | None = None
 
@@ -824,6 +843,7 @@ def stream_image_outputs(
             size=request.size,
             mode=request.mode or ("edit" if request.images else "generate"),
             source_task_id=request.source_task_id,
+            public=request.public,
         )["data"]
         emit_image_progress(
             request.progress_callback,
@@ -1147,6 +1167,16 @@ def _stream_single_image_outputs_with_pool(
             if not emitted_for_token and is_unusable_image_account_error(last_error):
                 account_service.remove_unusable_image_token(token, "image_unusable", last_error)
                 try_register_after_first_failure("unusable_image_account")
+                continue
+            if not emitted_for_token and is_retryable_image_connection_error(last_error):
+                account_service.mark_image_result(token, False)
+                logger.warning({
+                    "event": "image_stream_retryable_connection_error",
+                    "request_token": token,
+                    "attempted_tokens": len(attempted_tokens),
+                    "error": last_error,
+                })
+                try_register_after_first_failure("connection_error")
                 continue
             account_service.mark_image_result(token, False)
             if try_register_after_first_failure("image_stream_error"):

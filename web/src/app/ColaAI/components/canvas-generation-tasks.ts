@@ -1,0 +1,84 @@
+import { createImageEditTask, createImageGenerationTask, type ImageModel, type ImageTask } from "@/lib/api";
+import { fetchImageFile } from "@/lib/image-fetch";
+import type { CanvasGenerationSettings, CanvasReferenceImage } from "./canvas-workflow";
+
+type CanvasGenerationTaskDeps = {
+  createTaskId: (index: number) => string;
+  createGenerationTask?: typeof createImageGenerationTask;
+  createEditTask?: typeof createImageEditTask;
+  fetchReferenceFile?: (imageUrl: string, fileName: string) => Promise<File>;
+};
+
+function normalizeImageModel(model: string): ImageModel | undefined {
+  if (model === "gpt-image-2" || model === "codex-gpt-image-2") {
+    return model;
+  }
+  return undefined;
+}
+
+function normalizeImageSize(size: string) {
+  return size === "智能" ? undefined : size;
+}
+
+function getReferenceFileName(referenceImage: CanvasReferenceImage, index: number) {
+  const title = referenceImage.title.trim() || `参考图-${index + 1}`;
+  return /\.[a-z0-9]{2,5}$/i.test(title) ? title : `${title}.png`;
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "提交生成任务失败，请稍后重试。";
+}
+
+async function createTaskOrFailure(
+  id: string,
+  mode: ImageTask["mode"],
+  createTask: () => Promise<ImageTask>,
+): Promise<ImageTask> {
+  try {
+    return await createTask();
+  } catch (error) {
+    return {
+      id,
+      status: "error",
+      mode,
+      created_at: "",
+      updated_at: "",
+      error: getErrorMessage(error),
+    };
+  }
+}
+
+export async function createCanvasGenerationTasks(
+  settings: CanvasGenerationSettings,
+  deps: CanvasGenerationTaskDeps,
+): Promise<ImageTask[]> {
+  const prompt = settings.prompt.trim();
+  const count = Math.max(1, Math.min(4, settings.count));
+  const model = normalizeImageModel(settings.model);
+  const size = normalizeImageSize(settings.size);
+  const createGeneration = deps.createGenerationTask ?? createImageGenerationTask;
+  const createEdit = deps.createEditTask ?? createImageEditTask;
+  const fetchReference = deps.fetchReferenceFile ?? fetchImageFile;
+
+  if (settings.referenceImages.length > 0) {
+    const referenceFiles = await Promise.all(
+      settings.referenceImages.map((referenceImage, index) =>
+        fetchReference(referenceImage.imageUrl, getReferenceFileName(referenceImage, index)),
+      ),
+    );
+
+    return Promise.all(
+      Array.from({ length: count }, (_, index) => {
+        const id = deps.createTaskId(index);
+        return createTaskOrFailure(id, "edit", () => createEdit(id, referenceFiles, prompt, model, size));
+      }),
+    );
+  }
+
+  return Promise.all(
+    Array.from({ length: count }, (_, index) => {
+      const id = deps.createTaskId(index);
+      return createTaskOrFailure(id, "generate", () => createGeneration(id, prompt, model, size));
+    }),
+  );
+}

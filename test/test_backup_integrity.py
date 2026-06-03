@@ -62,6 +62,7 @@ class BackupIntegrityTests(unittest.TestCase):
             },
             "snapshots/accounts.json": [{"access_token": "token"}],
             "snapshots/auth_keys.json": [{"id": "key-1"}],
+            "snapshots/users.json": [{"id": "user-1"}],
             "data/register.json": {"enabled": False},
             "data/logs.jsonl": '{"time":"now","type":"call"}\n',
         })
@@ -72,13 +73,14 @@ class BackupIntegrityTests(unittest.TestCase):
         self.assertTrue(report["readable"])
         self.assertTrue(report["restorable"])
         self.assertEqual(report["summary"]["errors"], 0)
-        self.assertEqual(report["summary"]["files"], 5)
-        self.assertEqual(report["summary"]["snapshots"], 2)
+        self.assertEqual(report["summary"]["files"], 6)
+        self.assertEqual(report["summary"]["snapshots"], 3)
 
     def test_tar_backup_without_metadata_is_not_restorable(self) -> None:
         payload = make_tar({
             "snapshots/accounts.json": [],
             "snapshots/auth_keys.json": [],
+            "snapshots/users.json": [],
         })
 
         report = self.service._verify_backup_payload("backups/backup-test.tar.gz", payload)
@@ -105,13 +107,14 @@ class BackupIntegrityTests(unittest.TestCase):
             },
             "snapshots/accounts.json": [],
             "snapshots/auth_keys.json": [],
+            "snapshots/users.json": [],
         })
 
         report = self.service._verify_backup_payload("backups/backup-test.zip", payload)
 
         self.assertTrue(report["ok"])
         self.assertTrue(report["readable"])
-        self.assertEqual(report["summary"]["snapshots"], 2)
+        self.assertEqual(report["summary"]["snapshots"], 3)
 
     def test_json_backup_is_parsed(self) -> None:
         payload = json.dumps({"metadata": {"version": 1}, "items": []}).encode("utf-8")
@@ -121,6 +124,53 @@ class BackupIntegrityTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertTrue(report["readable"])
         self.assertEqual(report["files"][0]["content_type"], "application/json")
+
+    def test_build_backup_archive_includes_users_snapshot_with_auth_keys(self) -> None:
+        class FakeStorage:
+            def get_backend_info(self) -> dict[str, object]:
+                return {"type": "fake"}
+
+            def load_auth_keys(self) -> list[dict[str, object]]:
+                return [{"id": "key-1", "user_id": "user-1"}]
+
+            def load_users(self) -> list[dict[str, object]]:
+                return [{"id": "user-1", "name": "Alice"}]
+
+        class FakeConfig:
+            app_version = "test-version"
+
+            def get_storage_backend(self) -> FakeStorage:
+                return FakeStorage()
+
+        with mock.patch("services.backup_service.config", FakeConfig()):
+            payload = self.service._build_backup_archive(
+                {
+                    "include": {
+                        "config": False,
+                        "register": False,
+                        "cpa": False,
+                        "sub2api": False,
+                        "logs": False,
+                        "image_tasks": False,
+                        "accounts_snapshot": False,
+                        "auth_keys_snapshot": True,
+                        "images": False,
+                    }
+                },
+                trigger="manual",
+            )
+
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            names = set(archive.getnames())
+            users_raw = archive.extractfile("snapshots/users.json")
+            auth_keys_raw = archive.extractfile("snapshots/auth_keys.json")
+
+            self.assertIn("snapshots/users.json", names)
+            self.assertIn("snapshots/auth_keys.json", names)
+            self.assertIsNotNone(users_raw)
+            self.assertIsNotNone(auth_keys_raw)
+            self.assertEqual(json.loads(users_raw.read().decode("utf-8")), [{"id": "user-1", "name": "Alice"}])
+            self.assertEqual(json.loads(auth_keys_raw.read().decode("utf-8")), [{"id": "key-1", "user_id": "user-1"}])
 
 
 class FakeBackupService:

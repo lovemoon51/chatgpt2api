@@ -917,7 +917,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     });
 
   const runConversationQueue = useCallback(
-    async (conversationId: string) => {
+    async function runQueuedConversation(conversationId: string) {
       if (activeConversationQueueIds.has(conversationId)) {
         return;
       }
@@ -1077,7 +1077,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 turn.images.some((image) => image.status === "loading"),
             )
           ) {
-            void runConversationQueue(conversation.id);
+            void runQueuedConversation(conversation.id);
           }
         }
       }
@@ -1488,7 +1488,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 }
 
 export default function ImagePage() {
-  const { isCheckingAuth, session } = useAuthGuard();
+  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
 
   if (isCheckingAuth || !session) {
     return (

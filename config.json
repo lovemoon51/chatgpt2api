@@ -11,7 +11,7 @@
     "info",
     "warning"
   ],
-  "proxy": "http://127.0.0.1:7890",
+  "proxy": "",
   "base_url": "",
   "sensitive_words": [],
   "global_system_prompt": "",
@@ -46,12 +46,12 @@
       "images": false
     }
   },
-  "image_account_concurrency": 3,
+  "image_account_concurrency": 20,
   "auto_register": {
     "enabled": true,
-    "min_available": 50,
+    "min_available": 30,
     "target_available": 50,
-    "check_interval_seconds": 30,
+    "check_interval_seconds": 300,
     "cooldown_seconds": 300
   },
   "account_pool": {
@@ -60,5 +60,8 @@
   "refresh_account_workers": 4,
   "refresh_account_batch_size": 8,
   "refresh_account_batch_interval_seconds": 0.3,
-  "refresh_account_fast_path_threshold": 3
+  "refresh_account_fast_path_threshold": 3,
+  "auth": {
+    "username_login_enabled": false
+  }
 }

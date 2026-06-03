@@ -509,6 +509,22 @@ class ConfigStore:
             env="DATABASE_URL",
         )
         add_item(
+            "storage.postgres_sync_database_url",
+            "PostgreSQL 同步连接串",
+            source="env" if os.getenv("POSTGRES_SYNC_DATABASE_URL") else "default",
+            value=os.getenv("POSTGRES_SYNC_DATABASE_URL"),
+            sensitive=True,
+            env="POSTGRES_SYNC_DATABASE_URL",
+        )
+        add_item(
+            "storage.image_metadata_database_url",
+            "图片元数据数据库连接串",
+            source="env" if os.getenv("IMAGE_METADATA_DATABASE_URL") else "default",
+            value=os.getenv("IMAGE_METADATA_DATABASE_URL"),
+            sensitive=True,
+            env="IMAGE_METADATA_DATABASE_URL",
+        )
+        add_item(
             "storage.git_repo_url",
             "Git 存储仓库",
             source="env" if os.getenv("GIT_REPO_URL") else "default",

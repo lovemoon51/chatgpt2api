@@ -6,6 +6,8 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import (
+    image_credit_cost,
+    normalize_image_resolution,
     openai_http_exception,
     openai_response_from_http_exception,
     release_usage_limit_after_response,
@@ -45,6 +47,7 @@ class ImageGenerationRequest(BaseModel):
     model: str = "gpt-image-2"
     n: int = Field(default=1, ge=1, le=4)
     size: str | None = None
+    resolution: str | None = None
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
@@ -156,10 +159,12 @@ def create_router() -> APIRouter:
     ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        resolution = normalize_image_resolution(body.resolution, strict=False)
+        payload["resolution"] = resolution
         payload["base_url"] = resolve_image_base_url(request)
         payload["owner_identity"] = identity
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
-        with usage_limited_call(identity, "/v1/images/generations", body.model, "image") as release_limit:
+        with usage_limited_call(identity, "/v1/images/generations", body.model, "image", amount=image_credit_cost(resolution) * body.n) as release_limit:
             await filter_or_log(call, body.prompt)
             response = await call.run(openai_v1_image_generations.handle, payload)
             return release_usage_limit_after_response(response, release_limit)
@@ -174,6 +179,7 @@ def create_router() -> APIRouter:
             model: str = Form(default="gpt-image-2"),
             n: int = Form(default=1),
             size: str | None = Form(default=None),
+            resolution: str | None = Form(default=None),
             response_format: str = Form(default="b64_json"),
             stream: bool | None = Form(default=None),
     ):
@@ -181,7 +187,8 @@ def create_router() -> APIRouter:
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
         if n < 1 or n > 4:
             raise openai_http_exception("n must be between 1 and 4", status_code=400, param="n", code="invalid_value")
-        with usage_limited_call(identity, "/v1/images/edits", model, "image") as release_limit:
+        normalized_resolution = normalize_image_resolution(resolution, strict=False)
+        with usage_limited_call(identity, "/v1/images/edits", model, "image", amount=image_credit_cost(normalized_resolution) * n) as release_limit:
             await filter_or_log(call, prompt)
             uploads = [*(image or []), *(image_list or [])]
             if not uploads:
@@ -203,6 +210,7 @@ def create_router() -> APIRouter:
                 "model": model,
                 "n": n,
                 "size": size,
+                "resolution": normalized_resolution,
                 "response_format": response_format,
                 "stream": stream,
                 "base_url": resolve_image_base_url(request),

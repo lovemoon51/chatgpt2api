@@ -6,12 +6,14 @@ from threading import RLock
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
 from services.config import DATA_DIR, config
+from services.image_metadata_storage import get_image_metadata_storage
 from services.image_asset_service import (
     load_assets,
     mark_asset_deleted,
@@ -20,6 +22,7 @@ from services.image_asset_service import (
     upsert_asset,
 )
 from services.image_tags_service import load_tags, remove_tags
+from services.signed_url_service import generate_signed_image_url
 
 THUMBNAIL_SIZE = (320, 320)
 IMAGE_OWNERS_FILE = DATA_DIR / "image_owners.json"
@@ -72,6 +75,19 @@ def _owner_payload(identity: dict[str, object] | None) -> dict[str, object]:
 
 
 def _load_image_owners_locked() -> dict[str, dict[str, object]]:
+    storage = get_image_metadata_storage()
+    if storage is not None:
+        owners = _clean_image_owners(storage.load_map("image_owners").values())
+        if owners:
+            return owners
+        legacy_owners = _load_json_image_owners_locked()
+        if legacy_owners:
+            storage.save_map("image_owners", legacy_owners)
+        return legacy_owners
+    return _load_json_image_owners_locked()
+
+
+def _load_json_image_owners_locked() -> dict[str, dict[str, object]]:
     try:
         raw = json.loads(IMAGE_OWNERS_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -80,6 +96,12 @@ def _load_image_owners_locked() -> dict[str, dict[str, object]]:
         return {}
     items = raw.get("items") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
+        return {}
+    return _clean_image_owners(items)
+
+
+def _clean_image_owners(items: object) -> dict[str, dict[str, object]]:
+    if not isinstance(items, list) and not hasattr(items, "__iter__"):
         return {}
     owners: dict[str, dict[str, object]] = {}
     for item in items:
@@ -103,6 +125,9 @@ def _load_image_owners_locked() -> dict[str, dict[str, object]]:
 
 
 def _save_image_owners_locked(owners: dict[str, dict[str, object]]) -> None:
+    storage = get_image_metadata_storage()
+    if storage is not None:
+        storage.save_map("image_owners", owners)
     IMAGE_OWNERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     items = sorted(owners.values(), key=lambda item: str(item.get("path") or ""))
     tmp_path = IMAGE_OWNERS_FILE.with_suffix(IMAGE_OWNERS_FILE.suffix + ".tmp")
@@ -201,7 +226,10 @@ def get_thumbnail_response(relative_path: str, identity: dict[str, object] | Non
 
 
 def get_image_download_response(relative_path: str, identity: dict[str, object] | None = None) -> FileResponse:
-    require_image_access(identity, relative_path)
+    # 如果 identity 不为 None，则进行权限检查
+    # 如果 identity 为 None，说明是通过签名 URL 访问，跳过权限检查
+    if identity is not None:
+        require_image_access(identity, relative_path)
     path = _safe_image_path(relative_path)
     return FileResponse(path, filename=path.name)
 
@@ -427,6 +455,134 @@ def list_images(
         "pages": pages,
         "total": total,
         "has_more": normalized_page_size > 0 and normalized_page * normalized_page_size < total,
+    }
+
+
+def _public_discover_item(item: dict[str, object], base_url: str) -> dict[str, object]:
+    path = str(item.get("path") or item.get("rel") or "")
+    prompt = str(item.get("prompt") or "").strip()
+    revised_prompt = str(item.get("revised_prompt") or "").strip()
+    title = str(item.get("title") or "").strip() or prompt or str(item.get("name") or path.rsplit("/", 1)[-1]).rsplit(".", 1)[0] or "公共精选"
+    width = item.get("width")
+    height = item.get("height")
+    subtitle = f"{width} x {height}" if width and height else str(item.get("subtitle") or "").strip() or "ColaAI 公共精选"
+    signed_url = generate_signed_image_url(path, base_url.rstrip("/"), expires_in=3600)
+    return {
+        "id": path,
+        "title": title,
+        "subtitle": subtitle,
+        "prompt": revised_prompt or prompt or "复用这张公共精选的视觉风格继续创作。",
+        "imageUrl": signed_url,
+        "imageFallbackUrl": signed_url,
+        "path": path,
+        "created_at": str(item.get("created_at") or ""),
+        "tags": item.get("tags") if isinstance(item.get("tags"), list) else [],
+    }
+
+
+def _path_from_public_preview_url(value: object) -> str | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    parsed_path = urlparse(raw_value).path if "://" in raw_value or raw_value.startswith("//") else raw_value
+    path = unquote(parsed_path.split("?", 1)[0].split("#", 1)[0]).lstrip("/")
+    if path.startswith("images/"):
+        return path.removeprefix("images/")
+    if path.startswith("image-thumbnails/"):
+        return path.removeprefix("image-thumbnails/")
+    return None
+
+
+def _existing_public_preview_path(preview: object) -> str | None:
+    if not isinstance(preview, dict):
+        return None
+    for key in ("url", "thumbnail_url"):
+        candidate = _path_from_public_preview_url(preview.get(key))
+        if not candidate:
+            continue
+        for rel in (candidate, candidate.removesuffix(".png") if candidate.endswith(".png") else ""):
+            if not rel:
+                continue
+            try:
+                safe_rel = _safe_relative_path(rel)
+            except HTTPException:
+                continue
+            if (config.images_dir / safe_rel).is_file():
+                return safe_rel
+    return None
+
+
+def _public_template_preview_items() -> list[dict[str, object]]:
+    from services.prompt_template_service import prompt_template_service
+
+    try:
+        templates = prompt_template_service.list(
+            {"id": "public-discover", "name": "ColaAI", "role": "user"},
+            scope="public",
+        ).get("items", [])
+    except Exception:
+        return []
+
+    items: list[dict[str, object]] = []
+    for template in templates:
+        if not isinstance(template, dict):
+            continue
+        if template.get("visibility") != "public" or template.get("review_status") != "approved":
+            continue
+        path = _existing_public_preview_path(template.get("preview_image"))
+        if not path:
+            continue
+        dimensions = _image_dimensions(config.images_dir / path)
+        tags = template.get("tags")
+        item: dict[str, object] = {
+            "path": path,
+            "rel": path,
+            "name": Path(path).name,
+            "title": str(template.get("title") or "").strip(),
+            "subtitle": str(template.get("description") or "").strip() or "ColaAI 公共精选",
+            "prompt": str(template.get("prompt") or "").strip(),
+            "created_at": str(template.get("updated_at") or template.get("created_at") or ""),
+            "tags": tags if isinstance(tags, list) else [],
+        }
+        if dimensions:
+            item.update({"width": dimensions[0], "height": dimensions[1]})
+        items.append(item)
+    return items
+
+
+def list_public_discover_images(base_url: str, page: int = 1, page_size: int = 12) -> dict[str, object]:
+    normalized_page = max(1, int(page or 1))
+    normalized_page_size = max(1, min(48, int(page_size or 12)))
+    tagged_result = list_images(
+        base_url,
+        identity={"role": "admin"},
+        page=1,
+        page_size=0,
+        tag="public,discover",
+        sort="-created_at",
+    )
+    merged_items: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    for item in [*tagged_result["items"], *_public_template_preview_items()]:
+        path = str(item.get("path") or item.get("rel") or "").strip()
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        merged_items.append(item)
+    merged_items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    total = len(merged_items)
+    start = (normalized_page - 1) * normalized_page_size
+    end = start + normalized_page_size
+    items = [_public_discover_item(item, base_url) for item in merged_items[start:end]]
+    pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
+    return {
+        "items": items,
+        "groups": [],
+        "page": normalized_page,
+        "page_size": normalized_page_size,
+        "pages": pages,
+        "total": total,
+        "has_more": normalized_page * normalized_page_size < total,
     }
 
 

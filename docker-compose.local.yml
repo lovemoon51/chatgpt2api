@@ -20,6 +20,10 @@ services:
     # 数据库配置 (当 STORAGE_BACKEND=sqlite/postgres 时使用)
     #   DATABASE_URL: postgresql://user:password@host:5432/dbname
     #   DATABASE_URL: sqlite:////app/data/accounts.db
+    # PostgreSQL 同步配置 (保留当前 STORAGE_BACKEND，并优先从 PostgreSQL 读取)
+    #   POSTGRES_SYNC_DATABASE_URL: postgresql://user:password@host:5432/dbname
+    # 图片元数据数据库配置 (图片文件仍保存在 data/images)
+    #   IMAGE_METADATA_DATABASE_URL: postgresql://user:password@host:5432/dbname
 
     # Git 仓库配置 (当 STORAGE_BACKEND=git 时使用)
     #   GIT_REPO_URL: https://github.com/user/repo.git

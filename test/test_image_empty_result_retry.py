@@ -738,6 +738,39 @@ class ImageEmptyResultRetryTests(unittest.TestCase):
         self.assertEqual(outputs[0].data[0]["url"], "http://example.test/image.png")
         self.assertEqual(fake_accounts.marked, [("token-1", False), ("token-2", True)])
 
+    def test_upstream_connection_error_retries_next_account(self) -> None:
+        fake_accounts = FakeAccountService(["token-1", "token-2"])
+
+        def fake_stream(_backend, request, index, total):
+            if getattr(_backend, "access_token", "") == "token-1":
+                raise RuntimeError(
+                    "Failed to perform, curl: (35) TLS connect error: "
+                    "error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)."
+                )
+            return iter([
+                conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"url": "http://example.test/image.png"}],
+                )
+            ])
+
+        with (
+            mock.patch.object(conversation, "account_service", fake_accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", side_effect=lambda access_token: type("Backend", (), {"access_token": access_token})()),
+            mock.patch.object(conversation, "stream_image_outputs", side_effect=fake_stream),
+        ):
+            outputs = list(
+                conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(model="gpt-image-2", prompt="cat")
+                )
+            )
+
+        self.assertEqual(outputs[0].data[0]["url"], "http://example.test/image.png")
+        self.assertEqual(fake_accounts.marked, [("token-1", False), ("token-2", True)])
+
     def test_invalid_token_is_removed_and_next_account_is_used(self) -> None:
         fake_accounts = FakeAccountService(["token-1", "token-2"])
 

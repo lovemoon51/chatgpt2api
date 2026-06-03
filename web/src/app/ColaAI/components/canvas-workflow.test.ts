@@ -105,6 +105,38 @@ describe("canvas workflow helpers", () => {
     expect(settings.videoResolution).toBe("720p");
   });
 
+  test("keeps an image config in image mode when global fallback is video", () => {
+    const state = withCustomWorkflow();
+    const imageConfigState = {
+      ...state,
+      nodes: state.nodes.map((node) => (
+        node.id === "seed-config"
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                generationMode: undefined,
+                model: "gpt-image-2",
+                count: 2,
+              },
+            }
+          : node
+      )),
+    };
+
+    const settings = collectCanvasGenerationSettings(imageConfigState, "seed-config", {
+      prompt: "默认提示词",
+      model: "agnes-video-v2.0",
+      size: "16:9",
+      count: 1,
+      generationMode: "video",
+    });
+
+    expect(settings.generationMode).toBe("image");
+    expect(settings.model).toBe("gpt-image-2");
+    expect(settings.count).toBe(2);
+  });
+
   test("walks transitive upstream nodes when selected node is a generated result", () => {
     const settings = collectCanvasGenerationSettings(withCustomWorkflow(), "seed-generation", {
       prompt: "默认提示词",

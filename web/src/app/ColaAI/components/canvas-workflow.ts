@@ -37,6 +37,19 @@ export type CanvasUpstreamSummary = {
 
 type BaseGenerationSettings = Pick<CanvasGenerationSettings, "prompt" | "model" | "size" | "count" | "generationMode" | "videoDurationSeconds" | "videoResolution" | "videoCustomWidth" | "videoCustomHeight">;
 
+function getConfigGenerationMode(config: CanvasNodeData | undefined, fallback: BaseGenerationSettings) {
+  if (!config) {
+    return fallback.generationMode || "image";
+  }
+  if (config.metadata?.generationMode) {
+    return config.metadata.generationMode;
+  }
+  if (config.metadata?.model === "agnes-video-v2.0") {
+    return "video";
+  }
+  return "image";
+}
+
 function getPromptPart(node: CanvasNodeData) {
   if (node.type === "text") {
     return node.metadata?.content || node.metadata?.prompt || "";
@@ -107,7 +120,7 @@ export function collectCanvasGenerationSettings(
   });
   const configNodes = sourceNodes.filter((node) => node.type === "config");
   const config = configNodes.at(-1);
-  const generationMode = config?.metadata?.generationMode || fallback.generationMode || "image";
+  const generationMode = getConfigGenerationMode(config, fallback);
 
   return {
     prompt,

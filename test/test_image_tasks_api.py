@@ -28,6 +28,7 @@ class FakeImageTaskService:
     def __init__(self):
         self.generation_calls = []
         self.edit_calls = []
+        self.video_calls = []
         self.cancel_calls = []
         self.timing_calls = []
         self.releases = []
@@ -59,6 +60,25 @@ class FakeImageTaskService:
             "phase": "queued",
             "phase_label": "排队中",
             "mode": "edit",
+            "created_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00",
+            "timings": {},
+            "timing_ms": {},
+        }
+
+    def submit_video(self, identity, **kwargs):
+        if kwargs.get("acquire_usage_limit") is not None:
+            kwargs["release_usage_limit"] = kwargs["acquire_usage_limit"]()
+        self.video_calls.append((identity, kwargs))
+        return {
+            "id": kwargs["client_task_id"],
+            "status": "queued",
+            "phase": "queued",
+            "phase_label": "排队中",
+            "mode": "video",
+            "media_type": "video",
+            "model": kwargs["model"],
+            "size": kwargs["size"],
             "created_at": "2026-01-01 00:00:00",
             "updated_at": "2026-01-01 00:00:00",
             "timings": {},
@@ -283,6 +303,29 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(self.fake_service.edit_calls), 1)
         self.assertIs(self.fake_service.edit_calls[0][1]["public"], True)
+
+    def test_create_video_task_passes_reference_urls(self):
+        response = self.client.post(
+            "/api/image-tasks/videos",
+            headers=AUTH_HEADERS,
+            json={
+                "client_task_id": "video-1",
+                "prompt": "animate the product",
+                "model": "agnes-video-v2.0",
+                "size": "16:9",
+                "reference_image_urls": ["https://cdn.example.test/product.png"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["id"], "video-1")
+        self.assertEqual(payload["mode"], "video")
+        self.assertEqual(payload["media_type"], "video")
+        self.assertEqual(len(self.fake_service.video_calls), 1)
+        self.assertEqual(self.fake_service.video_calls[0][1]["model"], "agnes-video-v2.0")
+        self.assertEqual(self.fake_service.video_calls[0][1]["size"], "16:9")
+        self.assertEqual(self.fake_service.video_calls[0][1]["reference_image_urls"], ["https://cdn.example.test/product.png"])
 
     def test_cancel_task_releases_background_limit(self):
         create_response = self.client.post(

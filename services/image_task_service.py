@@ -16,7 +16,7 @@ from services.content_filter import request_text
 from services.image_metadata_storage import get_image_metadata_storage
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol.conversation import no_image_result_message
-from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.protocol import agnes_ai_video, openai_v1_image_edit, openai_v1_image_generations
 from services.system_status_service import worker_error, worker_heartbeat, worker_started, worker_stopped
 
 TASK_STATUS_QUEUED = "queued"
@@ -135,6 +135,16 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+def _collect_media_urls(data: list[Any]) -> list[str]:
+    urls: list[str] = []
+    for item in data:
+        if isinstance(item, dict):
+            url = item.get("video_url") or item.get("url")
+            if isinstance(url, str) and url:
+                urls.append(url)
+    return urls
+
+
 def _phase_label(phase: object) -> str:
     clean_phase = _clean(phase)
     return TASK_PHASE_LABELS.get(clean_phase, clean_phase or TASK_PHASE_QUEUED)
@@ -233,6 +243,7 @@ def _public_task(task: dict[str, Any], base_url: str = "") -> dict[str, Any]:
         "model": task.get("model"),
         "size": task.get("size"),
         "resolution": task.get("resolution"),
+        "media_type": task.get("media_type") or ("video" if task.get("mode") == "video" else "image"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
         "timings": timings,
@@ -286,6 +297,7 @@ class ImageTaskService:
         *,
         generation_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_generations.handle,
         edit_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_edit.handle,
+        video_handler: Callable[[dict[str, Any]], dict[str, Any]] = agnes_ai_video.handle,
         retention_days_getter: Callable[[], int] | None = None,
         worker_count: int = DEFAULT_WORKER_COUNT,
         max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
@@ -293,6 +305,7 @@ class ImageTaskService:
         self.path = path
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
+        self.video_handler = video_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self.worker_count = max(1, int(worker_count or DEFAULT_WORKER_COUNT))
         self.max_queue_size = max(1, int(max_queue_size or DEFAULT_MAX_QUEUE_SIZE))
@@ -378,6 +391,37 @@ class ImageTaskService:
             identity,
             client_task_id=client_task_id,
             mode="edit",
+            payload=payload,
+            release_usage_limit=release_usage_limit,
+            acquire_usage_limit=acquire_usage_limit,
+        )
+
+    def submit_video(
+        self,
+        identity: dict[str, object],
+        *,
+        client_task_id: str,
+        prompt: str,
+        model: str,
+        size: str | None,
+        base_url: str,
+        reference_image_urls: list[str] | None = None,
+        release_usage_limit: Callable[[], None] | None = None,
+        acquire_usage_limit: Callable[[], Callable[[], None]] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "prompt": prompt,
+            "model": model,
+            "size": size,
+            "reference_image_urls": list(reference_image_urls or []),
+            "base_url": base_url,
+            "owner_identity": dict(identity),
+            "source_task_id": client_task_id,
+        }
+        return self._submit(
+            identity,
+            client_task_id=client_task_id,
+            mode="video",
             payload=payload,
             release_usage_limit=release_usage_limit,
             acquire_usage_limit=acquire_usage_limit,
@@ -610,6 +654,7 @@ class ImageTaskService:
             "status": TASK_STATUS_QUEUED,
             **_phase_updates(TASK_PHASE_QUEUED, {}),
             "mode": mode,
+            "media_type": "video" if mode == "video" else "image",
             "model": _clean(payload.get("model"), "gpt-image-2"),
             "size": _clean(payload.get("size")),
             "resolution": _clean(payload.get("resolution")),
@@ -748,7 +793,10 @@ class ImageTaskService:
             queue_duration_ms=queue_duration_ms,
         )
         try:
-            handler = self.edit_handler if job.mode == "edit" else self.generation_handler
+            if job.mode == "video":
+                handler = self.video_handler
+            else:
+                handler = self.edit_handler if job.mode == "edit" else self.generation_handler
             progress_callback = self._make_progress_callback(key, started)
             job.payload["progress_callback"] = progress_callback
             job.payload["task_phase_callback"] = progress_callback
@@ -814,7 +862,7 @@ class ImageTaskService:
                 started,
                 "调用完成",
                 request_preview=request_text(job.payload.get("prompt")),
-                urls=_collect_image_urls(data),
+                urls=_collect_media_urls(data),
             )
         except Exception as exc:
             error_message = str(exc) or "image task failed"
@@ -884,8 +932,12 @@ class ImageTaskService:
         error: str = "",
         urls: list[str] | None = None,
     ) -> None:
-        endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
-        summary_prefix = "图生图" if mode == "edit" else "文生图"
+        if mode == "video":
+            endpoint = "/api/image-tasks/videos"
+            summary_prefix = "视频生成"
+        else:
+            endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
+            summary_prefix = "图生图" if mode == "edit" else "文生图"
         detail = {
             "key_id": identity.get("id"),
             "key_name": identity.get("name"),
@@ -999,7 +1051,8 @@ class ImageTaskService:
                 "owner_id": owner,
                 "status": status,
                 "phase": _clean(item.get("phase")) or _phase_from_status(status),
-                "mode": "edit" if item.get("mode") == "edit" else "generate",
+                "mode": "video" if item.get("mode") == "video" else "edit" if item.get("mode") == "edit" else "generate",
+                "media_type": _clean(item.get("media_type")) or ("video" if item.get("mode") == "video" else "image"),
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
                 "resolution": _clean(item.get("resolution")),

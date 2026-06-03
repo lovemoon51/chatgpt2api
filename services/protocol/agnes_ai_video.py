@@ -246,3 +246,19 @@ def request_agnes_video(
     if last_error is not None:
         raise last_error
     raise AgnesAIVideoError("Agnes AI video request failed: no enabled API keys")
+
+
+def handle(body: dict[str, Any]) -> dict[str, Any]:
+    reference_image_urls = body.get("reference_image_urls")
+    image_urls = [
+        str(item or "").strip()
+        for item in reference_image_urls
+        if str(item or "").strip()
+    ] if isinstance(reference_image_urls, list) else []
+    return request_agnes_video(
+        AgnesVideoRequest(
+            prompt=str(body.get("prompt") or ""),
+            size=str(body.get("size") or "") or None,
+            image_urls=image_urls,
+        )
+    )

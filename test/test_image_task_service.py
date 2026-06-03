@@ -27,11 +27,12 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
 
 
 class ImageTaskServiceTests(unittest.TestCase):
-    def make_service(self, path: Path, handler=None, *, worker_count: int = 3, max_queue_size: int = 100) -> ImageTaskService:
+    def make_service(self, path: Path, handler=None, *, video_handler=None, worker_count: int = 3, max_queue_size: int = 100) -> ImageTaskService:
         return ImageTaskService(
             path,
             generation_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/image.png"}]}),
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
+            video_handler=video_handler or (lambda _payload: {"data": [{"url": "http://example.test/video.mp4", "video_url": "http://example.test/video.mp4"}]}),
             retention_days_getter=lambda: 30,
             worker_count=worker_count,
             max_queue_size=max_queue_size,
@@ -328,6 +329,37 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual(payloads[0]["resolution"], "2k")
             self.assertEqual(task["resolution"], "2k")
+
+    def test_video_task_payload_and_public_item_include_video_url(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payloads = []
+
+            def video_handler(payload):
+                payloads.append(payload)
+                return {"data": [{"url": "http://example.test/video.mp4", "video_url": "http://example.test/video.mp4"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", video_handler=video_handler)
+            created = service.submit_video(
+                OWNER,
+                client_task_id="video-task",
+                prompt="animate cat",
+                model="agnes-video-v2.0",
+                size="16:9",
+                base_url="http://local.test",
+                reference_image_urls=["https://cdn.example.test/reference.png"],
+            )
+
+            self.assertEqual(created["mode"], "video")
+            self.assertEqual(created["media_type"], "video")
+            task = wait_for_task(service, OWNER, "video-task", "success")
+
+            self.assertEqual(payloads[0]["prompt"], "animate cat")
+            self.assertEqual(payloads[0]["model"], "agnes-video-v2.0")
+            self.assertEqual(payloads[0]["size"], "16:9")
+            self.assertEqual(payloads[0]["reference_image_urls"], ["https://cdn.example.test/reference.png"])
+            self.assertEqual(task["mode"], "video")
+            self.assertEqual(task["media_type"], "video")
+            self.assertEqual(task["data"][0]["video_url"], "http://example.test/video.mp4")
 
     def test_single_worker_leaves_later_tasks_queued(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

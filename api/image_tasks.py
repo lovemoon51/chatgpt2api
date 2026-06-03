@@ -28,6 +28,14 @@ class ImageGenerationTaskRequest(BaseModel):
     public: bool = False
 
 
+class VideoGenerationTaskRequest(BaseModel):
+    client_task_id: str = Field(..., min_length=1)
+    prompt: str = Field(..., min_length=1)
+    model: str = "agnes-video-v2.0"
+    size: str | None = None
+    reference_image_urls: list[str] = Field(default_factory=list)
+
+
 class ImageTaskTimingRequest(BaseModel):
     timing_key: str = Field(..., min_length=1)
     duration_ms: float
@@ -128,6 +136,33 @@ def create_router() -> APIRouter:
                 public=body.public,
                 base_url=resolve_image_base_url(request),
                 acquire_usage_limit=lambda: _acquire_image_usage_limit(identity, body.model, amount=credit_amount),
+            )
+        except UsageLimitError as exc:
+            return openai_response_from_http_exception(openai_usage_limit_exception(exc))
+        except ImageTaskQueueFull as exc:
+            raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/image-tasks/videos")
+    async def create_video_task(
+        body: VideoGenerationTaskRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        try:
+            await filter_or_log(LoggedCall(identity, "/api/image-tasks/videos", body.model, "视频生成任务", request_text=body.prompt), body.prompt)
+            return await run_in_threadpool(
+                image_task_service.submit_video,
+                identity,
+                client_task_id=body.client_task_id,
+                prompt=body.prompt,
+                model=body.model,
+                size=body.size,
+                base_url=resolve_image_base_url(request),
+                reference_image_urls=body.reference_image_urls,
+                acquire_usage_limit=lambda: _acquire_image_usage_limit(identity, body.model, amount=1),
             )
         except UsageLimitError as exc:
             return openai_response_from_http_exception(openai_usage_limit_exception(exc))

@@ -23,8 +23,6 @@ const maxHistoryEntries = 80;
 export const configNodeWidth = 430;
 export const configNodeHeight = 260;
 export const imageReversePromptInstruction = "根据图片生成结构化中文提示词，包括主体描述、环境、光影、镜头语言、风格关键词。";
-const adaptiveImageVerticalPadding = 32;
-const adaptiveImageHorizontalPadding = 32;
 const adaptiveImageMinWidth = 260;
 const adaptiveImageMaxWidth = 420;
 const adaptiveImageMinHeight = 150;
@@ -72,12 +70,11 @@ export function getImageAdaptiveNodeSize(naturalWidth: number, naturalHeight: nu
   const preferredImageArea = ratio >= 1 ? 68000 : 76000;
   const rawImageWidth = Math.sqrt(preferredImageArea * ratio);
   const imageWidth = clamp(rawImageWidth, adaptiveImageMinWidth, adaptiveImageMaxWidth);
-  const imageSlotWidth = Math.max(1, imageWidth - adaptiveImageHorizontalPadding);
-  const imageHeight = clamp(imageSlotWidth / ratio, adaptiveImageMinHeight, adaptiveImageMaxHeight);
+  const imageHeight = clamp(imageWidth / ratio, adaptiveImageMinHeight, adaptiveImageMaxHeight);
 
   return {
     width: Math.round(imageWidth),
-    height: Math.round(imageHeight + adaptiveImageVerticalPadding),
+    height: Math.round(imageHeight),
   };
 }
 

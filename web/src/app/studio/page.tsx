@@ -1841,7 +1841,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
               </div>
               <div>
                 <div className="text-base font-bold tracking-tight text-slate-950 dark:text-slate-100">chatgpt2api</div>
-                <div className="text-xs text-slate-400 dark:text-slate-500">普通用户创作台</div>
+                <div className="text-xs text-slate-400 dark:text-slate-500">后台创作台</div>
               </div>
             </div>
             <button
@@ -3025,7 +3025,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
 }
 
 export default function StudioPage() {
-  const { isCheckingAuth, session } = useAuthGuard();
+  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
 
   if (isCheckingAuth || !session) {
     return (

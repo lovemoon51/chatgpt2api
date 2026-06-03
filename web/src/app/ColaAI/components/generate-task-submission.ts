@@ -1,10 +1,12 @@
-import { createImageEditTask, createImageGenerationTask, type ImageModel, type ImageTask } from "@/lib/api";
+import { createImageEditTask, createImageGenerationTask, type ImageModel, type ImageResolution, type ImageTask } from "@/lib/api";
 
 export type GenerateSubmissionContext = {
   prompt: string;
   count: number;
   model: ImageModel;
   size?: string;
+  resolution?: ImageResolution | string;
+  publicMode?: boolean;
   attempt: number;
   retryOfTaskId?: string;
   turnId?: string;
@@ -21,7 +23,9 @@ export type GenerateSubmissionInput = {
   count: number;
   model: ImageModel;
   size?: string;
+  resolution?: ImageResolution | string;
   referenceFiles?: File[];
+  publicMode?: boolean;
   attempt?: number;
   retryOfTaskId?: string;
 };
@@ -58,6 +62,7 @@ async function createTaskOrFailure(
       mode: "generate",
       model: input.model,
       size: input.size,
+      resolution: input.resolution,
       created_at: timestamp,
       updated_at: timestamp,
       error: getErrorMessage(error),
@@ -80,6 +85,8 @@ export async function createGenerateSubmissionTasks(
     count,
     model: input.model,
     size: input.size,
+    resolution: input.resolution,
+    ...(input.publicMode ? { publicMode: true } : {}),
     attempt: Math.max(1, input.attempt ?? 1),
     retryOfTaskId: input.retryOfTaskId,
     referenceImageNames: input.referenceFiles?.map((file) => file.name),
@@ -94,8 +101,8 @@ export async function createGenerateSubmissionTasks(
         context,
         () =>
           input.referenceFiles?.length
-            ? createEdit(id, input.referenceFiles, prompt, input.model, input.size)
-            : createGeneration(id, prompt, input.model, input.size),
+            ? createEdit(id, input.referenceFiles, prompt, input.model, input.size, Boolean(input.publicMode), input.resolution)
+            : createGeneration(id, prompt, input.model, input.size, Boolean(input.publicMode), input.resolution),
         now,
       );
     }),
@@ -113,6 +120,8 @@ export function buildGenerateRetrySubmissionInput(task: GenerateTask): GenerateS
     count: 1,
     model: context.model,
     size: context.size,
+    resolution: context.resolution,
+    publicMode: context.publicMode,
     attempt: context.attempt + 1,
     retryOfTaskId: task.id,
   };

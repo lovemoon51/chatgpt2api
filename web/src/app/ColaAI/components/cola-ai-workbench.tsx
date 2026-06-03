@@ -21,6 +21,7 @@ import {
   ChevronDown,
   Copy,
   Download,
+  Gift,
   Heart,
   ImageIcon,
   ImagePlus,
@@ -48,6 +49,7 @@ import { AuthenticatedImage } from "@/components/authenticated-image";
 import { ImageLightbox } from "@/components/image-lightbox";
 import webConfig from "@/constants/common-env";
 import {
+  checkInUser,
   downloadSingleImage,
   fetchImageTasks,
   fetchManagedImages,
@@ -55,11 +57,13 @@ import {
   fetchPromptTemplateStats,
   fetchPromptTemplates,
   type ImageModel,
+  type ImageResolution,
   type ImageTask,
   type ManagedImage,
   type PromptTemplate,
   type PromptTemplateStats,
   type PromptTemplateApplyPayload,
+  type UserKeyLimits,
 } from "@/lib/api";
 import {
   downloadImageUrl,
@@ -69,7 +73,8 @@ import {
   getPreviewFallbackUrl,
 } from "@/lib/image-fetch";
 import { cn } from "@/lib/utils";
-import { clearStoredColaAuthSession, type ColaAuthSession } from "@/store/cola-auth";
+import { clearStoredAuthSession, setStoredAuthSession, type StoredAuthLimits } from "@/store/auth";
+import { clearStoredColaAuthSession, setStoredColaAuthSession, type ColaAuthSession } from "@/store/cola-auth";
 import {
   deleteImageConversation,
   listImageConversations,
@@ -80,7 +85,6 @@ import {
 import { CanvasHome } from "./canvas-home";
 import { ColaAILandingHero } from "./cola-ai-landing-hero";
 import {
-  buildLandingHeroItems,
   buildPublicDiscoverLandingHeroItems,
   getLandingHeroScrollMotion,
   shouldSnapLandingHeroToDiscover,
@@ -179,6 +183,14 @@ type GeneratedTaskImage = {
   revisedPrompt: string;
   model?: string;
   size?: string;
+};
+
+type CheckInDialogResult = {
+  status: "success" | "error";
+  awarded?: boolean;
+  bonusCredits?: number;
+  remainingCredits?: number | null;
+  message: string;
 };
 
 const COLA_ACTIVE_GENERATE_SESSION_STORAGE_KEY = "chatgpt2api:colaai_active_generate_conversation_id";
@@ -361,11 +373,13 @@ function averageDuration(values: Array<number | undefined>) {
   return Math.round(normalized.reduce((sum, value) => sum + value, 0) / normalized.length);
 }
 
-function timestampFromIso(value?: string) {
+export function timestampFromIso(value?: string) {
   if (!value) {
     return undefined;
   }
-  const timestamp = new Date(value).getTime();
+  const normalized = value.trim();
+  const plainDateTimeMatch = normalized.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
+  const timestamp = new Date(plainDateTimeMatch ? `${plainDateTimeMatch[1]}T${plainDateTimeMatch[2]}Z` : normalized).getTime();
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
@@ -405,24 +419,41 @@ function getSessionTimingStats(tasks: GenerateTask[]) {
   return { queueMs, upstreamMs };
 }
 
+function getTaskWorkerElapsedMs(task: GenerateTask, nowMs: number) {
+  const explicitMs =
+    task.duration_ms ??
+    task.timings?.worker_total_ms ??
+    task.timing_ms?.worker_total_ms ??
+    task.timings?.image_poll_ms ??
+    task.timing_ms?.image_poll_ms ??
+    task.timings?.generating ??
+    task.timings?.running ??
+    task.timing_ms?.generating ??
+    task.timing_ms?.running;
+  if (typeof explicitMs === "number" && Number.isFinite(explicitMs)) {
+    return Math.max(0, explicitMs);
+  }
+
+  const startedAtMs = timestampFromIso(task.started_at);
+  if (typeof startedAtMs === "number") {
+    const finishedAtMs = timestampFromIso(task.finished_at);
+    return Math.max(0, (typeof finishedAtMs === "number" ? finishedAtMs : nowMs) - startedAtMs);
+  }
+
+  if (!terminalTaskStatuses.has(task.status)) {
+    return undefined;
+  }
+
+  const legacyStartedAtMs = timestampFromIso(task.created_at);
+  const legacyFinishedAtMs = timestampFromIso(task.finished_at || task.updated_at);
+  return typeof legacyStartedAtMs === "number" && typeof legacyFinishedAtMs === "number" ? Math.max(0, legacyFinishedAtMs - legacyStartedAtMs) : undefined;
+}
+
 function getSessionElapsedMs(tasks: GenerateTask[], nowMs: number) {
   if (tasks.length === 0) {
     return undefined;
   }
-  const startedAtMs = timestampFromIso(tasks[0]?.created_at);
-  if (typeof startedAtMs !== "number") {
-    return undefined;
-  }
-  const allFinished = tasks.every((task) => task.status === "success" || task.status === "error" || task.status === "cancelled");
-  const finishedAtMs = allFinished
-    ? averageDuration(
-        tasks.map((task) => {
-          const taskFinishedAtMs = timestampFromIso(task.finished_at);
-          return typeof taskFinishedAtMs === "number" ? taskFinishedAtMs - startedAtMs : undefined;
-        }),
-      )
-    : undefined;
-  return Math.max(0, typeof finishedAtMs === "number" ? finishedAtMs : nowMs - startedAtMs);
+  return averageDuration(tasks.map((task) => getTaskWorkerElapsedMs(task, nowMs)));
 }
 
 function getSessionWaitingMs(tasks: GenerateTask[], nowMs: number) {
@@ -585,6 +616,11 @@ const composerRatioOptions = ["智能", ...ratioOptions] as const;
 const composerCountOptions = [1, 2, 3, 4] as const;
 const studioRatioOptions = ["1:1", "16:9", "4:3", "3:4", "9:16"] as const;
 const studioCountOptions = [1, 2, 3, 4, 5, 6, 7, 8] as const;
+const imageResolutionOptions: Array<{ value: ImageResolution; label: string; cost: number }> = [
+  { value: "1k", label: "1K", cost: 1 },
+  { value: "2k", label: "2K", cost: 2 },
+  { value: "4k", label: "4K", cost: 3 },
+];
 
 type GenerateImageModel = "auto" | ImageModel;
 
@@ -720,136 +756,160 @@ const fallbackCreations: CreationItem[] = [
 
 const promptCards: PromptCard[] = [
   {
-    id: "brand-board",
-    title: "高端品牌提案板",
-    prompt: "生成完整高端品牌运营图，包含主视觉、包装、杯套、贴纸、海报和品牌符号，白色摄影棚背景，商业落地感。",
-    author: "ColaAI",
-    tags: ["branding", "product", "poster"],
+    id: "banana-apple-poster",
+    title: "苹果风格海报",
+    prompt: "充分参考图片的设计风格，配色等，为如下内容生成苹果风格的海报：\n\nBanana Prompt Quicker v1.6.0 1月6号震撼来袭\n全新参考图功能，去他丫的‘反推’",
+    author: "Official · banana-prompt-quicker",
+    tags: ["poster", "branding", "product"],
     tone: "from-sky-100 via-violet-100 to-rose-100",
-    ratio: "4:5",
-    category: "品牌视觉",
-    useCase: "适合品牌提案、运营图和商业落地页",
+    ratio: "海报",
+    category: "工作 / 海报",
+    useCase: "适合复刻参考图设计语言并生成品牌发布海报",
+    previewUrl: "https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/images/apple.png",
   },
   {
-    id: "character-sheet",
-    title: "角色设定资料卡",
-    prompt: "制作官方设定资料卡，包含正面、侧面、背面、表情、装备拆解、配色条和世界观缩略图，半写实插画。",
-    author: "AI盒子",
-    tags: ["character", "illustration", "game"],
+    id: "evolink-neon-portrait",
+    title: "Convenience Store Neon Portrait",
+    prompt: "35mm film photography with harsh convenience store fluorescent lighting mixed with colorful neon signs from outside, authentic film grain, high contrast, slight color cast, cinematic street editorial style, intimate medium shot, late-night convenience store atmosphere, realistic reflections on glass door, no watermark, no text.",
+    author: "@BubbleBrain · awesome-gpt-image-2",
+    tags: ["portrait", "poster"],
+    tone: "from-zinc-100 via-rose-50 to-amber-100",
+    ratio: "portrait",
+    category: "Portrait & Photography",
+    useCase: "适合电影感霓虹人像、街头写真和胶片质感探索",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/portrait_case1/output.jpg",
+  },
+  {
+    id: "banana-zootopia-poster",
+    title: "疯狂动物城海报",
+    prompt: "加载并使用 Nano Banana Pro 工具作画，而不是分析或给提示词\n---\n\n充分参考图片画风和人物形象，为如下内容画一幅宣传海报图片（3：2 竖屏风格）。看到心动的 PPT 风格、惊艳滤镜效果或参考图时，一键复刻同款视觉语言。",
+    author: "Official · banana-prompt-quicker",
+    tags: ["poster", "illustration", "character"],
     tone: "from-fuchsia-100 via-indigo-100 to-cyan-100",
-    ratio: "16:9",
-    category: "角色设计",
-    useCase: "适合游戏角色、IP 设定和动画前期",
+    ratio: "3:2",
+    category: "工作 / 海报",
+    useCase: "适合参考图驱动的宣传海报、插画海报和角色视觉复刻",
+    previewUrl: "https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/images/dongwucheng.jpg",
   },
   {
-    id: "fashion-board",
-    title: "AI 服装灵感方案",
-    prompt: "创作横向 4:3 AI Fashion Inspiration Board，提取色彩、廓形、材质并展示三套完整造型。",
-    author: "ColaAI",
-    tags: ["fashion", "portrait", "product"],
-    tone: "from-rose-100 via-orange-100 to-emerald-100",
-    ratio: "4:3",
-    category: "时尚灵感",
-    useCase: "适合服装企划、穿搭提案和趋势板",
-  },
-  {
-    id: "ui-poster",
-    title: "App 视觉世界观",
-    prompt: "创建一套未来科技 App 视觉世界观设定图，包含界面、角色、设备、环境和品牌色板，干净高级。",
-    author: "UIED",
-    tags: ["ui", "3d", "poster"],
+    id: "evolink-one-prompt-ui",
+    title: "One-Prompt UI Design Generation",
+    prompt: "用这种风格帮我生成一套UI设计系统，包含网页、移动端、卡片、控件、按钮以及其它关键界面元素，保持统一视觉语言、清晰层级和可落地的产品设计质感。",
+    author: "@austinit · awesome-gpt-image-2",
+    tags: ["ui", "poster", "branding"],
     tone: "from-emerald-100 via-sky-100 to-violet-100",
-    ratio: "16:9",
-    category: "产品 UI",
-    useCase: "适合 App 概念稿、视觉世界观和发布物料",
+    ratio: "UI",
+    category: "UI & Social Media",
+    useCase: "适合从单个风格参考扩展整套 UI 设计系统",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/ui_case1/output.jpg",
   },
   {
-    id: "product-splash",
-    title: "清透饮品产品海报",
-    prompt: "一张清透夏日饮品产品海报，玻璃瓶置于冰块和水珠之间，阳光穿透液体形成彩色折射，商业摄影质感。",
-    author: "ColaAI",
+    id: "banana-glass-ppt",
+    title: "渐变玻璃风格 PPT",
+    prompt: "你是一位专家级UI UX演示设计师，请生成高保真、未来科技感的16比9演示文稿幻灯片。风格融合 Apple Keynote 极简主义、现代 SaaS 产品设计和玻璃拟态；使用 Bento 网格、磨砂玻璃容器、高端 3D 物体、霓虹图表和大留白，形成获奖级演示视觉。",
+    author: "@op7418 · banana-prompt-quicker",
+    tags: ["ui", "3d", "branding"],
+    tone: "from-slate-100 via-white to-blue-100",
+    ratio: "16:9",
+    category: "工作 / PPT",
+    useCase: "适合高保真产品演示、SaaS 路演和未来感 Keynote",
+    previewUrl: "https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/images/nano_banana_pro_ppt.jpg",
+  },
+  {
+    id: "evolink-luxury-perfume",
+    title: "E-commerce Main Image - Luxury Amber Perfume Ad",
+    prompt: "A luxurious cinematic product photograph of a classic rectangular perfume bottle on a glossy black marble surface with white veining. The bottle is clear faceted glass with amber-gold perfume glowing from within, dramatic warm lighting, premium commercial product photography, sharp detail, no watermark.",
+    author: "@Polanco_IA · awesome-gpt-image-2",
     tags: ["product", "poster", "food"],
     tone: "from-cyan-100 via-lime-100 to-amber-100",
-    ratio: "2:3",
-    category: "产品广告",
-    useCase: "适合饮品、电商主图和新品上市海报",
+    ratio: "product",
+    category: "E-commerce",
+    useCase: "适合电商主图、奢侈品香水广告和棚拍产品视觉",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/poster_case113/output.jpg",
   },
   {
-    id: "social-cover",
-    title: "小红书教程封面",
-    prompt: "小红书 AI 绘图教程封面，醒目中文标题，步骤卡片、示例图和明亮背景，信息清晰，适合收藏分享。",
-    author: "内容实验室",
-    tags: ["poster", "ui", "branding"],
-    tone: "from-rose-100 via-white to-sky-100",
-    ratio: "3:4",
-    category: "社媒封面",
-    useCase: "适合教程封面、图文笔记和运营内容",
-  },
-  {
-    id: "luxury-phone",
-    title: "极简手机广告",
-    prompt: "高端智能手机广告主视觉，纯净白底，手机悬浮在柔和阴影上，细节锐利，金属边缘高光，Apple 级极简构图。",
-    author: "Pixel Studio",
-    tags: ["product", "poster", "3d"],
-    tone: "from-slate-100 via-white to-blue-100",
-    ratio: "4:5",
-    category: "硬件广告",
-    useCase: "适合手机、耳机、数码配件和官网首屏",
-  },
-  {
-    id: "architecture-diagram",
-    title: "建筑结构拆解图",
-    prompt: "经典建筑结构拆解信息图，分层展示屋顶、梁柱、庭院与动线，带简洁中文标注，白底，精密建筑制图风格。",
-    author: "Arch Lab",
-    tags: ["architecture", "illustration", "poster"],
+    id: "banana-city-poster",
+    title: "城市海报艺术生成",
+    prompt: "一张针对 [城市名称] 的城市渲染数字艺术海报。主体是漂浮在云海上的微型城市岛屿，融合城市地标、自然景观与文化元素；加入 3D 城市文字、博物馆展板式信息排版、地理坐标与别称，整体像一件珍贵艺术品。",
+    author: "@op7418 · banana-prompt-quicker",
+    tags: ["architecture", "poster", "3d"],
     tone: "from-stone-100 via-sky-50 to-emerald-100",
-    ratio: "16:9",
-    category: "建筑图解",
-    useCase: "适合建筑展示、文旅图解和课程演示",
+    ratio: "poster",
+    category: "有趣 / 城市海报",
+    useCase: "适合城市文旅海报、地标视觉和微缩世界概念图",
+    previewUrl: "https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/images/city_art_poster.jpg",
   },
   {
-    id: "game-icon-grid",
-    title: "RPG 道具图标矩阵",
-    prompt: "复古幻想 RPG 道具图标矩阵，包含药水、卷轴、徽章、宝石和武器，每个图标统一像素艺术风格，带浅色标签。",
-    author: "Game Forge",
-    tags: ["game", "illustration", "3d"],
+    id: "evolink-boston-poster",
+    title: "Boston Spring 2026 City Poster",
+    prompt: "A striking Spring 2026 city poster for Boston with an elegant celebratory mood and bold contemporary design. Use a clean off-white textured background, negative space, miniature sculler and Charles River-inspired calligraphic motion, dreamlike hand-painted panorama, refined civic poster style.",
+    author: "@BubbleBrain · awesome-gpt-image-2",
+    tags: ["poster", "illustration", "architecture"],
+    tone: "from-rose-100 via-white to-sky-100",
+    ratio: "poster",
+    category: "Poster & Illustration",
+    useCase: "适合城市海报、节日视觉和艺术插画式传播物料",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/poster_case1/output.jpg",
+  },
+  {
+    id: "banana-infographic-rating",
+    title: "锐评世间万物",
+    prompt: "你是拥有实时网络搜索能力和顶尖数据可视化设计能力的 AI 专家。针对用户指定领域做全面调研，并将产品、作品或品牌按“夯、顶级、人上人、NPC、拉完了”五级填入 Bento Grid 信息图中，使用强烈层级、具体名称和清晰视觉对比。",
+    author: "@op7418 · banana-prompt-quicker",
+    tags: ["poster", "ui", "branding"],
     tone: "from-amber-100 via-purple-100 to-cyan-100",
-    ratio: "1:1",
-    category: "游戏资产",
-    useCase: "适合道具设定、图标风格探索和资产表",
+    ratio: "infographic",
+    category: "有趣 / 信息图",
+    useCase: "适合排行榜、产品锐评、趋势分析和可视化信息图",
+    previewUrl: "https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/images/nano_banana_pro_rating.jpg",
   },
   {
-    id: "beauty-storyboard",
-    title: "护肤品广告分镜",
-    prompt: "干净明亮的护肤品广告分镜图，九宫格镜头，水面、肌肤质感、瓶身特写、自然光和柔和手部动作，电影广告板。",
-    author: "Brand Motion",
-    tags: ["product", "poster", "portrait"],
+    id: "evolink-persona-card",
+    title: "Persona5 Character Reference Card",
+    prompt: "基于角色和背景制作一份类似官方设定资料的角色资料卡，包含正面、侧面、背面三视图，面部表情变化，服装和装备拆解，色板与世界观简要说明。白色背景，有组织布局，高分辨率，专业概念艺术风格。",
+    author: "@iamrednightS · awesome-gpt-image-2",
+    tags: ["character", "illustration", "game"],
+    tone: "from-amber-100 via-purple-100 to-cyan-100",
+    ratio: "character",
+    category: "Character Design",
+    useCase: "适合角色设定、三视图资料卡和 IP 世界观整理",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/character_case2/output.jpg",
+  },
+  {
+    id: "banana-food-infographic",
+    title: "根据已有食材做菜",
+    prompt: "根据现有食材（见附图）建议可以烹饪的菜肴，提供详细的分步食谱，以简单的信息图形式呈现。",
+    author: "@AmirMushich · banana-prompt-quicker",
+    tags: ["food", "poster", "illustration"],
     tone: "from-pink-100 via-white to-teal-100",
-    ratio: "16:9",
-    category: "广告分镜",
-    useCase: "适合短片脚本、广告提案和镜头板",
+    ratio: "infographic",
+    category: "生活 / 美食",
+    useCase: "适合食材识别、菜谱建议和生活类信息图",
+    previewUrl: "https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/images/food.jpg",
   },
   {
-    id: "restaurant-kit",
-    title: "餐饮品牌物料套装",
-    prompt: "完整餐饮品牌视觉系统展示图，包装袋、菜单、贴纸、杯套、外卖盒整齐陈列，统一色彩系统，真实摄影棚布光。",
-    author: "ColaAI",
-    tags: ["branding", "food", "product"],
+    id: "evolink-ad-banner-grid",
+    title: "4-Panel Japanese Digital Ad Banner Grid",
+    prompt: "Create a 2x2 grid of Japanese digital advertisement banners with four equal quadrants. Each banner should have a clear theme, photographic subject, visual accents, Japanese text labels, and consistent high-quality digital ad layout suitable for campaign presentation.",
+    author: "@makaneko_AI · awesome-gpt-image-2",
+    tags: ["branding", "ui", "poster"],
     tone: "from-orange-100 via-red-50 to-lime-100",
-    ratio: "4:3",
-    category: "餐饮品牌",
-    useCase: "适合餐饮开店、包装提案和品牌手册",
+    ratio: "2x2",
+    category: "Ad Creative",
+    useCase: "适合广告 Banner、社媒活动视觉和多版本创意提案",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/ui_case90/output.jpg",
   },
   {
-    id: "portrait-editorial",
-    title: "杂志感人像封面",
-    prompt: "高级杂志人像封面，人物侧脸被柔和窗光照亮，服装简洁，留白排版，标题区域干净，胶片颗粒和真实肌理。",
-    author: "Portrait Lab",
-    tags: ["portrait", "fashion", "poster"],
-    tone: "from-zinc-100 via-rose-50 to-amber-100",
-    ratio: "3:4",
-    category: "人像封面",
-    useCase: "适合头像升级、杂志封面和个人品牌视觉",
+    id: "evolink-bookshelf-test",
+    title: "Wooden Bookshelf Prompt Test",
+    prompt: "A wooden bookshelf consisting of three shelves: On the top shelf, there should be one book, on the second shelf, there should be three books, and on the bottom shelf, there should be seven books.",
+    author: "@chetaslua · awesome-gpt-image-2",
+    tags: ["comparison", "illustration", "3d"],
+    tone: "from-stone-100 via-sky-50 to-emerald-100",
+    ratio: "test",
+    category: "Comparison",
+    useCase: "适合模型遵循能力测试、空间计数和复杂约束对比",
+    previewUrl: "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts/main/images/comparison_case5/output.jpg",
   },
 ];
 
@@ -929,8 +989,29 @@ function formatPromptTemplateUseCase(description: string) {
   return `适合${trimmed}`;
 }
 
-export function shouldUseRemotePromptTemplates(loadState: PromptTemplateLoadState, stats: PromptTemplateStats, remoteCount: number) {
-  return loadState === "ready" && (remoteCount > 0 || stats.public > 0);
+export function shouldUseRemotePromptTemplates(loadState: PromptTemplateLoadState, _stats: PromptTemplateStats, remoteCount: number) {
+  return loadState === "ready" && remoteCount > 0;
+}
+
+export function resolvePromptSourceCards(hasRemotePrompts: boolean, remotePromptCards: PromptCard[]) {
+  return hasRemotePrompts ? remotePromptCards : promptCards;
+}
+
+export function getPromptLibraryTotalCount(hasRemotePrompts: boolean, stats: PromptTemplateStats, sourceCount: number) {
+  if (!hasRemotePrompts) {
+    return sourceCount;
+  }
+  return stats.public > 0 ? stats.public : sourceCount;
+}
+
+export function getPromptLibraryStatusText(loadState: PromptTemplateLoadState, normalizedQuery: string, query: string) {
+  if (loadState === "loading") {
+    return "正在同步公开模板库";
+  }
+  if (loadState === "error") {
+    return "公开模板库暂不可用，正在使用 GitHub 社区源";
+  }
+  return normalizedQuery ? `搜索：${query.trim()}` : "按标题、作者、标签和提示词内容匹配";
 }
 
 export function promptTemplateToPromptCard(template: PromptTemplate): PromptCard {
@@ -1109,11 +1190,88 @@ function PublicAuthBar() {
   );
 }
 
+function formatImageRemaining(limits?: StoredAuthLimits | null) {
+  const remaining = limits?.creditsRemaining ?? limits?.imagesRemaining;
+  return typeof remaining === "number" ? String(remaining) : "不限";
+}
+
+export function imageResolutionCreditCost(resolution?: string) {
+  return resolution === "4k" ? 3 : resolution === "2k" ? 2 : 1;
+}
+
+function userKeyLimitsToStoredLimits(limits?: UserKeyLimits | null): StoredAuthLimits | null {
+  if (!limits) {
+    return null;
+  }
+  return {
+    requestsPerDay: typeof limits.requests_per_day === "number" || limits.requests_per_day === null ? limits.requests_per_day : undefined,
+    imagesPerDay: typeof limits.images_per_day === "number" || limits.images_per_day === null ? limits.images_per_day : undefined,
+    creditsTotal: typeof limits.images_total === "number" || limits.images_total === null ? limits.images_total : undefined,
+    creditsUsed: typeof limits.images_used === "number" || limits.images_used === null ? limits.images_used : undefined,
+    creditsRemaining: typeof limits.images_remaining === "number" || limits.images_remaining === null ? limits.images_remaining : undefined,
+    imagesTotal: typeof limits.images_total === "number" || limits.images_total === null ? limits.images_total : undefined,
+    imagesUsed: typeof limits.images_used === "number" || limits.images_used === null ? limits.images_used : undefined,
+    imagesRemaining: typeof limits.images_remaining === "number" || limits.images_remaining === null ? limits.images_remaining : undefined,
+    concurrency: typeof limits.concurrency === "number" || limits.concurrency === null ? limits.concurrency : undefined,
+    models: Array.isArray(limits.models) ? limits.models : undefined,
+  };
+}
+
+export function decrementSessionImageQuota(session: ColaAuthSession, amount: number): ColaAuthSession {
+  const count = Math.max(0, Math.floor(amount));
+  if (count <= 0 || !session.limits) {
+    return session;
+  }
+
+  const nextLimits: StoredAuthLimits = { ...session.limits };
+  if (typeof nextLimits.creditsUsed === "number") {
+    nextLimits.creditsUsed = nextLimits.creditsUsed + count;
+  }
+  if (typeof nextLimits.creditsRemaining === "number") {
+    nextLimits.creditsRemaining = Math.max(0, nextLimits.creditsRemaining - count);
+  }
+  if (typeof nextLimits.imagesUsed === "number") {
+    nextLimits.imagesUsed = nextLimits.imagesUsed + count;
+  }
+  if (typeof nextLimits.imagesRemaining === "number") {
+    nextLimits.imagesRemaining = Math.max(0, nextLimits.imagesRemaining - count);
+  }
+  return { ...session, limits: nextLimits };
+}
+
+function UserSummaryBar({
+  session,
+}: {
+  session: ColaAuthSession;
+}) {
+  return (
+    <div
+      data-cola-panel="user-summary-bar"
+      className={cn(
+        "fixed right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-40 hidden max-w-[min(320px,calc(100vw-24px))] items-center gap-3 rounded-full px-4 py-2 text-sm",
+        "border border-slate-200/80 bg-white/88 shadow-[0_18px_54px_-40px_rgba(15,23,42,0.52)] ring-1 ring-white/80 backdrop-blur-xl md:flex",
+        "sm:right-5 sm:top-[calc(env(safe-area-inset-top)+1rem)]",
+      )}
+    >
+      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-slate-950 text-xs font-semibold text-white">
+        {(session.name || "U").slice(0, 1).toUpperCase()}
+      </span>
+      <span className="min-w-0">
+        <span className="block truncate text-xs font-medium text-slate-500">普通用户</span>
+        <span className="block truncate text-sm font-semibold text-slate-950">
+          {session.name || "ColaAI"} · 剩余 {formatImageRemaining(session.limits)} 积分
+        </span>
+      </span>
+    </div>
+  );
+}
+
 function RovaComposer({
   prompt,
   count,
   quality,
   ratio,
+  resolution,
   imageModel,
   publicMode,
   referenceImageName = "",
@@ -1123,6 +1281,7 @@ function RovaComposer({
   onCountChange,
   onQualityChange,
   onRatioChange,
+  onResolutionChange,
   onImageModelChange,
   onPublicChange,
   onReferenceFileChange,
@@ -1133,6 +1292,7 @@ function RovaComposer({
   count: number;
   quality: string;
   ratio: string;
+  resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
   referenceImageName?: string;
@@ -1142,6 +1302,7 @@ function RovaComposer({
   onCountChange: (count: number) => void;
   onQualityChange: (quality: string) => void;
   onRatioChange: (ratio: string) => void;
+  onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
   onReferenceFileChange?: (file: File) => void;
@@ -1154,6 +1315,7 @@ function RovaComposer({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const compositionMode = quality === "智能" ? "auto" : "ratio";
   const selectedRatio = compositionMode === "auto" ? "Auto" : ratio;
+  const selectedResolution = imageResolutionOptions.find((option) => option.value === resolution) ?? imageResolutionOptions[0];
   const selectedModel = imageModelOptions.find((option) => option.value === imageModel) ?? imageModelOptions[0];
   const hasReferenceName = Boolean(referenceImageName || localReferenceName);
   const modelPopover = (
@@ -1256,6 +1418,29 @@ function RovaComposer({
               }}
             >
               {option}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 text-sm font-semibold text-[#555555]">分辨率</div>
+      <div data-cola-group="resolution-options" className="mt-2 grid grid-cols-3 gap-1.5">
+        {imageResolutionOptions.map((option) => {
+          const selected = resolution === option.value;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={selected}
+              data-cola-resolution-option={option.value}
+              className={cn(
+                "h-9 rounded-[12px] border bg-white text-sm font-semibold transition",
+                selected ? "border-[#1f1f1f] text-[#1f1f1f] shadow-[inset_0_0_0_1px_#1f1f1f]" : "border-[#e7e7e7] text-[#9a9a9a] hover:border-[#d6d6d6] hover:text-[#555555]",
+              )}
+              onClick={() => onResolutionChange(option.value)}
+            >
+              {option.label}
+              <span className="ml-1 text-[11px] font-medium text-current opacity-60">{option.cost}积分</span>
             </button>
           );
         })}
@@ -1379,8 +1564,8 @@ function RovaComposer({
               aria-label="图片比例与生成数量"
             >
               <Boxes className="size-3.5 shrink-0" />
-              {selectedRatio} | {count}张
-              <span className="sr-only">图片比例 智能 9:16 2:3 1:1 3:2 16:9 生成数量</span>
+              {selectedRatio} | {selectedResolution.label} | {count}张
+              <span className="sr-only">图片比例 智能 9:16 2:3 1:1 3:2 16:9 分辨率 1K 2K 4K 生成数量</span>
               <ChevronDown className={cn("size-3.5 shrink-0 transition", settingsOpen && "rotate-180")} />
             </button>
           </div>
@@ -1433,6 +1618,7 @@ export function GenerateComposer({
   count,
   quality,
   ratio,
+  resolution,
   imageModel,
   publicMode,
   referenceImage,
@@ -1441,6 +1627,7 @@ export function GenerateComposer({
   onCountChange,
   onQualityChange,
   onRatioChange,
+  onResolutionChange,
   onImageModelChange,
   onPublicChange,
   onReferenceFileChange,
@@ -1451,6 +1638,7 @@ export function GenerateComposer({
   count: number;
   quality: string;
   ratio: string;
+  resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
   referenceImage: ReferenceImage | null;
@@ -1459,6 +1647,7 @@ export function GenerateComposer({
   onCountChange: (count: number) => void;
   onQualityChange: (quality: string) => void;
   onRatioChange: (ratio: string) => void;
+  onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
   onReferenceFileChange: (file: File) => void;
@@ -1471,6 +1660,7 @@ export function GenerateComposer({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const compositionMode = quality === "智能" ? "auto" : "ratio";
   const selectedRatio = compositionMode === "auto" ? "Auto" : ratio;
+  const selectedResolution = imageResolutionOptions.find((option) => option.value === resolution) ?? imageResolutionOptions[0];
   const selectedModel = imageModelOptions.find((option) => option.value === imageModel) ?? imageModelOptions[0];
 
   return (
@@ -1603,8 +1793,8 @@ export function GenerateComposer({
             aria-label="图片比例与生成数量"
           >
             <Boxes className={cn("size-4 shrink-0", settingsOpen ? "text-teal-700" : "text-slate-500")} />
-            {selectedRatio} | {count}张
-            <span className="sr-only">图片比例 智能 9:16 2:3 1:1 3:2 16:9 生成数量</span>
+            {selectedRatio} | {selectedResolution.label} | {count}张
+            <span className="sr-only">图片比例 智能 9:16 2:3 1:1 3:2 16:9 分辨率 1K 2K 4K 生成数量</span>
             <ChevronDown className={cn("size-4 shrink-0 transition", settingsOpen && "rotate-180")} />
           </button>
         </div>
@@ -1752,6 +1942,32 @@ export function GenerateComposer({
                 }}
               >
                 {option}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div className="text-sm font-semibold text-[#555555]">分辨率</div>
+          <div className="text-[11px] font-medium text-slate-400">按积分扣减</div>
+        </div>
+        <div data-cola-group="resolution-options" className="mt-2 grid grid-cols-3 gap-1.5">
+          {imageResolutionOptions.map((option) => {
+            const selected = resolution === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={selected}
+                data-cola-resolution-option={option.value}
+                className={cn(
+                  "h-9 rounded-[12px] border bg-white text-sm font-semibold transition",
+                  selected ? "border-teal-200 text-teal-700 shadow-[inset_0_0_0_1px_rgba(20,184,166,0.35),0_10px_26px_-22px_rgba(15,118,110,0.7)]" : "border-[#e7e7e7] text-[#9a9a9a] hover:border-[#d6d6d6] hover:text-[#555555]",
+                )}
+                onClick={() => onResolutionChange(option.value)}
+              >
+                {option.label}
+                <span className="ml-1 text-[11px] font-medium text-current opacity-60">{option.cost}积分</span>
               </button>
             );
           })}
@@ -2750,6 +2966,7 @@ export function GenerateConversationStage({
       data-cola-panel="generate-conversation-stage"
       data-cola-design="developing-studio-stage"
       data-cola-layout="conversation-results-feed"
+      data-cola-mobile-layout="status-stack"
       data-cola-state={hasConversationContent ? "content" : "empty"}
       data-cola-behavior="middle-conversation-scroll"
       className="flex min-h-0 w-full flex-1 flex-col text-left"
@@ -2757,13 +2974,14 @@ export function GenerateConversationStage({
       <div
         data-cola-panel="generate-conversation-thread"
         className="hide-scrollbar flex min-h-0 flex-1 flex-col gap-7 overflow-hidden px-0 py-2 max-[560px]:gap-5"
+        data-cola-mobile-layout="full-width-results"
       >
         {hasConversationContent ? (
           <article
             data-cola-panel="generate-record-card"
             data-cola-behavior="record-scroll-box"
             data-cola-layout="studio-creation-record-flow"
-            className="mx-auto flex max-h-full min-h-0 w-full max-w-[1040px] flex-1 overflow-hidden rounded-[32px] bg-white/70 p-3 shadow-[0_24px_80px_-58px_rgba(15,23,42,0.72)] ring-1 ring-emerald-100/62 backdrop-blur-xl max-[560px]:rounded-[26px] max-[560px]:p-2"
+            className="mx-auto flex max-h-full min-h-0 w-full max-w-[1040px] flex-1 overflow-hidden rounded-[32px] bg-white/70 p-3 shadow-[0_24px_80px_-58px_rgba(15,23,42,0.72)] ring-1 ring-emerald-100/62 backdrop-blur-xl max-[560px]:w-full max-[560px]:rounded-[18px] max-[560px]:px-2 max-[560px]:py-2"
           >
           <div
             data-cola-panel="generate-record-scroll"
@@ -2835,8 +3053,12 @@ export function GenerateConversationStage({
                     </p>
                   </article>
 
-              <div data-cola-panel="generate-status-strip" className="inline-flex w-fit max-w-full self-start flex-wrap items-center gap-1.5 text-xs leading-none text-[#51617d]">
-                <div data-cola-panel="generate-result-summary" className="flex max-w-full flex-wrap items-center gap-1.5">
+              <div
+                data-cola-panel="generate-status-strip"
+                className="inline-flex w-fit max-w-full self-start flex-wrap items-center gap-1.5 text-xs leading-none text-[#51617d] max-[560px]:grid max-[560px]:w-full max-[560px]:grid-cols-2 max-[560px]:items-stretch max-[560px]:gap-2"
+                data-cola-mobile-layout="status-stack"
+              >
+                <div data-cola-panel="generate-result-summary" className="flex max-w-full flex-wrap items-center gap-1.5 max-[560px]:contents">
                   <span className="font-medium leading-none text-slate-800">结果</span>
                   <span className="rounded-full bg-slate-100/70 px-2 py-1 leading-none">{recordRequestedCountLabel.replace(" ", "")}</span>
                   <span className="rounded-full bg-slate-100/70 px-2 py-1 leading-none">成功{recordResultCount}/失败{recordFailedCount}</span>
@@ -2846,15 +3068,15 @@ export function GenerateConversationStage({
                 </div>
               </div>
 
-              <div data-cola-panel="generate-result-cards" className="space-y-4">
-                <div data-cola-panel="generate-result-gallery" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div data-cola-panel="generate-result-cards" className="space-y-4 max-[560px]:w-full" data-cola-mobile-layout="full-width-results">
+                <div data-cola-panel="generate-result-gallery" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 max-[560px]:w-full max-[560px]:grid-cols-1 max-[560px]:gap-3" data-cola-mobile-layout="full-width-results">
                   {recordHasGeneratedResults ? (
                     recordImages.map((image, imageIndex) => (
                       <div
                         key={image.id}
                         data-cola-panel="generate-result-card"
                         data-cola-task-id={image.taskId}
-                        className="w-[min(320px,72vw)] overflow-hidden rounded-[22px] bg-white shadow-sm"
+                        className="w-[min(320px,72vw)] overflow-hidden rounded-[22px] bg-white shadow-sm max-[560px]:w-full max-[560px]:rounded-[18px]"
                       >
                         <div className="relative aspect-square w-full overflow-hidden rounded-[22px] bg-slate-100">
                           <button type="button" className="block h-full w-full cursor-zoom-in" onClick={() => openGeneratedImage(image)}>
@@ -2912,7 +3134,7 @@ export function GenerateConversationStage({
                   ) : (
                     <figure
                       data-cola-panel="generate-result-card"
-                      className="w-[min(320px,72vw)] shrink-0 overflow-hidden rounded-[22px] bg-white shadow-[0_22px_62px_-48px_rgba(15,23,42,0.68)]"
+                      className="w-[min(320px,72vw)] shrink-0 overflow-hidden rounded-[22px] bg-white shadow-[0_22px_62px_-48px_rgba(15,23,42,0.68)] max-[560px]:w-full max-[560px]:rounded-[18px]"
                     >
                       <div data-cola-panel="generate-result-placeholder" className="relative aspect-square rounded-[22px] bg-[linear-gradient(135deg,#e5e7eb,#f8fafc)] shadow-inner">
                         <span className="sr-only">生成图片占位</span>
@@ -2993,7 +3215,7 @@ export function GenerateConversationStage({
         ) : (
           <div
             data-cola-panel="generate-empty-conversation-space"
-            className="flex min-h-[420px] flex-1 items-center justify-center rounded-[24px] border border-transparent bg-transparent max-[560px]:min-h-[320px]"
+            className="flex min-h-[420px] flex-1 items-center justify-center rounded-[24px] border border-transparent bg-transparent max-[560px]:min-h-[320px] max-[560px]:w-full max-[560px]:rounded-[18px] max-[560px]:px-2 max-[560px]:grid max-[560px]:w-full max-[560px]:grid-cols-2 max-[560px]:items-stretch"
           >
             <span className="sr-only">空对话区域</span>
           </div>
@@ -3016,18 +3238,19 @@ function DiscoverHome({
   count,
   quality,
   ratio,
+  resolution,
   imageModel,
   publicMode,
   referenceImage,
   isGenerating,
   stickyVisible,
   creations,
-  isPublicPreview,
   creationFeedStatus = "idle",
   onPromptChange,
   onCountChange,
   onQualityChange,
   onRatioChange,
+  onResolutionChange,
   onImageModelChange,
   onPublicChange,
   onReferenceFileChange,
@@ -3042,18 +3265,19 @@ function DiscoverHome({
   count: number;
   quality: string;
   ratio: string;
+  resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
   referenceImage: ReferenceImage | null;
   isGenerating: boolean;
   stickyVisible: boolean;
   creations: CreationItem[];
-  isPublicPreview: boolean;
   creationFeedStatus?: CreationFeedStatus;
   onPromptChange: (prompt: string) => void;
   onCountChange: (count: number) => void;
   onQualityChange: (quality: string) => void;
   onRatioChange: (ratio: string) => void;
+  onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
   onReferenceFileChange: (file: File) => void;
@@ -3210,6 +3434,7 @@ function DiscoverHome({
             count={count}
             quality={quality}
             ratio={ratio}
+            resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
             referenceImageName={referenceImage?.name}
@@ -3218,6 +3443,7 @@ function DiscoverHome({
             onCountChange={onCountChange}
             onQualityChange={onQualityChange}
             onRatioChange={onRatioChange}
+            onResolutionChange={onResolutionChange}
             onImageModelChange={onImageModelChange}
             onPublicChange={onPublicChange}
             onReferenceFileChange={onReferenceFileChange}
@@ -3239,8 +3465,8 @@ function DiscoverHome({
       <CreationFeed
         flushTop
         creations={creations}
-        title={isPublicPreview ? "公共精选" : "最近创作"}
-        subtitle={isPublicPreview ? "来自 ColaAI 社区" : "来自你的灵感"}
+        title="公共精选"
+        subtitle="来自 ColaAI 社区"
         isLoading={creationFeedStatus === "loading"}
         isRefreshing={creationFeedStatus === "refreshing"}
         onOpen={onOpenCreation}
@@ -3262,6 +3488,7 @@ function DiscoverHome({
             count={count}
             quality={quality}
             ratio={ratio}
+            resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
             referenceImageName={referenceImage?.name}
@@ -3271,6 +3498,7 @@ function DiscoverHome({
             onCountChange={onCountChange}
             onQualityChange={onQualityChange}
             onRatioChange={onRatioChange}
+            onResolutionChange={onResolutionChange}
             onImageModelChange={onImageModelChange}
             onPublicChange={onPublicChange}
             onReferenceFileChange={onReferenceFileChange}
@@ -3288,6 +3516,7 @@ export function GenerateWorkspace({
   count,
   quality,
   ratio,
+  resolution,
   imageModel,
   publicMode,
   referenceImage,
@@ -3303,6 +3532,7 @@ export function GenerateWorkspace({
   onCountChange,
   onQualityChange,
   onRatioChange,
+  onResolutionChange,
   onImageModelChange,
   onPublicChange,
   onReferenceFileChange,
@@ -3321,6 +3551,7 @@ export function GenerateWorkspace({
   count: number;
   quality: string;
   ratio: string;
+  resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
   referenceImage: ReferenceImage | null;
@@ -3336,6 +3567,7 @@ export function GenerateWorkspace({
   onCountChange: (count: number) => void;
   onQualityChange: (quality: string) => void;
   onRatioChange: (ratio: string) => void;
+  onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
   onReferenceFileChange: (file: File) => void;
@@ -3370,9 +3602,10 @@ export function GenerateWorkspace({
     <main
       data-cola-panel="generate-workspace"
       data-cola-layout="rova-generate-focus"
+      data-cola-mobile-layout="compact-generation"
       data-cola-behavior="drop-reference-image"
       data-cola-drop-target="image-reference"
-      className="relative z-10 mx-auto flex h-dvh w-full max-w-none flex-col overflow-hidden px-4 pb-28 pt-[78px] md:pb-6 md:pl-[104px] md:pr-8 md:pt-[30px]"
+      className="relative z-10 mx-auto flex h-dvh w-full max-w-none flex-col overflow-hidden px-4 pb-28 pt-[78px] md:pb-6 md:pl-[104px] md:pr-8 md:pt-[30px] max-[560px]:px-3 max-[560px]:pb-[calc(env(safe-area-inset-bottom)+112px)] max-[560px]:pt-[calc(env(safe-area-inset-top)+58px)]"
     >
       <div
         data-cola-panel="generate-session-topbar"
@@ -3432,6 +3665,7 @@ export function GenerateWorkspace({
             count={count}
             quality={quality}
             ratio={ratio}
+            resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
             referenceImage={referenceImage}
@@ -3440,6 +3674,7 @@ export function GenerateWorkspace({
             onCountChange={onCountChange}
             onQualityChange={onQualityChange}
             onRatioChange={onRatioChange}
+            onResolutionChange={onResolutionChange}
             onImageModelChange={onImageModelChange}
             onPublicChange={onPublicChange}
             onReferenceFileChange={onReferenceFileChange}
@@ -3504,11 +3739,15 @@ function PromptLibrary({
   const pageSize = 8;
 
   const normalizedQuery = query.trim().toLowerCase();
-  const useRemotePrompts = shouldUseRemotePromptTemplates(promptLoadState, promptStats, remotePromptCards.length);
-  const promptSourceCards = useRemotePrompts ? remotePromptCards : promptCards;
-  const promptSourceCount = promptStats.public || promptSourceCards.length;
+  const hasRemotePrompts = shouldUseRemotePromptTemplates(promptLoadState, promptStats, remotePromptCards.length);
+  const promptSourceCards = useMemo(
+    () => resolvePromptSourceCards(hasRemotePrompts, remotePromptCards),
+    [hasRemotePrompts, remotePromptCards],
+  );
+  const promptSourceCount = promptSourceCards.length;
+  const promptLibraryTotalCount = getPromptLibraryTotalCount(hasRemotePrompts, promptStats, promptSourceCount);
   const activeTagLabel = activeTag === "all" ? "精选提示词" : `#${activeTag}`;
-  const promptDataSourceLabel = useRemotePrompts ? "公开模板库" : "本地精选";
+  const promptDataSourceLabel = hasRemotePrompts ? "公开模板库" : "GitHub 社区源";
   const promptLibraryTags = useMemo(
     () => {
       const allTags = new Set(promptTags);
@@ -3616,8 +3855,8 @@ function PromptLibrary({
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-5 text-center sm:gap-8">
             <div>
-              <div className="text-3xl font-semibold text-slate-950">{promptCards.length}</div>
-              <div className="text-xs text-slate-400">精选提示词</div>
+              <div className="text-3xl font-semibold text-slate-950">{promptLibraryTotalCount}</div>
+              <div className="text-xs text-slate-400">提示词总数</div>
             </div>
             <div className="hidden h-11 w-px bg-slate-200 sm:block" />
             <div>
@@ -3686,11 +3925,7 @@ function PromptLibrary({
             正在浏览 {activeTagLabel}，显示 {visiblePromptCards.length} / {filteredPromptCards.length} 条灵感
           </span>
           <span className="text-xs text-slate-400">
-            {promptLoadState === "loading"
-              ? "正在同步公开模板库"
-              : promptLoadState === "error"
-                ? "公开模板库暂不可用，正在使用本地精选"
-                : normalizedQuery ? `搜索：${query.trim()}` : "按标题、作者、标签和提示词内容匹配"}
+            {getPromptLibraryStatusText(promptLoadState, normalizedQuery, query)}
           </span>
         </div>
 
@@ -4068,6 +4303,7 @@ function MobileMoreSheet({
   onClose,
   onLogin,
   onLogout,
+  onCheckIn,
   onOpenAnnouncement,
   onToggleLanguage,
   onNavigate,
@@ -4078,6 +4314,7 @@ function MobileMoreSheet({
   onClose: () => void;
   onLogin: () => void;
   onLogout: () => void;
+  onCheckIn: () => void;
   onOpenAnnouncement: () => void;
   onToggleLanguage: () => void;
   onNavigate: (mode: WorkbenchMode) => void;
@@ -4085,6 +4322,7 @@ function MobileMoreSheet({
   const actions = [
     { label: "公告", icon: Bell, onClick: onOpenAnnouncement },
     { label: "Switch to EN", icon: Languages, onClick: onToggleLanguage },
+    { label: "签到", icon: Gift, onClick: onCheckIn, authOnly: true },
     { label: "提示词", icon: WandSparkles, onClick: () => onNavigate("prompts") },
     { label: "图片库", icon: Library, onClick: () => onNavigate("assets"), authOnly: true },
     { label: "设置", icon: Settings, onClick: () => onNavigate("settings") },
@@ -4194,6 +4432,39 @@ function LightweightDialog({
   }
 
   return null;
+}
+
+function CheckInDialog({
+  result,
+  onClose,
+}: {
+  result: CheckInDialogResult | null;
+  onClose: () => void;
+}) {
+  if (!result) {
+    return null;
+  }
+
+  const isSuccess = result.status === "success";
+  return (
+    <DialogShell title="签到" onClose={onClose}>
+      <div data-cola-panel="check-in-dialog" data-cola-state={result.status} className="space-y-4 p-5">
+        <div className={cn("rounded-[18px] px-4 py-3", isSuccess ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-600")}>
+          <p className="text-sm font-semibold">{result.message}</p>
+          {isSuccess && typeof result.remainingCredits === "number" ? (
+            <p className="mt-1 text-xs leading-5 text-emerald-700/78">当前剩余 {result.remainingCredits} 积分。</p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className={colaButtonClass("primary", "h-11 w-full px-5 text-sm")}
+          onClick={onClose}
+        >
+          知道了
+        </button>
+      </div>
+    </DialogShell>
+  );
 }
 
 const landingHeroIdleMotion: LandingHeroScrollMotion = {
@@ -4594,16 +4865,19 @@ function CreationPreviewDialog({
 }
 
 export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWorkbenchProps) {
+  const [sessionOverride, setSessionOverride] = useState<ColaAuthSession | null>(null);
   const [mode, setMode] = useState<WorkbenchMode>(initialMode);
   const [canvasSubview, setCanvasSubview] = useState<CanvasSubview>("home");
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(1);
   const [quality, setQuality] = useState("智能");
   const [ratio, setRatio] = useState<string>("9:16");
+  const [resolution, setResolution] = useState<ImageResolution>("1k");
   const [imageModel, setImageModel] = useState<GenerateImageModel>("auto");
   const [publicMode, setPublicMode] = useState(false);
   const [promptMarketOpen, setPromptMarketOpen] = useState(false);
   const [dialog, setDialog] = useState<WorkbenchDialog>(null);
+  const [checkInResult, setCheckInResult] = useState<CheckInDialogResult | null>(null);
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [images, setImages] = useState<ManagedImage[]>([]);
   const [publicDiscoverImages, setPublicDiscoverImages] = useState<CreationItem[]>([]);
@@ -4643,18 +4917,19 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   const referencePreviewUrlRef = useRef("");
   const generateConversationsRef = useRef<ImageConversation[]>([]);
 
-  const isPublicPreview = !session.key.trim();
+  const currentSession = sessionOverride ?? session;
+  const isPublicPreview = !currentSession.key.trim();
   const publicDiscoverCreations = useMemo(
     () => (publicDiscoverImages.length > 0 ? publicDiscoverImages : fallbackCreations),
     [publicDiscoverImages],
   );
   const creations = useMemo(
-    () => isPublicPreview ? publicDiscoverCreations : buildCreations(images),
-    [images, isPublicPreview, publicDiscoverCreations],
+    () => publicDiscoverCreations,
+    [publicDiscoverCreations],
   );
   const landingHeroItems = useMemo(
-    () => isPublicPreview ? buildPublicDiscoverLandingHeroItems(publicDiscoverCreations) : buildLandingHeroItems(images),
-    [images, isPublicPreview, publicDiscoverCreations],
+    () => buildPublicDiscoverLandingHeroItems(publicDiscoverCreations),
+    [publicDiscoverCreations],
   );
   const canvasTemplates = useMemo(() => getCanvasTemplateCards(), []);
   const activeTaskIds = useMemo(
@@ -4692,26 +4967,17 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   }, []);
 
   const loadRecentCreations = useCallback(async () => {
-    const hasCurrentCreations = isPublicPreview ? publicDiscoverImages.length > 0 : images.length > 0;
+    const hasCurrentCreations = publicDiscoverImages.length > 0;
     setCreationFeedStatus((current) => (hasCurrentCreations || current === "refreshing" ? "refreshing" : "loading"));
     try {
-      if (isPublicPreview) {
-        const result = await fetchPublicDiscoverImages({ page_size: 12 });
-        setPublicDiscoverImages(result.items);
-      } else {
-        const result = await fetchManagedImages({ page_size: 12 });
-        setImages(result.items);
-      }
+      const result = await fetchPublicDiscoverImages({ page_size: 12 });
+      setPublicDiscoverImages(result.items);
     } catch {
-      if (isPublicPreview) {
-        setPublicDiscoverImages((current) => current);
-      } else {
-        setImages((current) => current);
-      }
+      setPublicDiscoverImages((current) => current);
     } finally {
       setCreationFeedStatus("idle");
     }
-  }, [images.length, isPublicPreview, publicDiscoverImages.length]);
+  }, [publicDiscoverImages.length]);
 
   const scrollToDiscoverHero = useCallback((behavior: ScrollBehavior = "smooth") => {
     if (typeof window === "undefined") {
@@ -4770,27 +5036,25 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     const loadImages = async () => {
       setCreationFeedStatus("loading");
       try {
+        const publicResult = await fetchPublicDiscoverImages({ page_size: 12 });
+        if (active) {
+          setPublicDiscoverImages(publicResult.items);
+        }
         if (isPublicPreview) {
-          const result = await fetchPublicDiscoverImages({ page_size: 12 });
           if (active) {
             setImages([]);
-            setPublicDiscoverImages(result.items);
           }
           return;
         }
 
-        const result = await fetchManagedImages({ page_size: 12 });
+        const personalResult = await fetchManagedImages({ page_size: 12 });
         if (active) {
-          setPublicDiscoverImages([]);
-          setImages(result.items);
+          setImages(personalResult.items);
         }
       } catch {
         if (active) {
-          if (isPublicPreview) {
-            setPublicDiscoverImages((current) => current);
-          } else {
-            setImages((current) => current);
-          }
+          setPublicDiscoverImages((current) => current);
+          setImages((current) => current);
         }
       } finally {
         if (active) {
@@ -5057,11 +5321,55 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   const handleLogout = useCallback(() => {
     void (async () => {
       await clearStoredColaAuthSession();
+      await clearStoredAuthSession();
       if (typeof window !== "undefined") {
         window.location.href = "/ColaAI/login";
       }
     })();
   }, []);
+
+  const handleCheckIn = useCallback(async () => {
+    if (isPublicPreview) {
+      handleLogin();
+      return;
+    }
+
+    try {
+      const result = await checkInUser();
+      const nextLimits = userKeyLimitsToStoredLimits(result.user.limits);
+      const nextSession: ColaAuthSession = {
+        ...currentSession,
+        subjectId: result.user.id || currentSession.subjectId,
+        name: result.user.name || currentSession.name,
+        limits: nextLimits,
+      };
+
+      setSessionOverride(nextSession);
+      await Promise.all([
+        setStoredColaAuthSession(nextSession),
+        setStoredAuthSession({
+          key: nextSession.key,
+          role: "user",
+          subjectId: nextSession.subjectId,
+          name: nextSession.name,
+          email: nextSession.email,
+          limits: nextSession.limits,
+        }),
+      ]);
+      setCheckInResult({
+        status: "success",
+        awarded: result.awarded,
+        bonusCredits: result.bonus_credits ?? result.bonus_images,
+        remainingCredits: nextLimits?.creditsRemaining ?? nextLimits?.imagesRemaining,
+        message: result.awarded ? `签到成功，积分 +${result.bonus_credits ?? result.bonus_images}。` : "今天已经签到过。",
+      });
+    } catch (error) {
+      setCheckInResult({
+        status: "error",
+        message: error instanceof Error ? error.message : "签到失败，请稍后重试。",
+      });
+    }
+  }, [currentSession, handleLogin, isPublicPreview]);
 
   const handleToggleLanguage = useCallback(() => {
     setLanguage((current) => (current === "zh" ? "en" : "zh"));
@@ -5224,6 +5532,24 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         const tasks = await createGenerateSubmissionTasks(input, {
           createTaskId: createClientTaskId,
         });
+        const acceptedCredits = tasks
+          .filter((task) => task.status !== "error")
+          .reduce((sum, task) => sum + imageResolutionCreditCost(task.submissionContext?.resolution ?? input.resolution), 0);
+        const nextSession = decrementSessionImageQuota(currentSession, acceptedCredits);
+        if (nextSession !== currentSession) {
+          setSessionOverride(nextSession);
+          await Promise.all([
+            setStoredColaAuthSession(nextSession),
+            setStoredAuthSession({
+              key: nextSession.key,
+              role: "user",
+              subjectId: nextSession.subjectId,
+              name: nextSession.name,
+              email: nextSession.email,
+              limits: nextSession.limits,
+            }),
+          ]);
+        }
         const now = new Date().toISOString();
         const targetSessionId = sessionId === initialGenerateSession.id ? createGenerateSessionId() : sessionId;
         const nextConversations = upsertGenerateSubmissionIntoImageConversations(
@@ -5251,7 +5577,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         setIsGenerating(false);
       }
     })();
-  }, []);
+  }, [currentSession]);
 
   const handleGenerate = useCallback(() => {
     if (!prompt.trim()) {
@@ -5278,13 +5604,15 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         count: effectiveCount,
         model: effectiveModel,
         size: effectiveSize,
+        resolution,
         referenceFiles,
+        publicMode,
       },
       activeGenerateSessionId,
     );
     setPrompt("");
     handleReferenceRemove();
-  }, [activeGenerateSessionId, count, handleReferenceRemove, imageModel, isPublicPreview, prompt, quality, ratio, referenceImage, submitGenerateTasks]);
+  }, [activeGenerateSessionId, count, handleReferenceRemove, imageModel, isPublicPreview, prompt, publicMode, quality, ratio, referenceImage, resolution, submitGenerateTasks]);
 
   const handleRetryGeneration = useCallback((task: GenerateTask) => {
     if (task.submissionContext?.retrying) {
@@ -5323,19 +5651,39 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     setMode("generate");
   }, [activeGenerateSessionId, generateSessions]);
 
+  const handleCanvasAcceptedImageTasks = useCallback((acceptedTaskCount: number) => {
+    const nextSession = decrementSessionImageQuota(currentSession, acceptedTaskCount);
+    if (nextSession === currentSession) {
+      return;
+    }
+
+    setSessionOverride(nextSession);
+    void Promise.all([
+      setStoredColaAuthSession(nextSession),
+      setStoredAuthSession({
+        key: nextSession.key,
+        role: "user",
+        subjectId: nextSession.subjectId,
+        name: nextSession.name,
+        email: nextSession.email,
+        limits: nextSession.limits,
+      }),
+    ]);
+  }, [currentSession]);
+
   const handleOptimizeCanvasTextPrompt = useCallback(async (_nodeId: string, text: string, model: string) => {
     const trimmed = text.trim();
     if (!trimmed) {
       return "";
     }
-    if (!session.key.trim()) {
+    if (!currentSession.key.trim()) {
       throw new Error("请先登录后再使用 GPT 优化提示词。");
     }
 
     const response = await fetch(colaApiPath("/v1/chat/completions"), {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${session.key}`,
+        Authorization: `Bearer ${currentSession.key}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -5355,14 +5703,14 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       throw new Error("上游返回为空，请稍后重试。");
     }
     return optimizedPrompt;
-  }, [session.key]);
+  }, [currentSession.key]);
 
   const handleReverseCanvasImagePrompt = useCallback(async (_nodeId: string, text: string, model: string, referenceImages: CanvasReferenceImage[]) => {
     const trimmed = text.trim();
     if (!trimmed) {
       return "";
     }
-    if (!session.key.trim()) {
+    if (!currentSession.key.trim()) {
       throw new Error("请先登录后再使用 GPT 图片反推。");
     }
 
@@ -5370,7 +5718,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     const response = await fetch(colaApiPath("/v1/chat/completions"), {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${session.key}`,
+        Authorization: `Bearer ${currentSession.key}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -5390,7 +5738,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       throw new Error("上游返回为空，请稍后重试。");
     }
     return reversedPrompt;
-  }, [session.key]);
+  }, [currentSession.key]);
 
   const clearFocusedGenerateTask = useCallback(() => {
     setFocusedGenerateTaskId("");
@@ -5535,7 +5883,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       >
         <RovaMediaBackground />
         <ReferenceDropOverlay active={isReferenceDragActive} />
-        {isPublicPreview ? <PublicAuthBar /> : null}
+        {isPublicPreview ? <PublicAuthBar /> : <UserSummaryBar session={currentSession} />}
 
         <aside
           data-cola-panel="side-nav"
@@ -5577,6 +5925,18 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
           </nav>
 
           <nav className="flex flex-col items-center gap-3">
+            {!isPublicPreview ? (
+              <button
+                type="button"
+                data-cola-action="check-in"
+                title="签到"
+                className="grid w-full place-items-center gap-1 text-[11px] font-medium text-slate-500 transition hover:text-slate-900"
+                onClick={() => void handleCheckIn()}
+              >
+                <Gift className="size-4" />
+                签到
+              </button>
+            ) : null}
             {lowerNavItems.filter((item) => item.key !== "api" && (!("authOnly" in item) || !isPublicPreview)).map((item) => {
               const Icon = item.icon;
               const active = "mode" in item && item.mode === mode;
@@ -5696,18 +6056,19 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
                 count={count}
                 quality={quality}
                 ratio={ratio}
+                resolution={resolution}
                 imageModel={imageModel}
                 publicMode={publicMode}
                 referenceImage={referenceImage}
                 isGenerating={isGenerating}
                 stickyVisible={stickyVisible}
-                creations={creationFeedStatus === "loading" && images.length === 0 ? [] : creations}
-                isPublicPreview={isPublicPreview}
+                creations={creationFeedStatus === "loading" && publicDiscoverImages.length === 0 ? [] : creations}
                 creationFeedStatus={creationFeedStatus}
                 onPromptChange={setPrompt}
                 onCountChange={setCount}
                 onQualityChange={setQuality}
                 onRatioChange={setRatio}
+                onResolutionChange={setResolution}
                 onImageModelChange={setImageModel}
                 onPublicChange={setPublicMode}
                 onReferenceFileChange={handleReferenceFileChange}
@@ -5728,6 +6089,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
             count={count}
             quality={quality}
             ratio={ratio}
+            resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
             referenceImage={referenceImage}
@@ -5738,11 +6100,12 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
             generationError={generationError}
             focusedTaskId={focusedGenerateTaskId}
             focusedCanvasTask={focusedCanvasTask}
-            queueUserRole={session.role}
+            queueUserRole={currentSession.role}
             onPromptChange={setPrompt}
             onCountChange={setCount}
             onQualityChange={setQuality}
             onRatioChange={setRatio}
+            onResolutionChange={setResolution}
             onImageModelChange={setImageModel}
             onPublicChange={setPublicMode}
             onReferenceFileChange={handleReferenceFileChange}
@@ -5804,6 +6167,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       {mode === "canvas" && canvasSubview === "editor" && (
         <CanvasWorkspace
           onBack={handleOpenCanvasHome}
+          onAcceptedImageTasks={handleCanvasAcceptedImageTasks}
           onOpenSourceTask={handleOpenCanvasSourceTask}
           onOptimizeTextPrompt={handleOptimizeCanvasTextPrompt}
           onReverseImagePrompt={handleReverseCanvasImagePrompt}
@@ -5813,10 +6177,11 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       <MobileMoreSheet
         open={dialog === "more"}
         isPublicPreview={isPublicPreview}
-        session={session}
+        session={currentSession}
         onClose={() => setDialog(null)}
         onLogin={handleLogin}
         onLogout={handleLogout}
+        onCheckIn={() => void handleCheckIn()}
         onOpenAnnouncement={() => openDialog("announcement")}
         onToggleLanguage={handleToggleLanguage}
         onNavigate={(nextMode) => {
@@ -5839,6 +6204,10 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       <LightweightDialog
         open={dialog === "more" ? null : dialog}
         onClose={() => setDialog(null)}
+      />
+      <CheckInDialog
+        result={checkInResult}
+        onClose={() => setCheckInResult(null)}
       />
       <CreationPreviewDialog
         item={selectedCreation}

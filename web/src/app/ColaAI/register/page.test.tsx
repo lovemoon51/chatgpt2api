@@ -26,16 +26,28 @@ describe("ColaAIRegisterPage", () => {
     const source = readFileSync(join(testDir, "page.tsx"), "utf-8");
 
     expect(source).toContain("@/store/cola-auth");
+    expect(source).toContain("@/store/auth");
+    expect(source).toContain("@/lib/api");
     expect(source).not.toContain("@/app/register");
-    expect(source).not.toContain("@/store/auth");
     expect(source).not.toContain("@/lib/auth-session");
+    expect(source).not.toContain("createColaAuthProfile(");
   });
 
-  test("reads submitted values from the form element to avoid hydration-time state races", () => {
+  test("activates a backend ordinary user token with email password and one-time access code", () => {
     const source = readFileSync(join(testDir, "page.tsx"), "utf-8");
 
+    expect(source).toContain("await activateUser({");
+    expect(source).toContain("email: submittedEmail");
+    expect(source).toContain("password: submittedPassword");
+    expect(source).toContain("accessCode: submittedAccessCode");
+    expect(source).toContain('if (data.role !== "user")');
+    expect(source).toContain("await setStoredAuthSession(sharedSession)");
+    expect(source).toContain("await setStoredColaAuthSession(createColaAuthSessionFromSharedSession(sharedSession))");
     expect(source).toContain("new FormData(event.currentTarget)");
-    expect(source).toContain('name="name"');
     expect(source).toContain('name="email"');
+    expect(source).toContain('name="password"');
+    expect(source).toContain('name="name"');
+    expect(source).toContain('name="accessCode"');
+    expect(source).not.toContain("await login(submittedAccessCode)");
   });
 });

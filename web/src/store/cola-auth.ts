@@ -2,6 +2,8 @@
 
 import localforage from "localforage";
 
+import type { StoredAuthSession } from "./auth";
+
 export type ColaAuthRole = "guest" | "creator";
 
 export type ColaAuthSession = {
@@ -10,6 +12,7 @@ export type ColaAuthSession = {
   subjectId: string;
   name: string;
   email?: string;
+  limits?: StoredAuthSession["limits"];
 };
 
 export type ColaAuthProfile = {
@@ -47,14 +50,6 @@ function clean(value: unknown) {
   return String(value || "").trim();
 }
 
-function createId(prefix: string) {
-  const randomId =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `${prefix}-${randomId}`;
-}
-
 function normalizeSession(value: unknown, fallbackKey = ""): ColaAuthSession | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -73,6 +68,7 @@ function normalizeSession(value: unknown, fallbackKey = ""): ColaAuthSession | n
     subjectId: clean(candidate.subjectId) || "cola-local-user",
     name: clean(candidate.name) || "Cola Creator",
     email: clean(candidate.email) || undefined,
+    limits: candidate.limits ?? undefined,
   };
 }
 
@@ -89,7 +85,7 @@ function normalizeProfile(value: unknown): ColaAuthProfile | null {
   }
 
   return {
-    id: clean(candidate.id) || createId("cola-user"),
+    id: clean(candidate.id) || "cola-user",
     key,
     name,
     email: clean(candidate.email),
@@ -97,23 +93,30 @@ function normalizeProfile(value: unknown): ColaAuthProfile | null {
   };
 }
 
-export function createColaAuthProfile(input: { name: string; email?: string }): ColaAuthProfile {
+export function createColaAuthSessionFromSharedSession(session: StoredAuthSession): ColaAuthSession | null {
+  if (session.role !== "user") {
+    return null;
+  }
   return {
-    id: createId("cola-user"),
-    key: createId("cola-local"),
-    name: clean(input.name) || "Cola Creator",
-    email: clean(input.email),
-    createdAt: new Date().toISOString(),
+    key: session.key,
+    role: "creator",
+    subjectId: session.subjectId || "cola-user",
+    name: session.name || "Cola Creator",
+    email: session.email,
+    limits: session.limits,
   };
 }
 
-export function createColaAuthSessionFromProfile(profile: ColaAuthProfile): ColaAuthSession {
+export function createColaAuthProfileFromSharedSession(session: StoredAuthSession): ColaAuthProfile | null {
+  if (session.role !== "user") {
+    return null;
+  }
   return {
-    key: profile.key,
-    role: "creator",
-    subjectId: profile.id,
-    name: profile.name,
-    email: profile.email || undefined,
+    id: session.subjectId || "cola-user",
+    key: session.key,
+    name: session.name || "Cola Creator",
+    email: session.email || "",
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -125,7 +128,7 @@ export async function getStoredColaAuthProfile(storage: ColaAuthStorageLike = co
   return normalizeProfile(await storage.getItem<ColaAuthProfile>(COLA_AUTH_PROFILE_STORAGE_KEY));
 }
 
-export async function setStoredColaAuthProfile(profile: ColaAuthProfile, storage: ColaAuthStorageLike = colaAuthStorage) {
+export async function setStoredColaAuthProfile(profile: ColaAuthProfile | null, storage: ColaAuthStorageLike = colaAuthStorage) {
   if (!canUseStorage(storage)) {
     return;
   }
@@ -163,7 +166,7 @@ export async function getStoredColaAuthSession(storage: ColaAuthStorageLike = co
   return null;
 }
 
-export async function setStoredColaAuthSession(session: ColaAuthSession, storage: ColaAuthStorageLike = colaAuthStorage) {
+export async function setStoredColaAuthSession(session: ColaAuthSession | null, storage: ColaAuthStorageLike = colaAuthStorage) {
   if (!canUseStorage(storage)) {
     return;
   }

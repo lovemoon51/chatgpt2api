@@ -4,41 +4,63 @@ import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { ArrowLeft, Sparkles, UserPlus } from "lucide-react";
 
+import { activateUser } from "@/lib/api";
+import { createStoredAuthSessionFromLoginResponse, setStoredAuthSession } from "@/store/auth";
 import {
-  createColaAuthProfile,
-  createColaAuthSessionFromProfile,
+  createColaAuthProfileFromSharedSession,
+  createColaAuthSessionFromSharedSession,
   setStoredColaAuthProfile,
   setStoredColaAuthSession,
 } from "@/store/cola-auth";
 
 export default function ColaAIRegisterPage() {
-  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [accessCode, setAccessCode] = useState("");
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleRegister = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
-    const displayName = String(formData.get("name") || "").trim();
     const submittedEmail = String(formData.get("email") || "").trim();
+    const submittedPassword = String(formData.get("password") || "");
+    const displayName = String(formData.get("name") || "").trim();
+    const submittedAccessCode = String(formData.get("accessCode") || "").trim();
 
-    if (!displayName) {
-      setMessage("请先给你的 ColaAI 身份起一个名字。");
+    if (!submittedEmail || !submittedPassword || !submittedAccessCode) {
+      setMessage("请输入邮箱、密码和管理员发放的普通用户访问码。");
       return;
     }
 
     setIsSubmitting(true);
     setMessage("");
     try {
-      const profile = createColaAuthProfile({ name: displayName, email: submittedEmail });
-      await setStoredColaAuthProfile(profile);
-      await setStoredColaAuthSession(createColaAuthSessionFromProfile(profile));
+      const data = await activateUser({
+        email: submittedEmail,
+        password: submittedPassword,
+        accessCode: submittedAccessCode,
+        name: displayName,
+      });
+      if (data.role !== "user") {
+        setMessage("这个访问码不能用于 ColaAI 普通用户身份。");
+        return;
+      }
+      const sharedSession = {
+        ...createStoredAuthSessionFromLoginResponse(submittedEmail, data),
+        name: displayName || data.name || "Cola Creator",
+      };
+      const colaProfile = createColaAuthProfileFromSharedSession(sharedSession);
+
+      await setStoredAuthSession(sharedSession);
+      await setStoredColaAuthProfile(colaProfile);
+      await setStoredColaAuthSession(createColaAuthSessionFromSharedSession(sharedSession));
       if (typeof window !== "undefined") {
         window.location.href = "/ColaAI";
       }
-    } catch {
-      setMessage("注册失败，请稍后再试。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "激活失败，请稍后再试。");
     } finally {
       setIsSubmitting(false);
     }
@@ -66,13 +88,37 @@ export default function ColaAIRegisterPage() {
           <p className="mt-5 text-sm font-semibold text-cyan-700">ColaAI Account</p>
           <h1 className="mt-2 text-4xl font-semibold tracking-[-0.04em] text-slate-950">注册 ColaAI</h1>
           <p className="mt-3 max-w-[390px] text-sm leading-6 text-slate-500">
-            创建 ColaAI 专属创作者身份。这里不是后台注册机，也不会生成或管理旧系统访问码。
+            使用邮箱、密码和管理员发放的一次性访问码激活 ColaAI 身份。访问码绑定后不能再用于其他账号。
           </p>
         </div>
 
         <form className="mt-7 space-y-4" onSubmit={(event) => void handleRegister(event)}>
           <label className="block">
-            <span className="text-sm font-semibold text-slate-700">创作者名称</span>
+            <span className="text-sm font-semibold text-slate-700">邮箱</span>
+            <input
+              name="email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="用于后续登录"
+              autoComplete="email"
+              className="mt-2 h-12 w-full rounded-2xl border border-slate-200 bg-white/86 px-4 text-sm text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm font-semibold text-slate-700">密码</span>
+            <input
+              name="password"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="至少 6 位"
+              autoComplete="new-password"
+              className="mt-2 h-12 w-full rounded-2xl border border-slate-200 bg-white/86 px-4 text-sm text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm font-semibold text-slate-700">显示名称，可选</span>
             <input
               name="name"
               value={name}
@@ -82,12 +128,12 @@ export default function ColaAIRegisterPage() {
             />
           </label>
           <label className="block">
-            <span className="text-sm font-semibold text-slate-700">邮箱，可选</span>
+            <span className="text-sm font-semibold text-slate-700">普通用户访问码</span>
             <input
-              name="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@example.com"
+              name="accessCode"
+              value={accessCode}
+              onChange={(event) => setAccessCode(event.target.value)}
+              placeholder="输入管理员发放的访问码"
               className="mt-2 h-12 w-full rounded-2xl border border-slate-200 bg-white/86 px-4 text-sm text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
           </label>
@@ -99,7 +145,7 @@ export default function ColaAIRegisterPage() {
             disabled={isSubmitting}
           >
             <UserPlus className="size-4" />
-            {isSubmitting ? "正在创建" : "创建 ColaAI 身份"}
+            {isSubmitting ? "正在激活" : "激活 ColaAI 身份"}
           </button>
         </form>
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
+import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Copy, Download, EyeOff, Globe2, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageTags, fetchManagedImages, setImageTags, type ManagedImage } from "@/lib/api";
+import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageTags, fetchManagedImages, setImageTags, updateManagedImagesPublicVisibility, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
@@ -90,6 +90,7 @@ function ImageManagerContent() {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [publicVisibilityAction, setPublicVisibilityAction] = useState<"publish" | "unpublish" | null>(null);
 
   const filteredItems = useMemo(() => {
     if (serverPaged) {
@@ -300,6 +301,25 @@ function ImageManagerContent() {
     }
   };
 
+  const handleUpdateFilteredPublicVisibility = async (isPublic: boolean) => {
+    if (totalCount === 0) return;
+    setPublicVisibilityAction(isPublic ? "publish" : "unpublish");
+    try {
+      const result = await updateManagedImagesPublicVisibility(isPublic, {
+        start_date: startDate,
+        end_date: endDate,
+        q: query.trim(),
+        tags: selectedTags,
+      });
+      toast.success(isPublic ? `已公开 ${result.updated} 张图片` : `已取消公开 ${result.updated} 张图片`);
+      await loadImages();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : isPublic ? "公开筛选结果失败" : "取消公开筛选结果失败");
+    } finally {
+      setPublicVisibilityAction(null);
+    }
+  };
+
   const handleSingleDownload = async (item: ManagedImage) => {
     await downloadSingleImage(item.rel);
   };
@@ -447,6 +467,24 @@ function ImageManagerContent() {
               {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
             </div>
             <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+              <Button
+                variant="outline"
+                className="h-8 rounded-lg border-emerald-200 bg-white px-3 text-emerald-700 hover:bg-emerald-50"
+                onClick={() => void handleUpdateFilteredPublicVisibility(true)}
+                disabled={isLoading || Boolean(publicVisibilityAction) || totalCount === 0}
+              >
+                {publicVisibilityAction === "publish" ? <LoaderCircle className="size-4 animate-spin" /> : <Globe2 className="size-4" />}
+                公开筛选结果
+              </Button>
+              <Button
+                variant="outline"
+                className="h-8 rounded-lg border-stone-200 bg-white px-3 text-stone-600 hover:bg-stone-50"
+                onClick={() => void handleUpdateFilteredPublicVisibility(false)}
+                disabled={isLoading || Boolean(publicVisibilityAction) || totalCount === 0}
+              >
+                {publicVisibilityAction === "unpublish" ? <LoaderCircle className="size-4 animate-spin" /> : <EyeOff className="size-4" />}
+                取消公开筛选结果
+              </Button>
               <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages()} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新

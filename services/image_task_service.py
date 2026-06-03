@@ -13,6 +13,7 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
+from services.image_metadata_storage import get_image_metadata_storage
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol.conversation import no_image_result_message
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
@@ -231,6 +232,7 @@ def _public_task(task: dict[str, Any], base_url: str = "") -> dict[str, Any]:
         "mode": task.get("mode"),
         "model": task.get("model"),
         "size": task.get("size"),
+        "resolution": task.get("resolution"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
         "timings": timings,
@@ -317,6 +319,8 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
+        resolution: str | None = None,
+        public: bool = False,
         base_url: str,
         release_usage_limit: Callable[[], None] | None = None,
         acquire_usage_limit: Callable[[], Callable[[], None]] | None = None,
@@ -326,10 +330,12 @@ class ImageTaskService:
             "model": model,
             "n": 1,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
             "owner_identity": dict(identity),
             "source_task_id": client_task_id,
+            "public": bool(public),
         }
         return self._submit(
             identity,
@@ -348,6 +354,8 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
+        resolution: str | None = None,
+        public: bool = False,
         base_url: str,
         images: list[tuple[bytes, str, str]],
         release_usage_limit: Callable[[], None] | None = None,
@@ -359,10 +367,12 @@ class ImageTaskService:
             "model": model,
             "n": 1,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
             "owner_identity": dict(identity),
             "source_task_id": client_task_id,
+            "public": bool(public),
         }
         return self._submit(
             identity,
@@ -602,6 +612,7 @@ class ImageTaskService:
             "mode": mode,
             "model": _clean(payload.get("model"), "gpt-image-2"),
             "size": _clean(payload.get("size")),
+            "resolution": _clean(payload.get("resolution")),
             "created_at": now,
             "updated_at": now,
             "queued_at": now,
@@ -948,6 +959,18 @@ class ImageTaskService:
             self._save_locked()
 
     def _load_locked(self) -> dict[str, dict[str, Any]]:
+        storage = get_image_metadata_storage()
+        if storage is not None:
+            tasks = self._clean_task_items(storage.load_map("image_tasks").values())
+            if tasks:
+                return tasks
+            legacy_tasks = self._load_json_locked()
+            if legacy_tasks:
+                storage.save_map("image_tasks", legacy_tasks)
+            return legacy_tasks
+        return self._load_json_locked()
+
+    def _load_json_locked(self) -> dict[str, dict[str, Any]]:
         if not self.path.exists():
             return {}
         try:
@@ -957,6 +980,9 @@ class ImageTaskService:
         raw_items = raw.get("tasks") if isinstance(raw, dict) else raw
         if not isinstance(raw_items, list):
             return {}
+        return self._clean_task_items(raw_items)
+
+    def _clean_task_items(self, raw_items: object) -> dict[str, dict[str, Any]]:
         tasks: dict[str, dict[str, Any]] = {}
         for item in raw_items:
             if not isinstance(item, dict):
@@ -976,6 +1002,7 @@ class ImageTaskService:
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
+                "resolution": _clean(item.get("resolution")),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
@@ -1008,6 +1035,9 @@ class ImageTaskService:
 
     def _save_locked(self) -> None:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        storage = get_image_metadata_storage()
+        if storage is not None:
+            storage.save_map("image_tasks", {key: self._tasks[key] for key in self._tasks})
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp_path.replace(self.path)

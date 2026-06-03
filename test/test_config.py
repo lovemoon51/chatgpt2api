@@ -117,10 +117,14 @@ class ConfigLoadingTests(unittest.TestCase):
             old_env_auth_key = module.os.environ.get("CHATGPT2API_AUTH_KEY")
             old_env_base_url = module.os.environ.get("CHATGPT2API_BASE_URL")
             old_storage_backend = module.os.environ.get("STORAGE_BACKEND")
+            old_postgres_sync_database_url = module.os.environ.get("POSTGRES_SYNC_DATABASE_URL")
+            old_image_metadata_database_url = module.os.environ.get("IMAGE_METADATA_DATABASE_URL")
             try:
                 module.os.environ["CHATGPT2API_AUTH_KEY"] = "env-secret"
                 module.os.environ["CHATGPT2API_BASE_URL"] = "https://from-env.example/"
                 module.os.environ["STORAGE_BACKEND"] = "sqlite"
+                module.os.environ["POSTGRES_SYNC_DATABASE_URL"] = "postgresql://sync:secret@db.example:5432/app"
+                module.os.environ["IMAGE_METADATA_DATABASE_URL"] = "postgresql://images:secret@db.example:5432/app"
                 store = module.ConfigStore(config_path)
 
                 diagnostics = store.diagnostics()
@@ -129,6 +133,8 @@ class ConfigLoadingTests(unittest.TestCase):
                     "CHATGPT2API_AUTH_KEY": old_env_auth_key,
                     "CHATGPT2API_BASE_URL": old_env_base_url,
                     "STORAGE_BACKEND": old_storage_backend,
+                    "POSTGRES_SYNC_DATABASE_URL": old_postgres_sync_database_url,
+                    "IMAGE_METADATA_DATABASE_URL": old_image_metadata_database_url,
                 }.items():
                     if value is None:
                         module.os.environ.pop(key, None)
@@ -143,9 +149,17 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(items["base_url"]["value"], "https://from-env.example")
             self.assertEqual(items["storage.backend"]["source"], "env")
             self.assertEqual(items["storage.backend"]["value"], "sqlite")
+            self.assertEqual(items["storage.postgres_sync_database_url"]["source"], "env")
+            self.assertEqual(items["storage.postgres_sync_database_url"]["status"], "已设置")
+            self.assertNotIn("value", items["storage.postgres_sync_database_url"])
+            self.assertEqual(items["storage.image_metadata_database_url"]["source"], "env")
+            self.assertEqual(items["storage.image_metadata_database_url"]["status"], "已设置")
+            self.assertNotIn("value", items["storage.image_metadata_database_url"])
             self.assertNotIn("r2-secret", json.dumps(diagnostics, ensure_ascii=False))
             self.assertNotIn("backup-passphrase", json.dumps(diagnostics, ensure_ascii=False))
             self.assertNotIn("sk-secret", json.dumps(diagnostics, ensure_ascii=False))
+            self.assertNotIn("sync:secret", json.dumps(diagnostics, ensure_ascii=False))
+            self.assertNotIn("images:secret", json.dumps(diagnostics, ensure_ascii=False))
 
 
 if __name__ == "__main__":

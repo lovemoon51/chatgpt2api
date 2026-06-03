@@ -56,8 +56,8 @@ const imageOptionItems = [
 ] as const;
 const configRatioOptions = ["9:16", "2:3", "1:1", "3:2", "16:9"] as const;
 const configCountOptions = [1, 2, 3, 4] as const;
-const textPromptModelOptions = ["gpt-5.5", "gpt-5.4"] as const;
-const textPromptLoadingMinimumMs = 900;
+const textPromptModelOptions = ["gpt-5.4", "gpt-5.5"] as const;
+const textPromptLoadingMinimumMs = 200;
 
 function isMostlyEnglishText(value: string) {
   const letters = value.match(/[A-Za-z]/g)?.length ?? 0;
@@ -77,6 +77,7 @@ type CanvasNodeProps = {
   onImageFileChange?: (nodeId: string, file: File) => void;
   onImageNaturalSize?: (nodeId: string, width: number, height: number) => void;
   onOpenGeneration: (nodeId: string) => void;
+  onOpenImagePreview?: (nodeId: string) => void;
   onOptimizeTextPrompt?: (nodeId: string, prompt: string, model: string) => Promise<string>;
   onReverseImagePrompt?: (nodeId: string, prompt: string, model: string, referenceImages: CanvasReferenceImage[]) => Promise<string>;
   onStartImageReversePrompt?: (nodeId: string) => void;
@@ -99,6 +100,7 @@ function CanvasNodeComponent({
   onImageFileChange,
   onImageNaturalSize,
   onOpenGeneration,
+  onOpenImagePreview,
   onPointerDown,
   onRetryGeneration,
   onOptimizeTextPrompt,
@@ -111,7 +113,7 @@ function CanvasNodeComponent({
   const [editing, setEditing] = useState(false);
   const [configPopover, setConfigPopover] = useState<"model" | "settings" | null>(null);
   const [textPrompt, setTextPrompt] = useState(() => node.metadata?.content || node.metadata?.prompt || "");
-  const [textPromptModel, setTextPromptModel] = useState<(typeof textPromptModelOptions)[number]>("gpt-5.5");
+  const [textPromptModel, setTextPromptModel] = useState<(typeof textPromptModelOptions)[number]>("gpt-5.4");
   const [textPromptModelOpen, setTextPromptModelOpen] = useState(false);
   const [submittingTextPrompt, setSubmittingTextPrompt] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -213,7 +215,8 @@ function CanvasNodeComponent({
       data-cola-node-surface="studio-card"
       data-cola-node-layout={isConfigNode ? "inline-generation-config" : undefined}
       className={cn(
-        "group absolute select-none rounded-[20px] border bg-white/94 p-4 text-left shadow-[0_22px_54px_-38px_rgba(15,23,42,0.46)] ring-1 ring-white/70 transition-shadow",
+        "group absolute select-none rounded-[20px] border bg-white/94 text-left shadow-[0_22px_54px_-38px_rgba(15,23,42,0.46)] ring-1 ring-white/70 transition-shadow",
+        !isConfigNode && imageUrl ? "p-0" : "p-4",
         isConfigNode && "rounded-[26px] border-white/70 bg-white/88 p-4 text-slate-950 shadow-[0_22px_58px_-42px_rgba(15,23,42,0.48)] ring-slate-900/5 backdrop-blur-xl",
         selected
           ? isConfigNode
@@ -562,11 +565,21 @@ function CanvasNodeComponent({
       ) : null}
 
       {!isConfigNode && imageUrl ? (
-        <div
+        <button
+          type="button"
+          aria-label={`查看大图：${node.title}`}
+          title="查看大图"
+          data-cola-action="open-canvas-image-preview"
           data-cola-image-container="true"
           data-cola-image-fit="adaptive-contain"
-          className="flex h-full items-center justify-center overflow-hidden rounded-[15px] bg-slate-100 shadow-[inset_0_0_0_1px_rgba(15,23,42,0.04)]"
+          data-cola-image-frame="flush"
+          className="flex h-full w-full cursor-zoom-in items-center justify-center overflow-hidden rounded-[17px] bg-slate-100 shadow-[inset_0_0_0_1px_rgba(15,23,42,0.04)]"
           style={{ contain: "strict" }}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenImagePreview?.(node.id);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
         >
           <AuthenticatedImage
             src={imageUrl}
@@ -576,7 +589,7 @@ function CanvasNodeComponent({
             loadingMotion="static"
             onLoad={handleImageLoad}
           />
-        </div>
+        </button>
       ) : !isConfigNode && node.type === "image" ? (
         <div
           data-cola-image-upload-surface="true"

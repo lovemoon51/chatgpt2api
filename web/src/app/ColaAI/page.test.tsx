@@ -19,6 +19,8 @@ describe("ColaAIPage", () => {
     const pageSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "page.tsx"), "utf-8");
 
     expect(pageSource).toContain("@/store/cola-auth");
+    expect(pageSource).toContain("@/store/auth");
+    expect(pageSource).toContain("createColaAuthSessionFromSharedSession");
     expect(pageSource).not.toContain("@/lib/auth-session");
     expect(pageSource).not.toContain("getValidatedAuthSession");
   });

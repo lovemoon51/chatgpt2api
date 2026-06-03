@@ -5,6 +5,8 @@ import {
   COLA_AUTH_PROFILE_STORAGE_KEY,
   COLA_AUTH_SESSION_STORAGE_KEY,
   clearStoredColaAuthSession,
+  createColaAuthProfileFromSharedSession,
+  createColaAuthSessionFromSharedSession,
   getStoredColaAuthSession,
   setStoredColaAuthSession,
   type ColaAuthStorageLike,
@@ -61,5 +63,48 @@ describe("cola auth store", () => {
     await clearStoredColaAuthSession(storage);
 
     expect(await getStoredColaAuthSession(storage)).toBeNull();
+  });
+
+  test("builds ColaAI creator state from a shared ordinary user session", () => {
+    const sharedSession = {
+      key: "sess-user-token",
+      role: "user" as const,
+      subjectId: "user-1",
+      name: "Studio Guest",
+      email: "creator@example.com",
+      limits: {
+        imagesRemaining: 27,
+      },
+    };
+
+    expect(createColaAuthSessionFromSharedSession(sharedSession)).toEqual({
+      key: "sess-user-token",
+      role: "creator",
+      subjectId: "user-1",
+      name: "Studio Guest",
+      email: "creator@example.com",
+      limits: {
+        imagesRemaining: 27,
+      },
+    });
+    expect(createColaAuthProfileFromSharedSession(sharedSession)).toEqual({
+      id: "user-1",
+      key: "sess-user-token",
+      name: "Studio Guest",
+      email: "creator@example.com",
+      createdAt: expect.any(String),
+    });
+  });
+
+  test("does not turn admin sessions into ColaAI creator sessions", () => {
+    const adminSession = {
+      key: "admin-key",
+      role: "admin" as const,
+      subjectId: "admin",
+      name: "Admin",
+    };
+
+    expect(createColaAuthSessionFromSharedSession(adminSession)).toBeNull();
+    expect(createColaAuthProfileFromSharedSession(adminSession)).toBeNull();
   });
 });

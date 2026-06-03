@@ -24,7 +24,7 @@ const managed = (overrides: Partial<ManagedImage>): ManagedImage => ({
 });
 
 describe("cola-ai-landing-hero-state", () => {
-  test("maps the newest five managed images into landing hero items", () => {
+  test("keeps the fixed five landing hero items instead of using managed images", () => {
     const items = buildLandingHeroItems([
       managed({
         rel: "managed-1",
@@ -46,51 +46,9 @@ describe("cola-ai-landing-hero-state", () => {
       managed({ rel: "managed-6", name: "ignored.png", url: "/images/ignored.png" }),
     ]);
 
+    expect(items).toEqual(landingHeroFallbackItems);
     expect(items).toHaveLength(5);
-    expect(items[0]).toEqual({
-      id: "managed-1",
-      title: "night-castle",
-      subtitle: "1536 x 1024",
-      imageUrl: "/images/night-castle.png",
-      imageFallbackUrl: "/image-thumbnails/night-castle.png",
-      alt: "night-castle 最近生成作品",
-    });
-    expect(items.at(-1)?.id).toBe("managed-5");
-  });
-
-  test("falls back to thumbnail when the original image is unavailable", () => {
-    const items = buildLandingHeroItems([
-      managed({
-        rel: "managed-thumb-only",
-        name: "thumb-only.png",
-        url: "",
-        thumbnail_url: "/image-thumbnails/thumb-only.png",
-      }),
-    ]);
-
-    expect(items[0]).toEqual({
-      id: "managed-thumb-only",
-      title: "thumb-only",
-      subtitle: "最近作品",
-      imageUrl: "/image-thumbnails/thumb-only.png",
-      imageFallbackUrl: undefined,
-      alt: "thumb-only 最近生成作品",
-    });
-  });
-
-  test("pads with ColaAI fallback items when fewer than five managed images exist", () => {
-    const items = buildLandingHeroItems([
-      managed({
-        rel: "managed-hero",
-        name: "hero.png",
-        url: "/images/hero.png",
-      }),
-    ]);
-
-    expect(items).toHaveLength(5);
-    expect(items[0].id).toBe("managed-hero");
-    expect(items[1].id).toBe(landingHeroFallbackItems[0].id);
-    expect(items[4].id).toBe(landingHeroFallbackItems[3].id);
+    expect(items.some((item) => item.id.startsWith("managed-"))).toBe(false);
   });
 
   test("returns the ColaAI fallback dataset when no managed images exist", () => {
@@ -120,25 +78,6 @@ describe("cola-ai-landing-hero-state", () => {
       alt: "公共角色海报 ColaAI 公共精选",
     });
     expect(items[1].id).toBe(landingHeroFallbackItems[0].id);
-  });
-
-  test("replaces opaque generated filenames with readable recent-work labels", () => {
-    const items = buildLandingHeroItems([
-      managed({
-        rel: "managed-opaque",
-        name: "1780321478_1af85ffd4341aeccb7e1469067647be9.png",
-        url: "/images/opaque.png",
-      }),
-    ]);
-
-    expect(items[0]).toEqual({
-      id: "managed-opaque",
-      title: "最近作品 1",
-      subtitle: "最近作品",
-      imageUrl: "/images/opaque.png",
-      imageFallbackUrl: undefined,
-      alt: "最近作品 1 最近生成作品",
-    });
   });
 
   test("calculates staged scroll progress for the orbit handoff animation", () => {

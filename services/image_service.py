@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
 from services.config import DATA_DIR, config
+from services.image_metadata_storage import get_image_metadata_storage
 from services.image_asset_service import (
     load_assets,
     mark_asset_deleted,
@@ -74,6 +75,19 @@ def _owner_payload(identity: dict[str, object] | None) -> dict[str, object]:
 
 
 def _load_image_owners_locked() -> dict[str, dict[str, object]]:
+    storage = get_image_metadata_storage()
+    if storage is not None:
+        owners = _clean_image_owners(storage.load_map("image_owners").values())
+        if owners:
+            return owners
+        legacy_owners = _load_json_image_owners_locked()
+        if legacy_owners:
+            storage.save_map("image_owners", legacy_owners)
+        return legacy_owners
+    return _load_json_image_owners_locked()
+
+
+def _load_json_image_owners_locked() -> dict[str, dict[str, object]]:
     try:
         raw = json.loads(IMAGE_OWNERS_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -82,6 +96,12 @@ def _load_image_owners_locked() -> dict[str, dict[str, object]]:
         return {}
     items = raw.get("items") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
+        return {}
+    return _clean_image_owners(items)
+
+
+def _clean_image_owners(items: object) -> dict[str, dict[str, object]]:
+    if not isinstance(items, list) and not hasattr(items, "__iter__"):
         return {}
     owners: dict[str, dict[str, object]] = {}
     for item in items:
@@ -105,6 +125,9 @@ def _load_image_owners_locked() -> dict[str, dict[str, object]]:
 
 
 def _save_image_owners_locked(owners: dict[str, dict[str, object]]) -> None:
+    storage = get_image_metadata_storage()
+    if storage is not None:
+        storage.save_map("image_owners", owners)
     IMAGE_OWNERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     items = sorted(owners.values(), key=lambda item: str(item.get("path") or ""))
     tmp_path = IMAGE_OWNERS_FILE.with_suffix(IMAGE_OWNERS_FILE.suffix + ".tmp")

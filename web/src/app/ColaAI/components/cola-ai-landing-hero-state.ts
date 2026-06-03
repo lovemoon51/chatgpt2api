@@ -1,5 +1,4 @@
 import type { ManagedImage } from "@/lib/api";
-import { getPreferredPreviewUrl, getPreviewFallbackUrl } from "@/lib/image-fetch";
 
 export type LandingHeroItem = {
   id: string;
@@ -30,34 +29,6 @@ type PublicDiscoverLandingImage = {
   imageUrl: string;
   imageFallbackUrl?: string;
 };
-
-function looksOpaqueGeneratedName(value: string) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return true;
-  }
-
-  return (
-    /^\d{8,}[_-][a-f0-9]{12,}$/.test(normalized) ||
-    /^[a-f0-9]{24,}$/.test(normalized) ||
-    normalized.split(/[_-]/).every((part) => /^\d+$/.test(part) || /^[a-f0-9]{8,}$/.test(part))
-  );
-}
-
-function cleanImageName(name: string, index: number) {
-  const cleaned = name.replace(/\.[^.]+$/, "").trim();
-  if (!cleaned || looksOpaqueGeneratedName(cleaned)) {
-    return `最近作品 ${index + 1}`;
-  }
-  return cleaned;
-}
-
-function subtitleFromImage(image: ManagedImage) {
-  if (image.width && image.height) {
-    return `${image.width} x ${image.height}`;
-  }
-  return "最近作品";
-}
 
 export const landingHeroFallbackItems: LandingHeroItem[] = [
   {
@@ -102,27 +73,8 @@ export const landingHeroFallbackItems: LandingHeroItem[] = [
   },
 ];
 
-function managedImageToLandingItem(image: ManagedImage, index: number): LandingHeroItem {
-  const title = cleanImageName(image.name, index);
-  return {
-    id: image.rel || image.url || `landing-image-${index + 1}`,
-    title,
-    subtitle: subtitleFromImage(image),
-    imageUrl: getPreferredPreviewUrl(image, "preferOriginal"),
-    imageFallbackUrl: getPreviewFallbackUrl(image, "preferOriginal"),
-    alt: `${title} 最近生成作品`,
-  };
-}
-
-export function buildLandingHeroItems(images: ManagedImage[]): LandingHeroItem[] {
-  const mapped = images.slice(0, 5).map(managedImageToLandingItem);
-  if (mapped.length === 0) {
-    return landingHeroFallbackItems;
-  }
-  if (mapped.length === 5) {
-    return mapped;
-  }
-  return [...mapped, ...landingHeroFallbackItems.slice(0, 5 - mapped.length)];
+export function buildLandingHeroItems(_images: ManagedImage[]): LandingHeroItem[] {
+  return landingHeroFallbackItems;
 }
 
 function publicDiscoverImageToLandingItem(image: PublicDiscoverLandingImage, index: number): LandingHeroItem {

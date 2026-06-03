@@ -27,26 +27,32 @@ describe("ColaAI public discover images", () => {
     expect(markup).not.toContain("来自你的灵感");
   });
 
-  test("keeps personal recent creation copy for signed-in users", () => {
+  test("uses public discover copy for signed-in users too", () => {
     const markup = renderToStaticMarkup(
       <CreationFeed
         creations={[]}
         isLoading={false}
         isRefreshing={false}
+        title="公共精选"
+        subtitle="来自 ColaAI 社区"
         onOpen={() => undefined}
         onUsePrompt={() => undefined}
         onCopyPrompt={() => undefined}
       />,
     );
 
-    expect(markup).toContain("最近创作");
-    expect(markup).toContain("来自你的灵感");
-    expect(markup).not.toContain("公共精选");
+    expect(markup).toContain("公共精选");
+    expect(markup).toContain("来自 ColaAI 社区");
+    expect(markup).not.toContain("最近创作");
+    expect(markup).not.toContain("来自你的灵感");
   });
 
-  test("loads public preview images through the anonymous discover API", () => {
+  test("loads discover images through the public discover API for every session", () => {
     expect(workbenchSource).toContain("fetchPublicDiscoverImages");
     expect(workbenchSource).toContain("setPublicDiscoverImages");
-    expect(workbenchSource).toContain("isPublicPreview ? publicDiscoverCreations : buildCreations(images)");
+    expect(workbenchSource).toContain("() => publicDiscoverCreations");
+    expect(workbenchSource).toContain('title="公共精选"');
+    expect(workbenchSource).toContain('subtitle="来自 ColaAI 社区"');
+    expect(workbenchSource).not.toContain("isPublicPreview ? publicDiscoverCreations : buildCreations(images)");
   });
 });

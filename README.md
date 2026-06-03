@@ -113,6 +113,19 @@ environment:
   - DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
+示例：保留当前存储，并同步到 PostgreSQL（读取优先 PostgreSQL）
+
+```yaml
+environment:
+  - STORAGE_BACKEND=json
+  - POSTGRES_SYNC_DATABASE_URL=postgresql://user:password@host:5432/dbname
+  - IMAGE_METADATA_DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
+设置 `POSTGRES_SYNC_DATABASE_URL` 后，账号数据和用户 Key 会同时写入当前 `STORAGE_BACKEND` 与 PostgreSQL。读取时优先使用 PostgreSQL；如果 PostgreSQL 暂无数据，会从当前存储读取并自动种子同步到 PostgreSQL；如果 PostgreSQL 读取不可用，会回退读取当前存储。写入时 PostgreSQL 同步失败会返回错误，避免静默丢失同步数据。
+
+设置 `IMAGE_METADATA_DATABASE_URL` 后，图片任务、图片资产索引、图片归属和图片标签会写入 PostgreSQL；图片文件本体仍保存在 `data/images/`，缩略图仍保存在 `data/image_thumbnails/`。首次启用时会从旧 JSON 文件自动种子迁移，之后继续保留 JSON 镜像用于回退和备份。
+
 ### 健康检查与备份恢复演练
 
 - 健康检查端点是 `/healthz`。本地后端可用 `curl http://127.0.0.1:8000/healthz`，Docker Compose 默认端口可用 `curl http://127.0.0.1:3000/healthz`。

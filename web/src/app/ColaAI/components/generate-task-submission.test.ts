@@ -128,6 +128,139 @@ describe("generate task submission", () => {
     });
   });
 
+  test("passes image resolution through generation task creation and retry input", async () => {
+    const calls: Array<{ id: string; prompt: string; model?: string; size?: string; isPublic?: boolean; resolution?: string }> = [];
+
+    const tasks = await createGenerateSubmissionTasks(
+      {
+        prompt: "生成 2K 海报",
+        count: 1,
+        model: "gpt-image-2",
+        size: "16:9",
+        resolution: "2k",
+        publicMode: true,
+      },
+      {
+        createTaskId: () => "generation-task-2k",
+        createGenerationTask: async (id, prompt, model, size, isPublic, resolution) => {
+          calls.push({ id, prompt, model, size, isPublic, resolution });
+          return {
+            id,
+            status: "queued",
+            mode: "generate",
+            model,
+            size,
+            resolution,
+            created_at: "2026-05-27T00:00:00.000Z",
+            updated_at: "2026-05-27T00:00:00.000Z",
+          };
+        },
+      },
+    );
+
+    expect(calls).toEqual([
+      {
+        id: "generation-task-2k",
+        prompt: "生成 2K 海报",
+        model: "gpt-image-2",
+        size: "16:9",
+        isPublic: true,
+        resolution: "2k",
+      },
+    ]);
+    expect(tasks[0].submissionContext).toMatchObject({
+      prompt: "生成 2K 海报",
+      resolution: "2k",
+    });
+    expect(buildGenerateRetrySubmissionInput(tasks[0])).toEqual({
+      prompt: "生成 2K 海报",
+      count: 1,
+      model: "gpt-image-2",
+      size: "16:9",
+      resolution: "2k",
+      publicMode: true,
+      attempt: 2,
+      retryOfTaskId: "generation-task-2k",
+    });
+  });
+
+  test("passes public mode into generation and edit task creation", async () => {
+    const referenceFile = new File(["image"], "reference.png", { type: "image/png" });
+    const generationCalls: Array<{ id: string; prompt: string; model?: string; size?: string; isPublic?: boolean }> = [];
+    const editCalls: Array<{ id: string; files: File[]; prompt: string; model?: string; size?: string; isPublic?: boolean }> = [];
+
+    await createGenerateSubmissionTasks(
+      {
+        prompt: "公开生成",
+        count: 1,
+        model: "gpt-image-2",
+        size: "1:1",
+        publicMode: true,
+      },
+      {
+        createTaskId: () => "generation-task-1",
+        createGenerationTask: async (id, prompt, model, size, isPublic) => {
+          generationCalls.push({ id, prompt, model, size, isPublic });
+          return {
+            id,
+            status: "queued",
+            mode: "generate",
+            model,
+            size,
+            created_at: "2026-05-27T00:00:00.000Z",
+            updated_at: "2026-05-27T00:00:00.000Z",
+          };
+        },
+      },
+    );
+
+    await createGenerateSubmissionTasks(
+      {
+        prompt: "公开编辑",
+        count: 1,
+        model: "gpt-image-2",
+        size: "1:1",
+        referenceFiles: [referenceFile],
+        publicMode: true,
+      },
+      {
+        createTaskId: () => "edit-task-1",
+        createEditTask: async (id, files, prompt, model, size, isPublic) => {
+          editCalls.push({ id, files: Array.isArray(files) ? files : [files], prompt, model, size, isPublic });
+          return {
+            id,
+            status: "queued",
+            mode: "edit",
+            model,
+            size,
+            created_at: "2026-05-27T00:00:00.000Z",
+            updated_at: "2026-05-27T00:00:00.000Z",
+          };
+        },
+      },
+    );
+
+    expect(generationCalls).toEqual([
+      {
+        id: "generation-task-1",
+        prompt: "公开生成",
+        model: "gpt-image-2",
+        size: "1:1",
+        isPublic: true,
+      },
+    ]);
+    expect(editCalls).toEqual([
+      {
+        id: "edit-task-1",
+        files: [referenceFile],
+        prompt: "公开编辑",
+        model: "gpt-image-2",
+        size: "1:1",
+        isPublic: true,
+      },
+    ]);
+  });
+
   test("preserves submission context when polling updates a task", () => {
     const previous: GenerateTask = {
       id: "failed-task-1",

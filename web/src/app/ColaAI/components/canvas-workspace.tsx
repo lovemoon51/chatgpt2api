@@ -3,6 +3,7 @@
 import { ArrowLeft, Boxes, ImagePlus, Type } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ImageLightbox } from "@/components/image-lightbox";
 import { fetchImageTasks, type ImageDescriptionResult, type ImageTask } from "@/lib/api";
 import { computeAutoLayout, computeFitViewport } from "./canvas-auto-layout";
 import { CanvasGenerationPanel } from "./canvas-generation-panel";
@@ -18,6 +19,7 @@ import type { CanvasInteractionMode, CanvasNodeData, CanvasNodeStatus, CanvasPoi
 
 type CanvasWorkspaceProps = {
   onBack: (state: CanvasState) => void;
+  onAcceptedImageTasks?: (count: number) => void | Promise<void>;
   onOpenSourceTask?: (task: CanvasSourceTaskFocus) => void;
   onOptimizeTextPrompt?: (nodeId: string, prompt: string, model: string) => Promise<string>;
   onReverseImagePrompt?: (nodeId: string, prompt: string, model: string, referenceImages: CanvasReferenceImage[]) => Promise<string>;
@@ -188,6 +190,7 @@ export function getCanvasGenerationLaunchIntent(node: CanvasNodeData | null | un
 
 export function CanvasWorkspace({
   onBack,
+  onAcceptedImageTasks,
   onOpenSourceTask: _onOpenSourceTask,
   onOptimizeTextPrompt,
   onReverseImagePrompt,
@@ -225,12 +228,15 @@ export function CanvasWorkspace({
     updateGenerationNodePayload,
     updateGenerationTaskNode,
     updateImageNode,
+    updateNodeImageNaturalSize,
     updateViewport,
     undo,
   } = useCanvasStore(initialState);
   const [submitting, setSubmitting] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTargetNodeId, setPanelTargetNodeId] = useState<string | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
   const [activeTaskIds, setActiveTaskIds] = useState<string[]>([]);
   const [settings, setSettings] = useState<GenerationSettings>({
     prompt: "霓虹城市夜景，电影感光影，高质量细节。",
@@ -256,6 +262,18 @@ export function CanvasWorkspace({
     ["image", "config", "generation"].includes(selectedNode.type),
   );
   const canDelete = Boolean(state.selectedNodeIds.length > 0 || state.selectedConnectionId);
+  const lightboxImages = useMemo(
+    () =>
+      state.nodes
+        .filter((node) => (node.type === "image" || node.type === "generation") && Boolean(node.metadata?.imageUrl))
+        .map((node) => ({
+          id: node.id,
+          src: node.metadata?.imageUrl || "",
+          sizeLabel: node.metadata?.model,
+          dimensions: node.metadata?.size,
+        })),
+    [state.nodes],
+  );
 
   const panelTargetNode = useMemo(() => {
     if (!panelTargetNodeId) {
@@ -369,6 +387,57 @@ export function CanvasWorkspace({
     surfaceSizeRef.current = size;
   }, []);
 
+  const handleSubmitGenerationForNode = useCallback(async (nodeId: string, nextSettings = settings) => {
+    const targetNode = nodesRef.current.find((node) => node.id === nodeId);
+    if (!targetNode) {
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const workflowSettings = collectCanvasContinuationSettings(
+        {
+          ...state,
+          nodes: nodesRef.current,
+        },
+        targetNode.id,
+        nextSettings.prompt,
+        nextSettings,
+      );
+      if (!workflowSettings.prompt.trim()) {
+        return;
+      }
+
+      const tasks = await createCanvasGenerationTasks(workflowSettings, {
+        createTaskId: createClientTaskId,
+      });
+      const acceptedTaskCount = tasks.filter((task) => task.status !== "error").length;
+      void onAcceptedImageTasks?.(acceptedTaskCount);
+
+      tasks.forEach((task) => {
+        const imageUrl = imageUrlFromTask(task) || targetNode.metadata?.imageUrl || "";
+        appendGenerationNode(targetNode.id, {
+          prompt: workflowSettings.prompt.trim(),
+          imageUrl,
+          sourceTaskId: task.id,
+          status: canvasStatusFromTask(task),
+          errorDetails: task.error,
+          model: workflowSettings.model,
+          size: workflowSettings.size,
+          attempt: 1,
+        });
+      });
+      setActiveTaskIds((current) => [
+        ...current,
+        ...tasks.filter((task) => !terminalTaskStatuses.has(task.status)).map((task) => task.id),
+      ]);
+      setPanelOpen(false);
+      setPanelTargetNodeId(null);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [appendGenerationNode, onAcceptedImageTasks, settings, state]);
+
   const openGenerationForNode = useCallback((nodeId: string) => {
     selectNode(nodeId);
     const node = nodesRef.current.find((item) => item.id === nodeId);
@@ -401,7 +470,7 @@ export function CanvasWorkspace({
       setPanelTargetNodeId(node.id);
       setPanelOpen(true);
     }
-  }, [selectNode, settings, state]);
+  }, [handleSubmitGenerationForNode, selectNode, settings, state]);
 
   const handleGenerationSettingsChange = useCallback((patch: Partial<GenerationSettings>) => {
     setSettings((current) => ({ ...current, ...patch }));
@@ -430,54 +499,14 @@ export function CanvasWorkspace({
     });
   }, [addImageNode, renameNode, updateImageNode]);
 
-  async function handleSubmitGenerationForNode(nodeId: string, nextSettings = settings) {
-    const targetNode = nodesRef.current.find((node) => node.id === nodeId);
-    if (!targetNode) {
+  const openCanvasImagePreview = useCallback((nodeId: string) => {
+    const nextIndex = lightboxImages.findIndex((image) => image.id === nodeId);
+    if (nextIndex < 0) {
       return;
     }
-
-    setSubmitting(true);
-    try {
-      const workflowSettings = collectCanvasContinuationSettings(
-        {
-          ...state,
-          nodes: nodesRef.current,
-        },
-        targetNode.id,
-        nextSettings.prompt,
-        nextSettings,
-      );
-      if (!workflowSettings.prompt.trim()) {
-        return;
-      }
-
-      const tasks = await createCanvasGenerationTasks(workflowSettings, {
-        createTaskId: createClientTaskId,
-      });
-
-      tasks.forEach((task) => {
-        const imageUrl = imageUrlFromTask(task) || targetNode.metadata?.imageUrl || "";
-        appendGenerationNode(targetNode.id, {
-          prompt: workflowSettings.prompt.trim(),
-          imageUrl,
-          sourceTaskId: task.id,
-          status: canvasStatusFromTask(task),
-          errorDetails: task.error,
-          model: workflowSettings.model,
-          size: workflowSettings.size,
-          attempt: 1,
-        });
-      });
-      setActiveTaskIds((current) => [
-        ...current,
-        ...tasks.filter((task) => !terminalTaskStatuses.has(task.status)).map((task) => task.id),
-      ]);
-      setPanelOpen(false);
-      setPanelTargetNodeId(null);
-    } finally {
-      setSubmitting(false);
-    }
-  }
+    setLightboxIndex(nextIndex);
+    setLightboxOpen(true);
+  }, [lightboxImages]);
 
   const retryGenerationNode = useCallback((nodeId: string) => {
     const retryNode = nodesRef.current.find((node) => node.id === nodeId);
@@ -529,6 +558,8 @@ export function CanvasWorkspace({
             attempt,
           });
         });
+        const acceptedTaskCount = tasks.filter((task) => task.status !== "error").length;
+        void onAcceptedImageTasks?.(acceptedTaskCount);
         setActiveTaskIds((current) => [
           ...current,
           ...tasks.filter((task) => !terminalTaskStatuses.has(task.status)).map((task) => task.id),
@@ -548,7 +579,7 @@ export function CanvasWorkspace({
         updateGenerationNodeRetrying(retryNode.id, false);
       }
     })();
-  }, [settings, state, updateGenerationNodePayload, updateGenerationNodeRetrying]);
+  }, [onAcceptedImageTasks, settings, state, updateGenerationNodePayload, updateGenerationNodeRetrying]);
 
   return (
     <main
@@ -659,10 +690,12 @@ export function CanvasWorkspace({
         onDuplicateSelectedNodes={duplicateSelectedNodes}
         onFinalizeHistoryBatch={finalizeHistoryBatch}
         onImageFileDrop={(file, position, targetNodeId) => void handleCanvasImageFileDrop(file, position, targetNodeId)}
+        onImageNaturalSize={updateNodeImageNaturalSize}
         onMoveNode={moveNode}
         onMoveNodes={moveNodes}
         onNudgeSelectedNodes={nudgeSelectedNodes}
         onOpenGeneration={openGenerationForNode}
+        onOpenImagePreview={openCanvasImagePreview}
         onOptimizeTextPrompt={onOptimizeTextPrompt}
         onReverseImagePrompt={onReverseImagePrompt}
         onStartImageReversePrompt={startImageReversePrompt}
@@ -736,6 +769,14 @@ export function CanvasWorkspace({
             void handleSubmitGenerationForNode(panelTargetNode.id);
           }
         }}
+      />
+
+      <ImageLightbox
+        images={lightboxImages}
+        currentIndex={lightboxIndex}
+        open={lightboxOpen}
+        onOpenChange={setLightboxOpen}
+        onIndexChange={setLightboxIndex}
       />
 
     </main>

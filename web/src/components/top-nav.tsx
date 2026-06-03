@@ -9,12 +9,14 @@ import webConfig from "@/constants/common-env";
 import { getValidatedAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+import { clearStoredColaAuthSession } from "@/store/cola-auth";
 
 const adminNavItems = [
   { href: "/dashboard", label: "仪表盘" },
   { href: "/ColaAI", label: "ColaAI" },
   { href: "/studio", label: "创作台" },
   { href: "/accounts", label: "号池管理" },
+  { href: "/users", label: "用户管理" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
@@ -23,8 +25,6 @@ const adminNavItems = [
 
 const userNavItems = [
   { href: "/ColaAI", label: "ColaAI" },
-  { href: "/studio", label: "创作台" },
-  { href: "/chat", label: "对话" },
 ];
 
 export function TopNav() {
@@ -59,7 +59,8 @@ export function TopNav() {
 
   const handleLogout = async () => {
     await clearStoredAuthSession();
-    router.replace("/login");
+    await clearStoredColaAuthSession();
+    router.replace(session?.role === "admin" ? "/login" : "/ColaAI/login");
   };
 
   if (pathname === "/login" || session === undefined || !session) {
@@ -75,7 +76,7 @@ export function TopNav() {
       <div className="flex min-h-12 flex-col gap-1 px-3 py-2 sm:h-12 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-6 sm:py-0">
         <div className="flex items-center justify-between gap-2 sm:justify-start sm:gap-3">
           <Link
-            href={session.role === "admin" ? "/dashboard" : "/studio"}
+            href={session.role === "admin" ? "/dashboard" : "/ColaAI"}
             className="shrink-0 py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700"
           >
             chatgpt2api

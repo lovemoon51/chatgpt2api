@@ -21,14 +21,20 @@ import {
   buildCreations,
   buildImageReversePromptMessages,
   buildPromptArchitectMessages,
+  getPromptLibraryTotalCount,
   promptTemplateToPromptCard,
+  resolvePromptSourceCards,
+  getPromptLibraryStatusText,
   shouldUseRemotePromptTemplates,
   clearReferencePreviewUrl,
+  decrementSessionImageQuota,
   getDroppedImageFile,
   handlePromptComposerKeyDown,
+  imageResolutionCreditCost,
+  timestampFromIso,
   prependGenerateSession,
 } from "./cola-ai-workbench";
-import { buildLandingHeroItems } from "./cola-ai-landing-hero-state";
+import { buildLandingHeroItems, landingHeroFallbackItems } from "./cola-ai-landing-hero-state";
 import type { ImageTask, PromptTemplate } from "@/lib/api";
 import type { GenerateTask } from "./generate-task-submission";
 import { CanvasWorkspace } from "./canvas-workspace";
@@ -37,11 +43,57 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const workbenchSource = readFileSync(join(testDir, "cola-ai-workbench.tsx"), "utf-8");
 const globalsSource = readFileSync(join(testDir, "../../globals.css"), "utf-8");
 
+test("parses backend plain datetime values as UTC timestamps", () => {
+  expect(timestampFromIso("2026-05-27 00:00:00")).toBe(Date.parse("2026-05-27T00:00:00Z"));
+  expect(timestampFromIso("2026-05-27T00:00:00")).toBe(Date.parse("2026-05-27T00:00:00Z"));
+  expect(timestampFromIso("2026-05-27T08:00:00+08:00")).toBe(Date.parse("2026-05-27T08:00:00+08:00"));
+});
+
+test("decrements ordinary user image quota after successful task submission", () => {
+  expect(
+    decrementSessionImageQuota(
+      {
+        key: "sess-user",
+        role: "creator",
+        subjectId: "user-1",
+        name: "Creator",
+        limits: {
+          creditsTotal: 10,
+          creditsUsed: 3,
+          creditsRemaining: 7,
+          imagesTotal: 10,
+          imagesUsed: 3,
+          imagesRemaining: 7,
+        },
+      },
+      2,
+    ).limits,
+  ).toEqual({
+    creditsTotal: 10,
+    creditsUsed: 5,
+    creditsRemaining: 5,
+    imagesTotal: 10,
+    imagesUsed: 5,
+    imagesRemaining: 5,
+  });
+});
+
+test("calculates ordinary user image credit costs by resolution", () => {
+  expect(imageResolutionCreditCost()).toBe(1);
+  expect(imageResolutionCreditCost("1k")).toBe(1);
+  expect(imageResolutionCreditCost("2k")).toBe(2);
+  expect(imageResolutionCreditCost("4k")).toBe(3);
+  expect(imageResolutionCreditCost("8k")).toBe(1);
+});
+
 const session = {
   key: "test-key",
   role: "creator",
   subjectId: "cola-user",
   name: "Cola Tester",
+  limits: {
+    imagesRemaining: 27,
+  },
 } as const;
 
 const publicSession = {
@@ -204,10 +256,31 @@ describe("ColaAIWorkbench", () => {
   });
 
   test("uses remote prompt templates once the public library is available", () => {
-    expect(shouldUseRemotePromptTemplates("ready", { public: 4, private: 0, favorites: 0, submissions: 0 }, 0)).toBe(true);
+    expect(shouldUseRemotePromptTemplates("ready", { public: 4, private: 0, favorites: 0, submissions: 0 }, 0)).toBe(false);
     expect(shouldUseRemotePromptTemplates("ready", { public: 0, private: 0, favorites: 0, submissions: 0 }, 1)).toBe(true);
     expect(shouldUseRemotePromptTemplates("ready", { public: 0, private: 0, favorites: 0, submissions: 0 }, 0)).toBe(false);
     expect(shouldUseRemotePromptTemplates("error", { public: 4, private: 0, favorites: 0, submissions: 0 }, 2)).toBe(false);
+  });
+
+  test("uses local prompt seeds only when remote prompt templates are unavailable", () => {
+    const remoteCard = promptTemplateToPromptCard(promptTemplate);
+
+    expect(resolvePromptSourceCards(true, [remoteCard])).toEqual([remoteCard]);
+    expect(resolvePromptSourceCards(false, [remoteCard]).map((card) => card.id)).toContain("banana-apple-poster");
+    expect(resolvePromptSourceCards(false, [remoteCard]).map((card) => card.id)).not.toContain("template-product");
+  });
+
+  test("shows the remote public template count as the prompt library total", () => {
+    expect(getPromptLibraryTotalCount(true, { public: 300, private: 0, favorites: 0, submissions: 0 }, 25)).toBe(300);
+    expect(getPromptLibraryTotalCount(true, { public: 0, private: 0, favorites: 0, submissions: 0 }, 25)).toBe(25);
+    expect(getPromptLibraryTotalCount(false, { public: 300, private: 0, favorites: 0, submissions: 0 }, 13)).toBe(13);
+  });
+
+  test("labels the GitHub community prompts as the fallback source", () => {
+    expect(getPromptLibraryStatusText("loading", "", "")).toBe("正在同步公开模板库");
+    expect(getPromptLibraryStatusText("error", "", "")).toBe("公开模板库暂不可用，正在使用 GitHub 社区源");
+    expect(getPromptLibraryStatusText("ready", "城市", "城市")).toBe("搜索：城市");
+    expect(getPromptLibraryStatusText("ready", "", "")).toBe("按标题、作者、标签和提示词内容匹配");
   });
 
   test("renders prompt template preview images when template data provides one", () => {
@@ -283,7 +356,7 @@ describe("ColaAIWorkbench", () => {
     ]);
   });
 
-  test("builds a five-item landing dataset from recent managed images", () => {
+  test("keeps the fixed five landing items instead of using recent managed images", () => {
     const items = buildLandingHeroItems([
       {
         rel: "managed-1",
@@ -304,9 +377,9 @@ describe("ColaAIWorkbench", () => {
       },
     ]);
 
+    expect(items).toEqual(landingHeroFallbackItems);
     expect(items).toHaveLength(5);
-    expect(items[0].id).toBe("managed-1");
-    expect(items[1].id).toBe("managed-2");
+    expect(items.some((item) => item.id.startsWith("managed-"))).toBe(false);
   });
 
   test("selects the first image file from dragged data", () => {
@@ -348,6 +421,7 @@ describe("ColaAIWorkbench", () => {
         count={1}
         quality="智能"
         ratio="1:1"
+        resolution="1k"
         imageModel="auto"
         publicMode={false}
         referenceImage={{ name: "reference.png", previewUrl: "blob:cola-reference" }}
@@ -355,6 +429,7 @@ describe("ColaAIWorkbench", () => {
         onCountChange={noop}
         onQualityChange={noop}
         onRatioChange={noop}
+        onResolutionChange={noop}
         onImageModelChange={noop}
         onPublicChange={noop}
         onReferenceFileChange={noop}
@@ -378,6 +453,7 @@ describe("ColaAIWorkbench", () => {
         count={1}
         quality="智能"
         ratio="1:1"
+        resolution="2k"
         imageModel="auto"
         publicMode={false}
         referenceImage={null}
@@ -385,6 +461,7 @@ describe("ColaAIWorkbench", () => {
         onCountChange={noop}
         onQualityChange={noop}
         onRatioChange={noop}
+        onResolutionChange={noop}
         onImageModelChange={noop}
         onPublicChange={noop}
         onReferenceFileChange={noop}
@@ -397,6 +474,11 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain('data-cola-design="clear-studio-composer"');
     expect(markup).toContain('data-cola-panel="reference-material-slot"');
     expect(markup).toContain('data-cola-panel="ratio-count-popover"');
+    expect(markup).toContain('data-cola-group="resolution-options"');
+    expect(markup).toContain('data-cola-resolution-option="1k"');
+    expect(markup).toContain('data-cola-resolution-option="2k"');
+    expect(markup).toContain('data-cola-resolution-option="4k"');
+    expect(markup).toContain("2K");
     expect(markup).toContain("创作控制台");
     expect(markup).toContain("size-[60px]");
     expect(markup).toContain("bg-slate-950");
@@ -593,6 +675,53 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain('aria-label="复制结果 1"');
     expect(markup).not.toContain('aria-label="编辑结果 1"');
     expect(markup).not.toContain('aria-label="下载结果 1"');
+  });
+
+  test("keeps queue waiting time out of active generation elapsed time", () => {
+    const activeTask: GenerateTask = {
+      id: "task-running-after-queue",
+      status: "running",
+      phase_label: "生成中",
+      mode: "generate",
+      model: "gpt-image-2",
+      size: "1:1",
+      created_at: "2026-05-27T00:00:00Z",
+      queued_at: "2026-05-27T00:00:00Z",
+      started_at: "2026-05-27T00:02:10Z",
+      updated_at: "2026-05-27T00:02:11Z",
+      submissionContext: {
+        prompt: "排队后开始生成的提示词",
+        count: 1,
+        model: "gpt-image-2",
+        size: "1:1",
+        attempt: 1,
+        turnId: "turn-running-after-queue",
+      },
+    };
+
+    const markup = renderToStaticMarkup(
+      <GenerateConversationStage
+        session={{
+          id: "session-running-after-queue",
+          title: "排队后开始生成的提示词",
+          createdAt: "2026-05-27T00:00:00Z",
+          updatedAt: "2026-05-27T00:02:11Z",
+          taskIds: ["task-running-after-queue"],
+        }}
+        tasks={[activeTask]}
+        generationError=""
+        isStageActive
+        stageTaskCount={1}
+        activeTask={activeTask}
+        hasGeneratedResults={false}
+        requestedCount={1}
+      />,
+    );
+
+    expect(markup).toContain("耗时 1.0 s");
+    expect(markup).toContain("等待 130 s");
+    expect(markup).not.toContain("耗时 130 s");
+    expect(markup).not.toContain("耗时 131 s");
   });
 
   test("renders generated conversation records only when the stage has content", () => {
@@ -870,6 +999,7 @@ describe("ColaAIWorkbench", () => {
         count={1}
         quality="智能"
         ratio="1:1"
+        resolution="1k"
         imageModel="auto"
         publicMode={false}
         referenceImage={null}
@@ -901,6 +1031,7 @@ describe("ColaAIWorkbench", () => {
         onCountChange={noop}
         onQualityChange={noop}
         onRatioChange={noop}
+        onResolutionChange={noop}
         onImageModelChange={noop}
         onPublicChange={noop}
         onReferenceFileChange={noop}
@@ -1143,7 +1274,7 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("1:1");
     expect(markup).toContain("图片比例");
     expect(markup).toContain("生成数量");
-    expect(markup).toContain("Auto | 1张");
+    expect(markup).toContain("Auto | 1K | 1张");
     expect(markup).toContain('data-cola-panel="studio-generation-settings"');
     expect(markup).toContain("w-[min(360px,calc(100vw-32px))]");
     expect(markup).toContain("p-3");
@@ -1175,8 +1306,9 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("left-0.5");
     expect(markup).toContain("生成");
     expect(markup).toContain("今日已生成");
-    expect(markup).toContain("最近创作");
-    expect(markup).toContain("来自你的灵感");
+    expect(markup).toContain("公共精选");
+    expect(markup).toContain("来自 ColaAI 社区");
+    expect(markup).not.toContain("来自你的灵感");
     expect(markup).toContain("下拉刷新灵感");
     expect(markup).toContain("释放更新");
     expect(markup).toContain("正在加载灵感");
@@ -1221,10 +1353,31 @@ describe("ColaAIWorkbench", () => {
     const markup = renderToStaticMarkup(<ColaAIWorkbench session={session} />);
 
     expect(markup).not.toContain('data-cola-panel="public-auth-bar"');
+    expect(markup).toContain('data-cola-panel="user-summary-bar"');
+    expect(markup).toContain("普通用户");
+    expect(markup).toContain("剩余 27 积分");
     expect(markup).not.toContain('href="/login"');
     expect(markup).not.toContain('href="/register"');
     expect(markup).not.toContain('href="/ColaAI/login"');
     expect(markup).not.toContain('href="/ColaAI/register"');
+  });
+
+  test("reads remaining credit aliases from the stored ordinary user session", () => {
+    const markup = renderToStaticMarkup(
+      <ColaAIWorkbench
+        session={{
+          key: "test-key",
+          role: "creator",
+          subjectId: "cola-user",
+          name: "Credit Alias Tester",
+          limits: {
+            creditsRemaining: 27,
+          },
+        }}
+      />,
+    );
+
+    expect(markup).toContain("剩余 27 积分");
   });
 
   test("renders a ColaAI-only top-right login and register entry in public preview", () => {
@@ -1252,14 +1405,32 @@ describe("ColaAIWorkbench", () => {
     expect(sideNavMarkup).toContain("设置");
     expect(sideNavMarkup).toContain("EN");
     expect(sideNavMarkup).not.toContain("API");
+    expect(sideNavMarkup).not.toContain("签到");
+    expect(sideNavMarkup).not.toContain('data-cola-action="check-in"');
     expect(sideNavMarkup).not.toContain('data-cola-action="open-announcement"');
     expect(sideNavMarkup).not.toContain('data-cola-action="open-login"');
     expect(sideNavMarkup).not.toContain("登录");
   });
 
+  test("renders a check-in action in the desktop side rail after login", () => {
+    const markup = renderToStaticMarkup(<ColaAIWorkbench session={session} />);
+    const sideNavMarkup = extractSideNavMarkup(markup);
+
+    expect(sideNavMarkup).toContain("签到");
+    expect(sideNavMarkup).toContain('data-cola-action="check-in"');
+  });
+
+  test("routes check-in feedback through a dialog instead of generation errors", () => {
+    expect(workbenchSource).toContain("CheckInDialog");
+    expect(workbenchSource).toContain("setCheckInResult");
+    expect(workbenchSource).toContain('data-cola-panel="check-in-dialog"');
+    expect(workbenchSource).not.toContain('setGenerationError(result.awarded ? "签到成功');
+    expect(workbenchSource).not.toContain('setGenerationError(error instanceof Error ? error.message : "签到失败');
+  });
+
   test("does not import the shared project auth store or old auth validation", () => {
     expect(workbenchSource).toContain("@/store/cola-auth");
-    expect(workbenchSource).not.toContain("@/store/auth");
+    expect(workbenchSource).toContain("clearStoredAuthSession");
     expect(workbenchSource).not.toContain('href="/login"');
     expect(workbenchSource).not.toContain('href="/register"');
     expect(workbenchSource).not.toContain('window.location.href = "/login"');
@@ -1460,6 +1631,13 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain('data-cola-panel="generate-conversation-thread" class="hide-scrollbar flex min-h-0 flex-1 flex-col gap-7 overflow-hidden');
     expect(markup).toContain('data-cola-behavior="fixed-session-header" class="relative z-20 mx-auto w-full max-w-[1240px] shrink-0"');
     expect(markup).toContain("shrink-0");
+    expect(markup).toContain('data-cola-mobile-layout="compact-generation"');
+    expect(markup).toContain('data-cola-mobile-layout="status-stack"');
+    expect(markup).toContain('data-cola-mobile-layout="full-width-results"');
+    expect(markup).toContain("max-[560px]:px-3 max-[560px]:pb-[calc(env(safe-area-inset-bottom)+112px)] max-[560px]:pt-[calc(env(safe-area-inset-top)+58px)]");
+    expect(markup).toContain("max-[560px]:w-full max-[560px]:rounded-[18px] max-[560px]:px-2");
+    expect(markup).toContain("max-[560px]:grid max-[560px]:w-full max-[560px]:grid-cols-2 max-[560px]:items-stretch");
+    expect(markup).toContain("max-[560px]:w-full");
     expect(markup).not.toContain('data-cola-panel="generate-run-card"');
     expect(markup).not.toContain('data-cola-panel="generate-result-summary"');
     expect(markup).not.toContain('data-cola-panel="generate-result-gallery"');
@@ -1495,7 +1673,7 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain('data-cola-panel="generate-mode-pill"');
     expect(markup).toContain("h-[46px]");
     expect(markup).toContain("gpt-image-2");
-    expect(markup).toContain("Auto | 1张");
+    expect(markup).toContain("Auto | 1K | 1张");
     expect(markup).toContain('data-cola-panel="studio-generation-settings"');
     expect(markup).toContain('data-cola-group="image-model-options"');
     expect(markup).toContain('data-cola-model-option="auto"');
@@ -1565,7 +1743,10 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain('data-cola-effect="animated-gradient-border"');
     expect(markup).toContain('data-cola-effect="clear-studio-kicker"');
     expect(markup).toContain("精选提示词库 · 来自 GitHub 开源社区");
-    expect(markup).toContain("本地精选");
+    expect(markup).toContain("banana-prompt-quicker");
+    expect(markup).toContain("awesome-gpt-image-2");
+    expect(markup).toContain("苹果风格海报");
+    expect(markup).toContain("Convenience Store Neon Portrait");
     expect(markup).toContain("正在同步公开模板库");
   });
 
@@ -1627,7 +1808,6 @@ describe("ColaAIWorkbench", () => {
     expect(markup).not.toContain("GET /v1/account/credits");
     expect(markup).not.toContain("可用额度");
     expect(markup).not.toContain("额度");
-    expect(markup).not.toContain("积分");
   });
 
   test("renders the announcement center as its own view", () => {

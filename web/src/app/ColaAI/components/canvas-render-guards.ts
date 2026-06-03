@@ -17,6 +17,7 @@ type CanvasNodeComparableProps = {
   upstreamSummary?: CanvasUpstreamSummary | null;
   onContentChange: (nodeId: string, content: string) => void;
   onOpenGeneration: (nodeId: string) => void;
+  onOpenImagePreview?: (nodeId: string) => void;
   onPointerDown: (event: ReactPointerEvent<HTMLElement>, nodeId: string) => void;
 };
 

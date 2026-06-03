@@ -5,6 +5,7 @@ import { httpRequest, request } from "@/lib/request";
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
+export type ImageResolution = "1k" | "2k" | "4k";
 export type AuthRole = "admin" | "user";
 
 export type OpenAIModel = {
@@ -261,6 +262,9 @@ export type ManagedImageListFilters = {
   search?: string;
   tags?: string[];
   tag?: string;
+  owner?: string;
+  mode?: string;
+  model?: string;
   sort?: string;
   order?: "asc" | "desc" | string;
   page?: number;
@@ -274,6 +278,12 @@ export type ManagedImageListResponse = {
   page?: number;
   page_size?: number;
   pages?: number;
+};
+
+export type ManagedImagesPublicVisibilityResponse = {
+  ok: boolean;
+  updated: number;
+  public: boolean;
 };
 
 export type PublicDiscoverImage = {
@@ -323,6 +333,7 @@ export type ImageTask = {
   mode: "generate" | "edit";
   model?: ImageModel;
   size?: string;
+  resolution?: ImageResolution | string;
   created_at: string;
   updated_at: string;
   queued_at?: string;
@@ -434,25 +445,54 @@ export type LoginResponse = {
   role: AuthRole;
   subject_id: string;
   name: string;
+  email?: string;
   access_token?: string;
   limits?: UserKeyLimits | null;
+};
+
+export type ActivateUserInput = {
+  email: string;
+  password: string;
+  accessCode: string;
+  name?: string;
 };
 
 export type UserKey = {
   id: string;
   name: string;
+  email?: string;
   role: "user";
   enabled: boolean;
   created_at: string | null;
+  updated_at?: string | null;
   last_used_at: string | null;
+  last_login_ip?: string | null;
+  key_consumed_at?: string | null;
+  last_checkin_date?: string | null;
   limits?: UserKeyLimits | null;
 };
 
 export type UserKeyLimits = {
   requests_per_day?: number | null;
   images_per_day?: number | null;
+  images_total?: number | null;
+  images_used?: number | null;
+  images_remaining?: number | null;
   concurrency?: number | null;
   models?: string[];
+};
+
+export type UserKeyCreateResult = {
+  item: UserKey;
+  key: string;
+  name?: string;
+};
+
+export type UserCheckInResponse = {
+  awarded: boolean;
+  bonus_images: number;
+  bonus_credits?: number;
+  user: UserKey;
 };
 
 export type DashboardMetricGroup = {
@@ -709,6 +749,28 @@ export async function login(loginValue: string) {
   return httpRequest<LoginResponse>("/auth/login", {
     method: "POST",
     body: { login: normalizedLoginValue },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function loginWithPassword(email: string, password: string) {
+  const normalizedEmail = String(email || "").trim();
+  return httpRequest<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: { email: normalizedEmail, password },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function activateUser({ email, password, accessCode, name = "" }: ActivateUserInput) {
+  return httpRequest<LoginResponse>("/auth/activate", {
+    method: "POST",
+    body: {
+      email: String(email || "").trim(),
+      password,
+      access_code: accessCode,
+      name: String(name || "").trim(),
+    },
     redirectOnUnauthorized: false,
   });
 }
@@ -1002,7 +1064,14 @@ export async function createImageDescriptionTask(
   });
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string) {
+export async function createImageGenerationTask(
+  clientTaskId: string,
+  prompt: string,
+  model?: ImageModel,
+  size?: string,
+  isPublic = false,
+  resolution?: ImageResolution | string,
+) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -1010,6 +1079,8 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       prompt,
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
+      ...(resolution ? { resolution } : {}),
+      public: isPublic,
     },
   });
 }
@@ -1020,6 +1091,8 @@ export async function createImageEditTask(
   prompt: string,
   model?: ImageModel,
   size?: string,
+  isPublic = false,
+  resolution?: ImageResolution | string,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -1035,6 +1108,10 @@ export async function createImageEditTask(
   if (size) {
     formData.append("size", size);
   }
+  if (resolution) {
+    formData.append("resolution", resolution);
+  }
+  formData.append("public", String(isPublic));
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",
@@ -1200,6 +1277,23 @@ export async function fetchPublicDiscoverImages(filters: Pick<ManagedImageListFi
   );
 }
 
+export async function updateManagedImagesPublicVisibility(isPublic: boolean, filters: ManagedImageListFilters) {
+  return httpRequest<ManagedImagesPublicVisibilityResponse>("/api/images/public-visibility", {
+    method: "POST",
+    body: {
+      public: isPublic,
+      start_date: filters.start_date,
+      end_date: filters.end_date,
+      q: filters.q || filters.search,
+      tags: filters.tags,
+      tag: filters.tag,
+      owner: filters.owner,
+      mode: filters.mode,
+      model: filters.model,
+    },
+  });
+}
+
 export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
@@ -1266,16 +1360,16 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string, limits?: UserKeyLimits) {
-  return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
+export async function createUserKey(name: string, limits?: UserKeyLimits, count?: number) {
+  return httpRequest<{ item: UserKey; key: string; keys: UserKeyCreateResult[]; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name, ...(limits ? { limits } : {}) },
+    body: { name, ...(typeof count === "number" ? { count } : {}), ...(limits ? { limits } : {}) },
   });
 }
 
 export async function updateUserKey(
   keyId: string,
-  updates: { enabled?: boolean; name?: string; key?: string; limits?: UserKeyLimits },
+  updates: { enabled?: boolean; email?: string; name?: string; key?: string; limits?: UserKeyLimits },
 ) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
@@ -1286,6 +1380,13 @@ export async function updateUserKey(
 export async function deleteUserKey(keyId: string) {
   return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "DELETE",
+  });
+}
+
+export async function checkInUser() {
+  return httpRequest<UserCheckInResponse>("/api/auth/checkin", {
+    method: "POST",
+    body: {},
   });
 }
 

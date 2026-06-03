@@ -241,11 +241,11 @@ describe("use-canvas-store helpers", () => {
     expect(landscape.height).toBeLessThan(portrait.height);
   });
 
-  test("sizes generation nodes so the image slot matches the loaded image ratio without legacy header space", () => {
+  test("sizes generation nodes so the node box matches the loaded image ratio without internal padding", () => {
     const size = getImageAdaptiveNodeSize(1122, 1402);
-    const expectedImageSlotHeight = (size.width - 32) / (1122 / 1402);
+    const expectedImageHeight = size.width / (1122 / 1402);
 
-    expect(size.height).toBe(Math.round(expectedImageSlotHeight + 32));
+    expect(size.height).toBe(Math.round(expectedImageHeight));
   });
 
   test("resizes generation nodes to the loaded image aspect ratio", () => {

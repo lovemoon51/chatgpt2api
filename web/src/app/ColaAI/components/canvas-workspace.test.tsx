@@ -677,6 +677,33 @@ describe("ColaAI canvas components", () => {
     expect(markup).not.toContain("object-cover");
   });
 
+  test("renders generated image nodes as flush clickable previews", () => {
+    const state = createInitialCanvasState();
+    const generationNode = {
+      ...state.nodes.find((node) => node.id === "seed-generation")!,
+      metadata: {
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={generationNode}
+        selected={false}
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onOpenImagePreview={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-action="open-canvas-image-preview"');
+    expect(markup).toContain('data-cola-image-frame="flush"');
+    expect(markup).toContain("cursor-zoom-in");
+    expect(markup).not.toContain(" p-4 ");
+  });
+
   test("renders image node images with a full-height contain fit so portrait references stay fully visible", () => {
     const state = createInitialCanvasState();
     const imageNode = {

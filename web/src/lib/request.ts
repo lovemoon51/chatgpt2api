@@ -3,6 +3,7 @@ import axios, {AxiosError, type AxiosRequestConfig} from "axios";
 import webConfig from "@/constants/common-env";
 import {getFriendlyErrorMessage} from "@/lib/error-messages";
 import {clearStoredAuthSession, getStoredAuthKey} from "@/store/auth";
+import {clearStoredColaAuthSession} from "@/store/cola-auth";
 
 type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
@@ -35,6 +36,20 @@ export const request = axios.create({
     baseURL: webConfig.apiUrl.replace(/\/$/, ""),
 });
 
+export function getUnauthorizedRedirectPath(pathname: string) {
+    return getUnauthorizedRedirectPlan(pathname).redirectPath;
+}
+
+export function getUnauthorizedRedirectPlan(pathname: string) {
+    if (pathname === "/login" || pathname.startsWith("/login/") || pathname === "/ColaAI/login" || pathname.startsWith("/ColaAI/login/")) {
+        return {redirectPath: "", clearColaAuth: false};
+    }
+    if (pathname === "/ColaAI" || pathname.startsWith("/ColaAI/")) {
+        return {redirectPath: "/ColaAI/login", clearColaAuth: true};
+    }
+    return {redirectPath: "/login", clearColaAuth: false};
+}
+
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
     const authKey = await getStoredAuthKey();
@@ -54,10 +69,13 @@ request.interceptors.response.use(
         const status = error.response?.status;
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
         if (status === 401 && shouldRedirect && typeof window !== "undefined") {
-            // Avoid redirect loop — only redirect if not already on /login
-            if (!window.location.pathname.startsWith("/login")) {
+            const redirectPlan = getUnauthorizedRedirectPlan(window.location.pathname);
+            if (redirectPlan.redirectPath) {
                 await clearStoredAuthSession();
-                window.location.replace("/login");
+                if (redirectPlan.clearColaAuth) {
+                    await clearStoredColaAuthSession();
+                }
+                window.location.replace(redirectPlan.redirectPath);
                 // Return a never-resolving promise to prevent further error handling
                 // while the browser navigates away
                 return new Promise(() => {});

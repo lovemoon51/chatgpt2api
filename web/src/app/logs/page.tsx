@@ -147,7 +147,7 @@ function detailSectionEntries(item: SystemLog | null, keys: string[]) {
 }
 
 function LogsContent() {
-  const initialFilters = useMemo(initialLogFilters, []);
+  const initialFilters = useMemo(() => initialLogFilters(), []);
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(initialFilters.type);
   const [startDate, setStartDate] = useState(initialFilters.startDate);

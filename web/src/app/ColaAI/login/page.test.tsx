@@ -26,16 +26,23 @@ describe("ColaAILoginPage", () => {
     const source = readFileSync(join(testDir, "page.tsx"), "utf-8");
 
     expect(source).toContain("@/store/cola-auth");
-    expect(source).not.toContain("@/store/auth");
+    expect(source).toContain("@/store/auth");
+    expect(source).toContain("@/lib/api");
     expect(source).not.toContain("@/lib/auth-session");
-    expect(source).not.toContain("@/lib/api");
+    expect(source).not.toContain("@/app/login/page");
+    expect(source).not.toContain("createColaAuthProfile(");
   });
 
-  test("reads submitted values from the form element to avoid hydration-time state races", () => {
+  test("authenticates with email and password before storing ColaAI state", () => {
     const source = readFileSync(join(testDir, "page.tsx"), "utf-8");
 
+    expect(source).toContain("await loginWithPassword(submittedEmail, submittedPassword)");
+    expect(source).toContain('if (data.role !== "user")');
+    expect(source).toContain("await setStoredAuthSession(sharedSession)");
+    expect(source).toContain("await setStoredColaAuthSession(createColaAuthSessionFromSharedSession(sharedSession))");
     expect(source).toContain("new FormData(event.currentTarget)");
-    expect(source).toContain('name="name"');
     expect(source).toContain('name="email"');
+    expect(source).toContain('name="password"');
+    expect(source).not.toContain("submittedLogin");
   });
 });

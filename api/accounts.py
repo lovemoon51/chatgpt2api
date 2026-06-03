@@ -30,17 +30,21 @@ from services.sub2api_service import (
 class UserKeyLimitsRequest(BaseModel):
     requests_per_day: int | None = Field(default=None, ge=0)
     images_per_day: int | None = Field(default=None, ge=0)
+    images_total: int | None = Field(default=None, ge=0)
+    images_used: int | None = Field(default=None, ge=0)
     concurrency: int | None = Field(default=None, ge=0)
     models: list[str] = Field(default_factory=list)
 
 
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    count: int = Field(default=1, ge=1, le=200)
     limits: UserKeyLimitsRequest | None = None
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
+    email: str | None = None
     enabled: bool | None = None
     key: str | None = None
     limits: UserKeyLimitsRequest | None = None
@@ -114,6 +118,20 @@ import json
 from typing import AsyncIterator, Iterable
 
 
+def _request_model_dump(value: object) -> dict[str, object]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="python")
+    dict_dump = getattr(value, "dict", None)
+    if callable(dict_dump):
+        return dict_dump()
+    return {}
+
+
 async def _stream_refresh_events(access_tokens: list[str], log_title: str) -> AsyncIterator[bytes]:
     """Run account_service.iter_refresh_accounts in a worker thread and yield NDJSON events."""
     loop = asyncio.get_running_loop()
@@ -155,14 +173,25 @@ def create_router() -> APIRouter:
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            item, raw_key = auth_service.create_key(
-                role="user",
-                name=body.name,
-                limits=body.limits.model_dump(mode="python") if body.limits is not None else None,
-            )
+            created = []
+            limits = _request_model_dump(body.limits) if body.limits is not None else None
+            base_name = str(body.name or "").strip()
+            for index in range(body.count):
+                item, raw_key = auth_service.create_key(
+                    role="user",
+                    name=f"{base_name} {index + 1}" if base_name and body.count > 1 else base_name,
+                    limits=limits,
+                )
+                created.append({"item": item, "key": raw_key, "name": item.get("name")})
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
+        first = created[0]
+        return {
+            "item": first["item"],
+            "key": first["key"],
+            "keys": created,
+            "items": auth_service.list_keys(role="user"),
+        }
 
     @router.post("/api/auth/users/{key_id}")
     async def update_user_key(
@@ -175,9 +204,10 @@ def create_router() -> APIRouter:
             key: value
             for key, value in {
                 "name": body.name,
+                "email": body.email,
                 "enabled": body.enabled,
                 "key": body.key,
-                "limits": body.limits.model_dump(mode="python") if body.limits is not None else None,
+                "limits": _request_model_dump(body.limits) if body.limits is not None else None,
             }.items()
             if value is not None
         }

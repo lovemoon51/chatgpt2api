@@ -50,6 +50,7 @@ export type ImageTurn = {
   referenceImages: StoredReferenceImage[];
   count: number;
   size: string;
+  publicMode?: boolean;
   images: StoredImage[];
   createdAt: string;
   status: ImageTurnStatus;
@@ -190,6 +191,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     referenceImages: getLegacyReferenceImages(turn),
     count: Math.max(1, Number(turn.count || normalizedImages.length || 1)),
     size: typeof turn.size === "string" ? turn.size : "",
+    publicMode: turn.publicMode === true,
     images: normalizedImages,
     createdAt: String(turn.createdAt || new Date().toISOString()),
     status:

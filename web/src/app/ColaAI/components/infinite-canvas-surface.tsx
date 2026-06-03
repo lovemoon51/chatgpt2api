@@ -46,6 +46,7 @@ type InfiniteCanvasSurfaceProps = {
   onMoveNodes: (positions: Record<string, CanvasPoint>) => void;
   onNudgeSelectedNodes: (delta: CanvasPoint) => void;
   onOpenGeneration: (nodeId: string) => void;
+  onOpenImagePreview?: (nodeId: string) => void;
   onOptimizeTextPrompt?: (nodeId: string, prompt: string, model: string) => Promise<string>;
   onReverseImagePrompt?: (nodeId: string, prompt: string, model: string, referenceImages: CanvasReferenceImage[]) => Promise<string>;
   onStartImageReversePrompt?: (nodeId: string) => void;
@@ -242,6 +243,7 @@ export function InfiniteCanvasSurface({
   onMoveNodes,
   onNudgeSelectedNodes,
   onOpenGeneration,
+  onOpenImagePreview,
   onOptimizeTextPrompt,
   onReverseImagePrompt,
   onStartImageReversePrompt,
@@ -1115,6 +1117,7 @@ export function InfiniteCanvasSurface({
             onImageFileChange={handleNodeImageFileChange}
             onImageNaturalSize={onImageNaturalSize}
             onOpenGeneration={onOpenGeneration}
+            onOpenImagePreview={onOpenImagePreview}
             onOptimizeTextPrompt={onOptimizeTextPrompt}
             onReverseImagePrompt={onReverseImagePrompt}
             onStartImageReversePrompt={onStartImageReversePrompt}

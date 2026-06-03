@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from "react";
 
-import { getStoredColaAuthSession, type ColaAuthSession } from "@/store/cola-auth";
+import {
+  createColaAuthProfileFromSharedSession,
+  createColaAuthSessionFromSharedSession,
+  getStoredColaAuthSession,
+  setStoredColaAuthProfile,
+  setStoredColaAuthSession,
+  type ColaAuthSession,
+} from "@/store/cola-auth";
+import { getStoredAuthSession } from "@/store/auth";
 import { ColaAIWorkbench } from "./components/cola-ai-workbench";
 
 const publicPreviewSession: ColaAuthSession = {
@@ -23,6 +31,16 @@ export default function ColaAIPage() {
         const storedSession = await getStoredColaAuthSession();
         if (active && storedSession) {
           setSession(storedSession);
+          return;
+        }
+
+        const sharedSession = await getStoredAuthSession();
+        const colaSession = sharedSession ? createColaAuthSessionFromSharedSession(sharedSession) : null;
+        const colaProfile = sharedSession ? createColaAuthProfileFromSharedSession(sharedSession) : null;
+        if (active && colaSession && colaProfile) {
+          await setStoredColaAuthProfile(colaProfile);
+          await setStoredColaAuthSession(colaSession);
+          setSession(colaSession);
         }
       } catch {
         if (active) {

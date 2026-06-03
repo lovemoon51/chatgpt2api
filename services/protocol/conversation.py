@@ -221,6 +221,7 @@ def save_image_bytes(
     mode: str = "",
     source_task_id: str = "",
     revised_prompt: str = "",
+    public: bool = False,
 ) -> str:
     config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
@@ -231,6 +232,7 @@ def save_image_bytes(
     file_path.write_bytes(image_data)
     relative_path = f"{relative_dir.as_posix()}/{filename}"
     record_image_owner(relative_path, owner_identity)
+    public_tags = ["public", "discover"] if public else None
     try:
         from services.image_asset_service import upsert_asset
 
@@ -244,9 +246,17 @@ def save_image_bytes(
             mode=mode,
             source_task_id=source_task_id,
             revised_prompt=revised_prompt,
+            tags=public_tags,
         )
     except Exception:
         pass
+    if public:
+        try:
+            from services.image_tags_service import set_tags
+
+            set_tags(relative_path, ["public", "discover"])
+        except Exception:
+            pass
     return f"{(base_url or config.base_url)}/images/{relative_path}"
 
 
@@ -369,6 +379,7 @@ def format_image_result(
     size: str | None = None,
     mode: str = "",
     source_task_id: str = "",
+    public: bool = False,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
@@ -386,6 +397,7 @@ def format_image_result(
             mode=mode,
             source_task_id=source_task_id,
             revised_prompt=revised_prompt,
+            public=public,
         )
         if response_format == "b64_json":
             data.append({
@@ -412,12 +424,14 @@ class ConversationRequest:
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
+    resolution: str | None = None
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
     owner_identity: dict[str, object] | None = None
     mode: str = ""
     source_task_id: str = ""
+    public: bool = False
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     image_poll_timeout_secs: int | None = None
 
@@ -829,6 +843,7 @@ def stream_image_outputs(
             size=request.size,
             mode=request.mode or ("edit" if request.images else "generate"),
             source_task_id=request.source_task_id,
+            public=request.public,
         )["data"]
         emit_image_progress(
             request.progress_callback,

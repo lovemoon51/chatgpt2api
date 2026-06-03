@@ -123,7 +123,7 @@ type StudioTaskQueueItem = {
 
 type ImageGenerationPhase = "understanding" | "generating" | "revealing";
 
-const imageModelValues = new Set(["gpt-image-2", "codex-gpt-image-2"]);
+const imageModelValues = new Set(["gpt-image-2", "codex-gpt-image-2", "agnes-image-2.1-flash"]);
 
 function apiPath(path: string) {
   const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
@@ -161,6 +161,13 @@ const imageModelOptions: StudioModelOption[] = [
     description: "兼容 Codex 图片模型别名，用于特殊账号池配置。",
     title: "codex-gpt-image-2",
     badge: "openai",
+  },
+  {
+    value: "agnes-image-2.1-flash",
+    label: "Agnes Image",
+    description: "通过 Agnes AI API 调用的图片模型，使用独立 API Key。",
+    title: "agnes-image-2.1-flash",
+    badge: "agnes",
   },
 ];
 
@@ -1597,7 +1604,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     const turnId = createId();
     const effectiveCount = clampImageCount(String(imageCount));
     const effectiveSize = compositionMode === "ratio" ? imageSize : "";
-    const effectiveModel: ImageModel = selectedImageModel === "codex-gpt-image-2" ? "codex-gpt-image-2" : "gpt-image-2";
+    const effectiveModel: ImageModel = imageModelValues.has(selectedImageModel) ? selectedImageModel as ImageModel : "gpt-image-2";
     const draftTurn: ImageTurn = {
       id: turnId,
       prompt: trimmedPrompt,

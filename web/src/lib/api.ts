@@ -4,8 +4,10 @@ import { httpRequest, request } from "@/lib/request";
 
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
-export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
+export type ImageModel = "gpt-image-2" | "codex-gpt-image-2" | "agnes-image-2.1-flash";
+export type VideoModel = "agnes-video-v2.0";
 export type ImageResolution = "1k" | "2k" | "4k";
+export type VideoResolution = "480p" | "720p" | "custom";
 export type AuthRole = "admin" | "user";
 
 export type OpenAIModel = {
@@ -83,6 +85,15 @@ export type SettingsConfig = {
     api_key?: string;
     model?: string;
     prompt?: string;
+  };
+  agnes_ai?: {
+    api_key?: string;
+    api_keys?: Array<{
+      name?: string;
+      api_key?: string;
+      enabled?: boolean;
+    }>;
+    base_url?: string;
   };
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
@@ -330,10 +341,15 @@ export type ImageTask = {
   phase_updated_at?: string;
   timings?: Record<string, number | undefined>;
   timing_ms?: Record<string, number | undefined>;
-  mode: "generate" | "edit";
-  model?: ImageModel;
+  mode: "generate" | "edit" | "video";
+  media_type?: "image" | "video" | string;
+  model?: ImageModel | VideoModel;
   size?: string;
   resolution?: ImageResolution | string;
+  video_duration_seconds?: number;
+  video_resolution?: VideoResolution | string;
+  video_custom_width?: number;
+  video_custom_height?: number;
   created_at: string;
   updated_at: string;
   queued_at?: string;
@@ -345,7 +361,7 @@ export type ImageTask = {
   duration_ms?: number;
   queue_duration_ms?: number;
   total_duration_ms?: number;
-  data?: Array<{ b64_json?: string; url?: string; signed_url?: string; revised_prompt?: string }>;
+  data?: Array<{ b64_json?: string; url?: string; signed_url?: string; video_url?: string; revised_prompt?: string }>;
   error?: string;
 };
 
@@ -1119,6 +1135,33 @@ export async function createImageEditTask(
   });
 }
 
+export async function createVideoGenerationTask(
+  clientTaskId: string,
+  prompt: string,
+  model?: VideoModel | string,
+  size?: string,
+  referenceImageUrls: string[] = [],
+  durationSeconds?: number,
+  resolution?: VideoResolution | string,
+  customWidth?: number,
+  customHeight?: number,
+) {
+  return httpRequest<ImageTask>("/api/image-tasks/videos", {
+    method: "POST",
+    body: {
+      client_task_id: clientTaskId,
+      prompt,
+      ...(model ? { model } : {}),
+      ...(size ? { size } : {}),
+      reference_image_urls: referenceImageUrls,
+      ...(durationSeconds ? { duration_seconds: durationSeconds } : {}),
+      ...(resolution ? { resolution } : {}),
+      ...(customWidth ? { custom_width: customWidth } : {}),
+      ...(customHeight ? { custom_height: customHeight } : {}),
+    },
+  });
+}
+
 export async function fetchImageTasks(ids: string[]) {
   const params = new URLSearchParams();
   if (ids.length > 0) {
@@ -1637,6 +1680,15 @@ export type ProxyTestResult = {
   error: string | null;
 };
 
+export type AgnesAITestResult = {
+  ok: boolean;
+  status: number;
+  key_name: string;
+  error: string | null;
+  models?: string[];
+  image_model_available?: boolean;
+};
+
 export async function fetchProxy() {
   return httpRequest<{ proxy: ProxySettings }>("/api/proxy");
 }
@@ -1652,5 +1704,12 @@ export async function testProxy(url?: string) {
   return httpRequest<{ result: ProxyTestResult }>("/api/proxy/test", {
     method: "POST",
     body: { url: url ?? "" },
+  });
+}
+
+export async function testAgnesAIConnection(agnes_ai?: SettingsConfig["agnes_ai"]) {
+  return httpRequest<{ result: AgnesAITestResult }>("/api/agnes-ai/test", {
+    method: "POST",
+    body: { agnes_ai },
   });
 }

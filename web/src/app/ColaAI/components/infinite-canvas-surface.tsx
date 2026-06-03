@@ -25,7 +25,7 @@ import { createSelectionRect, getNodesInSelectionRect } from "./canvas-selection
 import { getSnappedDelta, precomputeStationaryAnchors, type PrecomputedStationaryAnchors } from "./canvas-snapping";
 import { getCanvasLayerBounds, getVisibleCanvasConnections, getVisibleCanvasNodes } from "./canvas-visibility";
 import { getCanvasViewport, setCanvasViewport, subscribeCanvasViewport } from "./canvas-viewport-store";
-import type { CanvasCreatableNodeType, CanvasInteractionMode, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
+import type { CanvasCreatableNodeType, CanvasImageOption, CanvasInteractionMode, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
 import { summarizeCanvasUpstream, type CanvasReferenceImage } from "./canvas-workflow";
 import type { CanvasConfigPatch } from "./use-canvas-store";
 
@@ -42,6 +42,10 @@ type InfiniteCanvasSurfaceProps = {
   onFinalizeHistoryBatch: () => void;
   onImageFileDrop: (file: File, position: CanvasPoint, targetNodeId?: string) => void;
   onImageNaturalSize?: (nodeId: string, width: number, height: number) => void;
+  onImageOptionSelect?: (nodeId: string, option: CanvasImageOption) => void;
+  onCropImage?: (nodeId: string, rect: CanvasSelectionRect) => void;
+  onDownloadImage?: (nodeId: string) => void;
+  onRunGridSplit?: (nodeId: string) => void;
   onMoveNode: (nodeId: string, position: CanvasPoint) => void;
   onMoveNodes: (positions: Record<string, CanvasPoint>) => void;
   onNudgeSelectedNodes: (delta: CanvasPoint) => void;
@@ -101,6 +105,14 @@ type DragState =
       moved: boolean;
     }
   | {
+      type: "cropResize";
+      nodeId: string;
+      startX: number;
+      startY: number;
+      anchorWorld: CanvasPoint;
+      moved: boolean;
+    }
+  | {
       type: "connection";
       fromNodeId: string;
       from: CanvasPoint;
@@ -127,6 +139,8 @@ type CanvasContextMenuState =
 
 const snapThreshold = 8;
 const connectorHitRadius = 22;
+const initialCropWidthRatio = 0.58;
+const initialCropHeightRatio = 0.58;
 
 function isEditableTarget(target: EventTarget | null) {
   if (!target || typeof (target as { closest?: unknown }).closest !== "function") {
@@ -209,6 +223,15 @@ function getNodePositions(nodes: CanvasState["nodes"]) {
   return Object.fromEntries(nodes.map((node) => [node.id, node.position]));
 }
 
+function getInitialCropRect(node: CanvasState["nodes"][number]): CanvasSelectionRect {
+  return {
+    left: node.position.x,
+    top: node.position.y,
+    right: node.position.x + Math.max(24, node.width * initialCropWidthRatio),
+    bottom: node.position.y + Math.max(24, node.height * initialCropHeightRatio),
+  };
+}
+
 function getConnectorHandles() {
   return Array.from(document.querySelectorAll<HTMLElement>("[data-cola-canvas-handle][data-node-id]")).map((element) => {
     const rect = element.getBoundingClientRect();
@@ -240,6 +263,10 @@ export function InfiniteCanvasSurface({
   onFinalizeHistoryBatch,
   onImageFileDrop,
   onImageNaturalSize,
+  onImageOptionSelect,
+  onCropImage,
+  onDownloadImage,
+  onRunGridSplit,
   onMoveNodes,
   onNudgeSelectedNodes,
   onOpenGeneration,
@@ -266,6 +293,8 @@ export function InfiniteCanvasSurface({
   const dragRef = useRef<DragState | null>(null);
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 });
   const [selectionRect, setSelectionRect] = useState<CanvasSelectionRect | null>(null);
+  const [cropNodeId, setCropNodeId] = useState<string | null>(null);
+  const [cropRect, setCropRect] = useState<CanvasSelectionRect | null>(null);
   const [connectionPreview, setConnectionPreview] = useState<{ from: CanvasPoint; to: CanvasPoint } | null>(null);
   const [connectionMenu, setConnectionMenu] = useState<ConnectionMenuState | null>(null);
   const [contextMenu, setContextMenu] = useState<CanvasContextMenuState | null>(null);
@@ -294,6 +323,7 @@ export function InfiniteCanvasSurface({
   const toggleNodeSelectionRef = useRef(onToggleNodeSelection);
   const undoRef = useRef(onUndo);
   const viewportChangeRef = useRef(onViewportChange);
+  const cropImageRef = useRef(onCropImage);
 
   useEffect(() => {
     const sync = () => {
@@ -334,6 +364,7 @@ export function InfiniteCanvasSurface({
     toggleNodeSelectionRef.current = onToggleNodeSelection;
     undoRef.current = onUndo;
     viewportChangeRef.current = onViewportChange;
+    cropImageRef.current = onCropImage;
   }, [
     onAddConnectedNode,
     onAddConnection,
@@ -356,6 +387,7 @@ export function InfiniteCanvasSurface({
     onToggleNodeSelection,
     onUndo,
     onViewportChange,
+    onCropImage,
   ]);
 
   useEffect(() => {
@@ -390,6 +422,25 @@ export function InfiniteCanvasSurface({
         const dy = event.clientY - drag.startY;
         drag.moved = drag.moved || Math.abs(dx) > 2 || Math.abs(dy) > 2;
         setSelectionRect(createSelectionRect(drag.startWorld, endWorld));
+        return;
+      }
+
+      if (drag.type === "cropResize") {
+        const rect = containerRef.current?.getBoundingClientRect();
+        const node = nodesRef.current.find((item) => item.id === drag.nodeId);
+        if (!rect || !node) {
+          return;
+        }
+        const endWorld = getWorldPoint(event, rect, viewportRef.current);
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        drag.moved = drag.moved || Math.abs(dx) > 2 || Math.abs(dy) > 2;
+        setCropRect({
+          left: drag.anchorWorld.x,
+          top: drag.anchorWorld.y,
+          right: Math.max(drag.anchorWorld.x + 24, Math.min(node.position.x + node.width, endWorld.x)),
+          bottom: Math.max(drag.anchorWorld.y + 24, Math.min(node.position.y + node.height, endWorld.y)),
+        });
         return;
       }
 
@@ -508,6 +559,19 @@ export function InfiniteCanvasSurface({
         }
         setSelectionRect(null);
       }
+      if (drag?.type === "cropResize") {
+        const rect = containerRef.current?.getBoundingClientRect();
+        const node = nodesRef.current.find((item) => item.id === drag.nodeId);
+        if (rect && node) {
+          const endWorld = getWorldPoint(event, rect, viewportRef.current);
+          setCropRect({
+            left: drag.anchorWorld.x,
+            top: drag.anchorWorld.y,
+            right: Math.max(drag.anchorWorld.x + 24, Math.min(node.position.x + node.width, endWorld.x)),
+            bottom: Math.max(drag.anchorWorld.y + 24, Math.min(node.position.y + node.height, endWorld.y)),
+          });
+        }
+      }
       if (drag?.type === "connection") {
         const rect = containerRef.current?.getBoundingClientRect();
         const inputHandle = findNearestConnectorHandle(
@@ -588,6 +652,8 @@ export function InfiniteCanvasSurface({
         const guidesEl3 = getGuidesContainer();
         if (guidesEl3) clearGuidesDOM(guidesEl3);
         setSelectionRect(null);
+        setCropRect(null);
+        setCropNodeId(null);
         setConnectionPreview(null);
         setConnectionMenu(null);
         setContextMenu(null);
@@ -775,6 +841,7 @@ export function InfiniteCanvasSurface({
     () => getCanvasLayerBounds(visibleNodes, 160),
     [visibleNodes],
   );
+  const cropNode = cropNodeId ? state.nodes.find((node) => node.id === cropNodeId) ?? null : null;
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     if (!shouldHandleCanvasWheel(event.target)) {
@@ -1103,6 +1170,7 @@ export function InfiniteCanvasSurface({
         {visibleNodes.map((node) => (
           <CanvasNode
             key={node.id}
+            interactionMode={interactionMode}
             node={node}
             selected={state.selectedNodeIds.includes(node.id)}
             upstreamSummary={configUpstreamSummaries.get(node.id) ?? null}
@@ -1116,6 +1184,17 @@ export function InfiniteCanvasSurface({
             }}
             onImageFileChange={handleNodeImageFileChange}
             onImageNaturalSize={onImageNaturalSize}
+            onImageOptionSelect={onImageOptionSelect}
+            onStartCropSelection={(nodeId) => {
+              const node = nodesRef.current.find((item) => item.id === nodeId);
+              selectNodeRef.current(nodeId);
+              setCropNodeId(nodeId);
+              setCropRect(node ? getInitialCropRect(node) : null);
+              setConnectionMenu(null);
+              setContextMenu(null);
+            }}
+            onDownloadImage={onDownloadImage}
+            onRunGridSplit={onRunGridSplit}
             onOpenGeneration={onOpenGeneration}
             onOpenImagePreview={onOpenImagePreview}
             onOptimizeTextPrompt={onOptimizeTextPrompt}
@@ -1129,6 +1208,95 @@ export function InfiniteCanvasSurface({
           />
         ))}
         <CanvasGuides connectionPreview={connectionPreview} selectionRect={selectionRect} />
+        {cropRect ? (
+          <div
+            data-cola-crop-selection="true"
+            className="absolute z-[90] rounded-[16px] border-2 border-violet-500/90 bg-violet-500/12 shadow-[0_18px_48px_-28px_rgba(79,70,229,0.62)] ring-4 ring-violet-200/35"
+            style={{
+              left: cropRect.left,
+              top: cropRect.top,
+              width: Math.max(1, cropRect.right - cropRect.left),
+              height: Math.max(1, cropRect.bottom - cropRect.top),
+            }}
+          >
+            <button
+              type="button"
+              data-cola-action="resize-canvas-crop-selection"
+              aria-label="拖动调整裁剪范围"
+              className="absolute bottom-0 right-0 size-6 translate-x-1/2 translate-y-1/2 rounded-full border-2 border-white bg-violet-600 shadow-[0_10px_24px_-14px_rgba(79,70,229,0.8)] ring-2 ring-violet-200"
+              onPointerDown={(event) => {
+                if (!cropNodeId || event.button !== 0) {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                dragRef.current = {
+                  type: "cropResize",
+                  nodeId: cropNodeId,
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  anchorWorld: { x: cropRect.left, y: cropRect.top },
+                  moved: false,
+                };
+                document.body.style.cursor = "nwse-resize";
+              }}
+            />
+          </div>
+        ) : null}
+        {cropNodeId && cropNode ? (
+          <div
+            data-cola-panel="canvas-crop-mode-hint"
+            className="absolute z-[95] flex min-h-11 items-center justify-between gap-3 rounded-[18px] border border-white/75 bg-white/94 px-3 py-2 text-sm font-semibold text-slate-700 shadow-[0_20px_48px_-34px_rgba(15,23,42,0.5)] ring-1 ring-slate-900/5 backdrop-blur-xl"
+            style={{
+              left: cropNode.position.x + cropNode.width / 2,
+              top: cropNode.position.y + cropNode.height + 12,
+              width: "max-content",
+              maxWidth: Math.max(440, cropNode.width + 120),
+              transform: "translateX(-50%)",
+            }}
+          >
+            <span className="min-w-0 flex-1 whitespace-nowrap">{cropRect ? "拖动右下角调整裁剪范围，确认后生成新节点" : "正在准备裁剪选区"}</span>
+            {cropRect ? (
+              <span className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  data-cola-action="confirm-canvas-crop-selection"
+                  className="h-8 rounded-[12px] bg-slate-950 px-3 text-xs font-semibold text-white transition hover:bg-slate-800"
+                  onClick={() => {
+                    if (cropRect) {
+                      cropImageRef.current?.(cropNodeId, cropRect);
+                    }
+                    setCropNodeId(null);
+                    setCropRect(null);
+                  }}
+                >
+                  确认
+                </button>
+                <button
+                  type="button"
+                  data-cola-action="cancel-canvas-crop-selection"
+                  className="h-8 rounded-[12px] px-3 text-xs font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                  onClick={() => {
+                    setCropNodeId(null);
+                    setCropRect(null);
+                  }}
+                >
+                  取消
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                data-cola-action="cancel-canvas-crop-mode"
+                className="h-8 rounded-[12px] px-3 text-xs font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+                onClick={() => setCropNodeId(null)}
+              >
+                退出
+              </button>
+            )}
+          </div>
+        ) : null}
       </div>
       {connectionMenu ? (
         <CanvasConnectionMenu

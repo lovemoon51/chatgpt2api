@@ -314,6 +314,8 @@ class ImageTasksApiTests(unittest.TestCase):
                 "model": "agnes-video-v2.0",
                 "size": "16:9",
                 "reference_image_urls": ["https://cdn.example.test/product.png"],
+                "duration_seconds": 12,
+                "resolution": "720p",
             },
         )
 
@@ -326,6 +328,31 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(self.fake_service.video_calls[0][1]["model"], "agnes-video-v2.0")
         self.assertEqual(self.fake_service.video_calls[0][1]["size"], "16:9")
         self.assertEqual(self.fake_service.video_calls[0][1]["reference_image_urls"], ["https://cdn.example.test/product.png"])
+        self.assertEqual(self.fake_service.video_calls[0][1]["duration_seconds"], 12)
+        self.assertEqual(self.fake_service.video_calls[0][1]["resolution"], "720p")
+
+    def test_create_video_task_passes_custom_resolution(self):
+        response = self.client.post(
+            "/api/image-tasks/videos",
+            headers=AUTH_HEADERS,
+            json={
+                "client_task_id": "video-custom",
+                "prompt": "animate the product",
+                "model": "agnes-video-v2.0",
+                "size": "16:9",
+                "duration_seconds": 16,
+                "resolution": "custom",
+                "custom_width": 1024,
+                "custom_height": 576,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        call = self.fake_service.video_calls[0][1]
+        self.assertEqual(call["duration_seconds"], 16)
+        self.assertEqual(call["resolution"], "custom")
+        self.assertEqual(call["custom_width"], 1024)
+        self.assertEqual(call["custom_height"], 576)
 
     def test_cancel_task_releases_background_limit(self):
         create_response = self.client.post(

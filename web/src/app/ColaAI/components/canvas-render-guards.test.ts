@@ -66,6 +66,31 @@ describe("canvas render guards", () => {
     ).toBe(false);
   });
 
+  test("detects when node interaction mode changes", () => {
+    const noop = () => undefined;
+
+    expect(
+      areCanvasNodePropsEqual(
+        {
+          node,
+          selected: false,
+          interactionMode: "pointer",
+          onContentChange: noop,
+          onOpenGeneration: noop,
+          onPointerDown: noop,
+        },
+        {
+          node,
+          selected: false,
+          interactionMode: "hand",
+          onContentChange: noop,
+          onOpenGeneration: noop,
+          onPointerDown: noop,
+        },
+      ),
+    ).toBe(false);
+  });
+
   test("treats viewport-only parent updates as no-op for connections", () => {
     const noop = () => undefined;
     const nodes = [node];

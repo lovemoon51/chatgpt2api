@@ -43,6 +43,12 @@ DEFAULT_AUTH_SETTINGS = {
     "username_login_enabled": False,
 }
 
+DEFAULT_AGNES_AI_SETTINGS = {
+    "base_url": "https://apihub.agnes-ai.com/v1",
+    "api_key": "",
+    "api_keys": [],
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -144,6 +150,31 @@ def _normalize_auth_settings(value: object) -> dict[str, object]:
             source.get("username_login_enabled"),
             bool(DEFAULT_AUTH_SETTINGS["username_login_enabled"]),
         ),
+    }
+
+
+def _normalize_agnes_ai_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    normalized_keys: list[dict[str, object]] = []
+    raw_keys = source.get("api_keys")
+    if isinstance(raw_keys, list):
+        for index, item in enumerate(raw_keys, start=1):
+            entry = item if isinstance(item, dict) else {}
+            api_key = str(entry.get("api_key") or "").strip()
+            if not api_key:
+                continue
+            name = str(entry.get("name") or "").strip() or f"Key {index}"
+            normalized_keys.append({
+                "name": name,
+                "api_key": api_key,
+                "enabled": _normalize_bool(entry.get("enabled"), True),
+            })
+
+    base_url = str(source.get("base_url") or DEFAULT_AGNES_AI_SETTINGS["base_url"]).strip().rstrip("/")
+    return {
+        "base_url": base_url or str(DEFAULT_AGNES_AI_SETTINGS["base_url"]),
+        "api_key": str(source.get("api_key") or "").strip(),
+        "api_keys": normalized_keys,
     }
 
 
@@ -416,6 +447,7 @@ class ConfigStore:
         data["log_levels"] = self.log_levels
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
+        data["agnes_ai"] = self.get_agnes_ai_settings()
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
         data["auto_register"] = self.get_auto_register_settings()
@@ -491,6 +523,39 @@ class ConfigStore:
         add_config_item("ai_review.base_url", "AI 审核 Base URL", "")
         add_config_item("ai_review.api_key", "AI 审核 API Key", "", sensitive=True)
         add_config_item("ai_review.model", "AI 审核模型", "")
+        env_agnes_api_key = os.getenv("AGNES_AI_API_KEY")
+        if _diagnostic_value_is_set(env_agnes_api_key):
+            add_item(
+                "agnes_ai.api_key",
+                "Agnes AI API Key",
+                source="env",
+                value=env_agnes_api_key,
+                sensitive=True,
+                env="AGNES_AI_API_KEY",
+            )
+            add_item(
+                "agnes_ai.api_keys",
+                "Agnes AI API Key 列表",
+                source="env",
+                value=[env_agnes_api_key],
+                sensitive=True,
+                env="AGNES_AI_API_KEY",
+                configured=True,
+            )
+        else:
+            add_config_item("agnes_ai.api_key", "Agnes AI API Key", "", sensitive=True)
+            add_config_item("agnes_ai.api_keys", "Agnes AI API Key 列表", [], sensitive=True)
+        env_agnes_base_url = os.getenv("AGNES_AI_BASE_URL")
+        if _diagnostic_value_is_set(env_agnes_base_url):
+            add_item(
+                "agnes_ai.base_url",
+                "Agnes AI Base URL",
+                source="env",
+                value=env_agnes_base_url,
+                env="AGNES_AI_BASE_URL",
+            )
+        else:
+            add_config_item("agnes_ai.base_url", "Agnes AI Base URL", "https://apihub.agnes-ai.com/v1")
 
         storage_backend = os.getenv("STORAGE_BACKEND", "json").strip() or "json"
         add_item(
@@ -551,7 +616,7 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         incoming = dict(data or {})
-        for key in ("backup", "auto_register", "account_pool", "auth"):
+        for key in ("backup", "auto_register", "account_pool", "auth", "agnes_ai"):
             if key in incoming and isinstance(incoming.get(key), dict) and isinstance(next_data.get(key), dict):
                 incoming[key] = _merge_dicts(next_data.get(key), incoming.get(key))
         next_data.update(incoming)
@@ -566,6 +631,8 @@ class ConfigStore:
             )
         if "auth" in next_data:
             next_data["auth"] = _normalize_auth_settings(next_data.get("auth"))
+        if "agnes_ai" in next_data:
+            next_data["agnes_ai"] = _normalize_agnes_ai_settings(next_data.get("agnes_ai"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -582,6 +649,9 @@ class ConfigStore:
 
     def get_auth_settings(self) -> dict[str, object]:
         return _normalize_auth_settings(self.data.get("auth"))
+
+    def get_agnes_ai_settings(self) -> dict[str, object]:
+        return _normalize_agnes_ai_settings(self.data.get("agnes_ai"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

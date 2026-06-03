@@ -95,6 +95,48 @@ class ConfigLoadingTests(unittest.TestCase):
 
         self.assertFalse(settings["username_login_enabled"])
 
+    def test_agnes_ai_settings_normalize_multiple_keys_and_legacy_key(self) -> None:
+        settings = self.config_module._normalize_agnes_ai_settings({
+            "base_url": "https://agnes.example/v1/",
+            "api_key": "legacy-key",
+            "api_keys": [
+                {"name": "主 key", "api_key": "key-a", "enabled": True},
+                {"name": "关闭 key", "api_key": "key-b", "enabled": False},
+                {"name": "", "api_key": "  ", "enabled": True},
+            ],
+        })
+
+        self.assertEqual(settings["base_url"], "https://agnes.example/v1")
+        self.assertEqual(settings["api_key"], "legacy-key")
+        self.assertEqual(settings["api_keys"], [
+            {"name": "主 key", "api_key": "key-a", "enabled": True},
+            {"name": "关闭 key", "api_key": "key-b", "enabled": False},
+        ])
+
+    def test_config_update_persists_agnes_ai_api_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(json.dumps({"auth-key": "test-admin"}), encoding="utf-8")
+
+            store = self.config_module.ConfigStore(config_path)
+            updated = store.update({
+                "agnes_ai": {
+                    "base_url": "https://agnes.example/v1/",
+                    "api_keys": [
+                        {"name": "主 key", "api_key": "key-a", "enabled": True},
+                        {"name": "备用 key", "api_key": "key-b", "enabled": False},
+                    ],
+                }
+            })
+
+            self.assertEqual(updated["agnes_ai"]["base_url"], "https://agnes.example/v1")
+            self.assertEqual(updated["agnes_ai"]["api_keys"], [
+                {"name": "主 key", "api_key": "key-a", "enabled": True},
+                {"name": "备用 key", "api_key": "key-b", "enabled": False},
+            ])
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["agnes_ai"]["api_keys"][0]["api_key"], "key-a")
+
     def test_config_diagnostics_masks_secret_values_and_reports_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "config.json"

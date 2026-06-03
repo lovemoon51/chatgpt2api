@@ -16,8 +16,39 @@ from services.protocol.agnes_ai_image import (
 AGNES_VIDEO_MODEL = "agnes-video-v2.0"
 DEFAULT_VIDEO_NUM_FRAMES = 121
 DEFAULT_VIDEO_FRAME_RATE = 24
+DEFAULT_VIDEO_DURATION_SECONDS = 6
+DEFAULT_VIDEO_RESOLUTION = "720p"
+DEFAULT_VIDEO_MAX_POLL_ATTEMPTS = 720
+DEFAULT_VIDEO_POLL_INTERVAL_SECONDS = 2.0
+SUPPORTED_VIDEO_DURATIONS = {6, 10, 12, 16}
+SUPPORTED_VIDEO_RESOLUTIONS = {"480p", "720p", "custom"}
 VIDEO_TERMINAL_SUCCESS_STATUSES = {"completed", "success", "succeeded"}
 VIDEO_TERMINAL_ERROR_STATUSES = {"failed", "error", "cancelled", "canceled"}
+VIDEO_URL_KEYS = {
+    "video_url",
+    "url",
+    "signed_url",
+    "download_url",
+    "file_url",
+    "output_url",
+    "remixed_from_video_id",
+}
+VIDEO_CONTAINER_KEYS = {
+    "data",
+    "output",
+    "outputs",
+    "result",
+    "results",
+    "video",
+    "videos",
+    "file",
+    "files",
+    "asset",
+    "assets",
+    "content",
+    "contents",
+}
+VIDEO_URL_SUFFIXES = (".mp4", ".webm", ".mov", ".m3u8")
 
 
 class AgnesAIVideoError(RuntimeError):
@@ -31,6 +62,10 @@ class AgnesVideoRequest:
     image_urls: list[str] = field(default_factory=list)
     num_frames: int = DEFAULT_VIDEO_NUM_FRAMES
     frame_rate: int = DEFAULT_VIDEO_FRAME_RATE
+    duration_seconds: int | None = None
+    resolution: str | None = None
+    custom_width: int | None = None
+    custom_height: int | None = None
 
 
 def is_agnes_video_model(model: object) -> bool:
@@ -56,6 +91,72 @@ def _video_dimensions(size: str | None) -> tuple[int, int] | None:
     return dimensions.get(normalized)
 
 
+def _aspect_ratio(size: str | None) -> tuple[int, int]:
+    normalized = str(size or "").strip()
+    if normalized == "智能" or not normalized:
+        return (16, 9)
+    parts = normalized.split(":", 1)
+    if len(parts) != 2:
+        return (16, 9)
+    try:
+        width = max(1, int(parts[0]))
+        height = max(1, int(parts[1]))
+    except ValueError:
+        return (16, 9)
+    return (width, height)
+
+
+def _normalize_duration_seconds(value: int | None, frame_rate: int) -> int | None:
+    if value is None:
+        return None
+    try:
+        duration = int(value)
+    except (TypeError, ValueError) as exc:
+        raise AgnesAIVideoError("duration_seconds must be one of 6, 10, 12, 16") from exc
+    if duration not in SUPPORTED_VIDEO_DURATIONS:
+        raise AgnesAIVideoError("duration_seconds must be one of 6, 10, 12, 16")
+    return duration * max(1, int(frame_rate or DEFAULT_VIDEO_FRAME_RATE)) + 1
+
+
+def _video_resolution_dimensions(
+    *,
+    resolution: str | None,
+    size: str | None,
+    custom_width: int | None,
+    custom_height: int | None,
+) -> tuple[int, int] | None:
+    normalized = str(resolution or "").strip().lower()
+    if not normalized:
+        return _video_dimensions(size)
+    if normalized not in SUPPORTED_VIDEO_RESOLUTIONS:
+        raise AgnesAIVideoError("resolution must be one of 480p, 720p, custom")
+    if normalized == "custom":
+        try:
+            width = int(custom_width or 0)
+            height = int(custom_height or 0)
+        except (TypeError, ValueError) as exc:
+            raise AgnesAIVideoError("custom video width and height must be positive integers") from exc
+        if width <= 0 or height <= 0:
+            raise AgnesAIVideoError("custom video width and height must be positive integers")
+        return (width, height)
+
+    long_side = 480 if normalized == "480p" else 720
+    ratio_width, ratio_height = _aspect_ratio(size)
+    if ratio_width == ratio_height:
+        return (long_side, long_side)
+    if ratio_width > ratio_height:
+        height = long_side
+        width = _even_dimension(round(height * ratio_width / ratio_height))
+        return (width, height)
+    width = long_side
+    height = _even_dimension(round(width * ratio_height / ratio_width))
+    return (width, height)
+
+
+def _even_dimension(value: int) -> int:
+    return max(2, int(value) + (int(value) % 2))
+
+
 def _clean_image_urls(urls: list[str]) -> list[str]:
     clean_urls: list[str] = []
     for item in urls:
@@ -73,13 +174,23 @@ def build_agnes_video_payload(request: AgnesVideoRequest) -> dict[str, Any]:
     if not prompt:
         raise AgnesAIVideoError("prompt is required")
 
+    frame_rate = max(1, int(request.frame_rate or DEFAULT_VIDEO_FRAME_RATE))
+    num_frames = _normalize_duration_seconds(request.duration_seconds, frame_rate)
+    if num_frames is None:
+        num_frames = max(1, int(request.num_frames or DEFAULT_VIDEO_NUM_FRAMES))
+
     payload: dict[str, Any] = {
         "model": AGNES_VIDEO_MODEL,
         "prompt": prompt,
-        "num_frames": max(1, int(request.num_frames or DEFAULT_VIDEO_NUM_FRAMES)),
-        "frame_rate": max(1, int(request.frame_rate or DEFAULT_VIDEO_FRAME_RATE)),
+        "num_frames": num_frames,
+        "frame_rate": frame_rate,
     }
-    dimensions = _video_dimensions(request.size)
+    dimensions = _video_resolution_dimensions(
+        resolution=request.resolution,
+        size=request.size,
+        custom_width=request.custom_width,
+        custom_height=request.custom_height,
+    )
     if dimensions is not None:
         width, height = dimensions
         payload["width"] = width
@@ -109,26 +220,50 @@ def _extract_task_id(payload: object) -> str:
     return ""
 
 
+def _is_url(value: object) -> bool:
+    lowered = str(value or "").strip().lower()
+    return lowered.startswith("https://") or lowered.startswith("http://")
+
+
+def _looks_like_video_url(value: object) -> bool:
+    lowered = str(value or "").strip().lower().split("?", 1)[0]
+    return _is_url(value) and lowered.endswith(VIDEO_URL_SUFFIXES)
+
+
 def _extract_video_url(payload: dict[str, Any]) -> str:
-    for key in ("video_url", "url"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    data = payload.get("data")
-    if isinstance(data, dict):
-        for key in ("video_url", "url"):
-            value = str(data.get(key) or "").strip()
-            if value:
-                return value
-    if isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            for key in ("video_url", "url"):
-                value = str(item.get(key) or "").strip()
-                if value:
-                    return value
-    return ""
+    def visit(value: object, *, trusted_key: bool = False) -> str:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if trusted_key and _is_url(stripped):
+                return stripped
+            if _looks_like_video_url(stripped):
+                return stripped
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                found = visit(item)
+                if found:
+                    return found
+            return ""
+        if not isinstance(value, dict):
+            return ""
+
+        for key in VIDEO_URL_KEYS:
+            found = visit(value.get(key), trusted_key=True)
+            if found:
+                return found
+        for key in VIDEO_CONTAINER_KEYS:
+            if key in value:
+                found = visit(value.get(key))
+                if found:
+                    return found
+        for item in value.values():
+            found = visit(item)
+            if found:
+                return found
+        return ""
+
+    return visit(payload)
 
 
 def _task_status(payload: object) -> str:
@@ -199,8 +334,8 @@ def _poll_agnes_video_task(
 def request_agnes_video(
     request: AgnesVideoRequest,
     *,
-    max_poll_attempts: int = 120,
-    poll_interval_seconds: float = 2.0,
+    max_poll_attempts: int = DEFAULT_VIDEO_MAX_POLL_ATTEMPTS,
+    poll_interval_seconds: float = DEFAULT_VIDEO_POLL_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
     settings = agnes_ai_settings()
     api_keys = _rotated_api_keys(settings)
@@ -260,5 +395,9 @@ def handle(body: dict[str, Any]) -> dict[str, Any]:
             prompt=str(body.get("prompt") or ""),
             size=str(body.get("size") or "") or None,
             image_urls=image_urls,
+            duration_seconds=body.get("duration_seconds"),
+            resolution=str(body.get("resolution") or "") or None,
+            custom_width=body.get("custom_width"),
+            custom_height=body.get("custom_height"),
         )
     )

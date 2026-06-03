@@ -10,6 +10,7 @@ import { useCanvasViewport } from "./canvas-viewport-store";
 type CanvasMinimapPanelProps = {
   nodes: CanvasNodeData[];
   selectedNodeIds: string[];
+  initialOpen?: boolean;
   onViewportChange: (viewport: CanvasViewport) => void;
   onFitView: () => void;
   onZoomIn: () => void;
@@ -98,6 +99,7 @@ export const CANVAS_SHORTCUTS = [
 export function CanvasMinimapPanel({
   nodes,
   selectedNodeIds,
+  initialOpen = false,
   onViewportChange,
   onFitView,
   onZoomIn,
@@ -106,7 +108,7 @@ export function CanvasMinimapPanel({
   const viewport = useCanvasViewport();
   const minimapRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
-  const [miniMapOpen, setMiniMapOpen] = useState(true);
+  const [miniMapOpen, setMiniMapOpen] = useState(initialOpen);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const dragStartRef = useRef<{ x: number; y: number; viewport: CanvasViewport } | null>(null);
 

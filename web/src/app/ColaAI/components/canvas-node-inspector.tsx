@@ -24,7 +24,7 @@ type CanvasNodeInspectorProps = {
   onOpenSourceTask?: (taskId: string) => void;
 };
 
-const modelOptions = ["gpt-image-2", "codex-gpt-image-2"];
+const modelOptions = ["gpt-image-2", "codex-gpt-image-2", "agnes-image-2.1-flash"];
 const sizeOptions = ["智能", "1:1", "16:9", "9:16", "4:3", "3:4"];
 
 const nodeIcons = {

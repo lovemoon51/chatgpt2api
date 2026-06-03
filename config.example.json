@@ -60,5 +60,16 @@
     "api_key": "",
     "base_url": "",
     "model": ""
+  },
+  "agnes_ai": {
+    "api_key": "",
+    "api_keys": [
+      {
+        "name": "主 key",
+        "api_key": "",
+        "enabled": true
+      }
+    ],
+    "base_url": "https://apihub.agnes-ai.com/v1"
   }
 }

@@ -1,6 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 
-import type { CanvasConnectionData, CanvasNodeData } from "./canvas-types";
+import type { CanvasConnectionData, CanvasInteractionMode, CanvasNodeData } from "./canvas-types";
 import type { CanvasReferenceImage, CanvasUpstreamSummary } from "./canvas-workflow";
 
 type CanvasLayerBounds = {
@@ -13,11 +13,13 @@ type CanvasLayerBounds = {
 type CanvasNodeComparableProps = {
   node: CanvasNodeData;
   selected: boolean;
+  interactionMode?: CanvasInteractionMode;
   referenceImages?: CanvasReferenceImage[];
   upstreamSummary?: CanvasUpstreamSummary | null;
   onContentChange: (nodeId: string, content: string) => void;
   onOpenGeneration: (nodeId: string) => void;
   onOpenImagePreview?: (nodeId: string) => void;
+  onRunGridSplit?: (nodeId: string) => void;
   onPointerDown: (event: ReactPointerEvent<HTMLElement>, nodeId: string) => void;
 };
 
@@ -40,6 +42,7 @@ export function areCanvasNodePropsEqual(
   return (
     previous.node === next.node &&
     previous.selected === next.selected &&
+    previous.interactionMode === next.interactionMode &&
     previous.referenceImages === next.referenceImages &&
     previous.upstreamSummary === next.upstreamSummary
   );

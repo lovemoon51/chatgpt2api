@@ -9,10 +9,24 @@ const smartRowGap = 72;
 const maxTreeColumnsPerBand = 8;
 const treeBandGap = 240;
 const workflowGroupGap = 220;
+const gridSplitTileGap = 18;
 
 type CanvasRect = CanvasPoint & {
   width: number;
   height: number;
+};
+
+type GridSplitTileGroup = {
+  id: string;
+  sourceNodeId: string;
+  members: CanvasNodeData[];
+  bounds: CanvasRect;
+  memberOffsets: Map<string, CanvasPoint>;
+};
+
+type GridSplitTileCoordinate = {
+  row: number;
+  col: number;
 };
 
 function getNodeRect(node: CanvasNodeData): CanvasRect {
@@ -183,6 +197,292 @@ export function computeTreeLayout(
   return positions;
 }
 
+function isGridSplitTileNode(node: CanvasNodeData) {
+  return node.type === "image" && node.metadata?.derivativeType === "slice" && typeof node.metadata.sourceImageNodeId === "string";
+}
+
+function getGridSplitTileCoordinate(node: CanvasNodeData): GridSplitTileCoordinate | null {
+  const match = node.title.match(/^宫格\s+(\d+)-(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const row = Number(match[1]) - 1;
+  const col = Number(match[2]) - 1;
+  if (!Number.isFinite(row) || !Number.isFinite(col) || row < 0 || col < 0) {
+    return null;
+  }
+
+  return { row, col };
+}
+
+function getGridSplitTileLayout(members: CanvasNodeData[]) {
+  const coordinates = members.map((node) => ({ node, coordinate: getGridSplitTileCoordinate(node) }));
+  if (coordinates.some((item) => !item.coordinate)) {
+    const bounds = getCanvasNodesBounds(members);
+    if (!bounds) {
+      return null;
+    }
+    return {
+      bounds,
+      members: [...members].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x),
+      memberOffsets: new Map(members.map((node) => [
+        node.id,
+        { x: node.position.x - bounds.x, y: node.position.y - bounds.y },
+      ])),
+    };
+  }
+
+  const sortedMembers = [...coordinates]
+    .sort((a, b) => (
+      a.coordinate!.row - b.coordinate!.row ||
+      a.coordinate!.col - b.coordinate!.col
+    ));
+  const colWidths = new Map<number, number>();
+  const rowHeights = new Map<number, number>();
+  sortedMembers.forEach(({ node, coordinate }) => {
+    colWidths.set(coordinate!.col, Math.max(colWidths.get(coordinate!.col) ?? 0, node.width));
+    rowHeights.set(coordinate!.row, Math.max(rowHeights.get(coordinate!.row) ?? 0, node.height));
+  });
+
+  const colOffsets = new Map<number, number>();
+  [...colWidths.keys()].sort((a, b) => a - b).forEach((col, index, cols) => {
+    const previousCol = cols[index - 1];
+    colOffsets.set(col, previousCol === undefined
+      ? 0
+      : (colOffsets.get(previousCol) ?? 0) + (colWidths.get(previousCol) ?? 0) + gridSplitTileGap);
+  });
+  const rowOffsets = new Map<number, number>();
+  [...rowHeights.keys()].sort((a, b) => a - b).forEach((row, index, rows) => {
+    const previousRow = rows[index - 1];
+    rowOffsets.set(row, previousRow === undefined
+      ? 0
+      : (rowOffsets.get(previousRow) ?? 0) + (rowHeights.get(previousRow) ?? 0) + gridSplitTileGap);
+  });
+
+  const memberOffsets = new Map<string, CanvasPoint>();
+  sortedMembers.forEach(({ node, coordinate }) => {
+    memberOffsets.set(node.id, {
+      x: colOffsets.get(coordinate!.col) ?? 0,
+      y: rowOffsets.get(coordinate!.row) ?? 0,
+    });
+  });
+
+  const lastCol = Math.max(...colWidths.keys());
+  const lastRow = Math.max(...rowHeights.keys());
+  const actualBounds = getCanvasNodesBounds(members);
+  return {
+    bounds: {
+      x: actualBounds?.x ?? 0,
+      y: actualBounds?.y ?? 0,
+      width: (colOffsets.get(lastCol) ?? 0) + (colWidths.get(lastCol) ?? 1),
+      height: (rowOffsets.get(lastRow) ?? 0) + (rowHeights.get(lastRow) ?? 1),
+    },
+    members: sortedMembers.map((item) => item.node),
+    memberOffsets,
+  };
+}
+
+function getGridSplitTileGroups(nodes: CanvasNodeData[]): GridSplitTileGroup[] {
+  const bySourceNodeId = new Map<string, CanvasNodeData[]>();
+  nodes.forEach((node) => {
+    if (!isGridSplitTileNode(node) || !node.metadata?.sourceImageNodeId) {
+      return;
+    }
+    bySourceNodeId.set(node.metadata.sourceImageNodeId, [
+      ...(bySourceNodeId.get(node.metadata.sourceImageNodeId) ?? []),
+      node,
+    ]);
+  });
+
+  return [...bySourceNodeId.entries()]
+    .map(([sourceNodeId, members]) => {
+      const tileLayout = getGridSplitTileLayout(members);
+      if (!tileLayout || tileLayout.members.length <= 1) {
+        return null;
+      }
+      return {
+        id: `__grid_split_group_${sourceNodeId}`,
+        sourceNodeId,
+        members: tileLayout.members,
+        bounds: tileLayout.bounds,
+        memberOffsets: tileLayout.memberOffsets,
+      };
+    })
+    .filter((group): group is GridSplitTileGroup => Boolean(group));
+}
+
+function collapseGridSplitTileGroups(
+  nodes: CanvasNodeData[],
+  connections: CanvasConnectionData[],
+) {
+  const groups = getGridSplitTileGroups(nodes);
+  if (groups.length === 0) {
+    return null;
+  }
+
+  const tileIdToGroup = new Map<string, GridSplitTileGroup>();
+  const firstTileIdToGroup = new Map<string, GridSplitTileGroup>();
+  groups.forEach((group) => {
+    group.members.forEach((node) => tileIdToGroup.set(node.id, group));
+    firstTileIdToGroup.set(group.members[0].id, group);
+  });
+
+  const collapsedNodes = nodes.flatMap((node): CanvasNodeData[] => {
+    const group = tileIdToGroup.get(node.id);
+    if (!group) {
+      return [node];
+    }
+    if (firstTileIdToGroup.get(node.id) !== group) {
+      return [];
+    }
+    return [{
+      id: group.id,
+      type: "image",
+      title: "Grid split tiles",
+      position: { x: group.bounds.x, y: group.bounds.y },
+      width: group.bounds.width,
+      height: group.bounds.height,
+    }];
+  });
+  const collapsedNodeIds = new Set(collapsedNodes.map((node) => node.id));
+  const seenConnections = new Set<string>();
+  const collapsedConnections = connections.flatMap((connection): CanvasConnectionData[] => {
+    const fromNodeId = tileIdToGroup.get(connection.fromNodeId)?.id ?? connection.fromNodeId;
+    const toNodeId = tileIdToGroup.get(connection.toNodeId)?.id ?? connection.toNodeId;
+    if (fromNodeId === toNodeId || !collapsedNodeIds.has(fromNodeId) || !collapsedNodeIds.has(toNodeId)) {
+      return [];
+    }
+    const key = `${fromNodeId}->${toNodeId}`;
+    if (seenConnections.has(key)) {
+      return [];
+    }
+    seenConnections.add(key);
+    return [{ ...connection, fromNodeId, toNodeId }];
+  });
+
+  return { nodes: collapsedNodes, connections: collapsedConnections, groups };
+}
+
+function expandGridSplitTileGroups(
+  collapsedPositions: Record<string, CanvasPoint>,
+  groups: GridSplitTileGroup[],
+) {
+  const groupIds = new Set(groups.map((group) => group.id));
+  const positions: Record<string, CanvasPoint> = {};
+  Object.entries(collapsedPositions).forEach(([nodeId, position]) => {
+    if (!groupIds.has(nodeId)) {
+      positions[nodeId] = position;
+    }
+  });
+
+  groups.forEach((group) => {
+    const groupPosition = collapsedPositions[group.id] ?? group.bounds;
+    group.members.forEach((node) => {
+      const offset = group.memberOffsets.get(node.id) ?? {
+        x: node.position.x - group.bounds.x,
+        y: node.position.y - group.bounds.y,
+      };
+      positions[node.id] = {
+        x: groupPosition.x + offset.x,
+        y: groupPosition.y + offset.y,
+      };
+    });
+  });
+
+  return positions;
+}
+
+function alignGridSplitTileGroupsWithConfig(
+  collapsedPositions: Record<string, CanvasPoint>,
+  nodes: CanvasNodeData[],
+  groups: GridSplitTileGroup[],
+) {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const nextPositions = { ...collapsedPositions };
+
+  groups.forEach((group) => {
+    const configNode = nodesById.get(group.sourceNodeId);
+    const configPosition = nextPositions[group.sourceNodeId] ?? configNode?.position;
+    const groupPosition = nextPositions[group.id];
+    if (
+      configNode?.type !== "config" ||
+      configNode.metadata?.derivativeType !== "slice" ||
+      !configPosition ||
+      !groupPosition
+    ) {
+      return;
+    }
+
+    nextPositions[group.id] = {
+      ...groupPosition,
+      y: configPosition.y + configNode.height / 2 - group.bounds.height / 2,
+    };
+  });
+
+  return nextPositions;
+}
+
+function isSuccessfulUpscaleResult(node: CanvasNodeData) {
+  return node.type === "generation" && (
+    node.metadata?.status === "success" ||
+    typeof node.metadata?.imageUrl === "string"
+  );
+}
+
+function alignUpscaleResultNodes(
+  positions: Record<string, CanvasPoint>,
+  nodes: CanvasNodeData[],
+  connections: CanvasConnectionData[],
+) {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const successfulResultIdsByConfigId = new Map<string, string[]>();
+
+  connections.forEach((connection) => {
+    const configNode = nodesById.get(connection.fromNodeId);
+    const resultNode = nodesById.get(connection.toNodeId);
+    if (
+      configNode?.type !== "config" ||
+      configNode.metadata?.derivativeType !== "upscale" ||
+      !resultNode ||
+      !isSuccessfulUpscaleResult(resultNode)
+    ) {
+      return;
+    }
+
+    successfulResultIdsByConfigId.set(connection.fromNodeId, [
+      ...(successfulResultIdsByConfigId.get(connection.fromNodeId) ?? []),
+      connection.toNodeId,
+    ]);
+  });
+
+  if (successfulResultIdsByConfigId.size === 0) {
+    return positions;
+  }
+
+  const nextPositions = { ...positions };
+  successfulResultIdsByConfigId.forEach((resultIds, configId) => {
+    if (resultIds.length !== 1) {
+      return;
+    }
+
+    const configNode = nodesById.get(configId);
+    const resultNode = nodesById.get(resultIds[0]);
+    const configPosition = nextPositions[configId] ?? configNode?.position;
+    const resultPosition = nextPositions[resultIds[0]] ?? resultNode?.position;
+    if (!configNode || !resultNode || !configPosition || !resultPosition) {
+      return;
+    }
+
+    nextPositions[resultNode.id] = {
+      ...resultPosition,
+      y: configPosition.y + configNode.height / 2 - resultNode.height / 2,
+    };
+  });
+
+  return nextPositions;
+}
+
 function getConnectedNodeGroups(
   nodes: CanvasNodeData[],
   connections: CanvasConnectionData[],
@@ -314,8 +614,19 @@ export function computeAutoLayout(
   nodes: CanvasNodeData[],
   connections: CanvasConnectionData[],
 ): Record<string, CanvasPoint> {
+  const collapsed = collapseGridSplitTileGroups(nodes, connections);
+  if (collapsed) {
+    const collapsedPositions = mode === "grid"
+      ? computeGridLayout(collapsed.nodes)
+      : computeGroupedTreeLayout(collapsed.nodes, collapsed.connections);
+    const alignedCollapsedPositions = mode === "tree"
+      ? alignGridSplitTileGroupsWithConfig(collapsedPositions, nodes, collapsed.groups)
+      : collapsedPositions;
+    const expandedPositions = expandGridSplitTileGroups(alignedCollapsedPositions, collapsed.groups);
+    return mode === "tree" ? alignUpscaleResultNodes(expandedPositions, nodes, connections) : expandedPositions;
+  }
   if (mode === "grid") {
     return computeGridLayout(nodes);
   }
-  return computeGroupedTreeLayout(nodes, connections);
+  return alignUpscaleResultNodes(computeGroupedTreeLayout(nodes, connections), nodes, connections);
 }

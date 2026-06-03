@@ -6,6 +6,7 @@ import { LoaderCircle } from "lucide-react";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 import { BackupSettingsCard } from "./components/backup-settings-card";
+import { AgnesAISettingsCard } from "./components/agnes-ai-settings-card";
 import { ConfigCard } from "./components/config-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
@@ -65,6 +66,7 @@ function SettingsPageContent() {
       <SettingsHeader />
       <section className="space-y-6">
         <ConfigCard />
+        <AgnesAISettingsCard />
         <BackupSettingsCard />
         <CPAPoolsCard />
         <Sub2APIConnections />

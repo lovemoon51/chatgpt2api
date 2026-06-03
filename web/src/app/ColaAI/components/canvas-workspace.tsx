@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
 import { fetchImageTasks, type ImageDescriptionResult, type ImageTask } from "@/lib/api";
+import { downloadImageUrl, fetchImageBlob } from "@/lib/image-fetch";
 import { computeAutoLayout, computeFitViewport } from "./canvas-auto-layout";
 import { CanvasGenerationPanel } from "./canvas-generation-panel";
 import { createCanvasGenerationTasks } from "./canvas-generation-tasks";
@@ -14,8 +15,8 @@ import { CanvasToolbar } from "./canvas-toolbar";
 import { getCanvasViewport } from "./canvas-viewport-store";
 import { collectCanvasContinuationSettings, collectCanvasGenerationSettings, getCanvasContinuationInputCounts, type CanvasReferenceImage } from "./canvas-workflow";
 import { InfiniteCanvasSurface } from "./infinite-canvas-surface";
-import { configNodeHeight, configNodeWidth, useCanvasStore } from "./use-canvas-store";
-import type { CanvasInteractionMode, CanvasNodeData, CanvasNodeStatus, CanvasPoint, CanvasState, CanvasViewport } from "./canvas-types";
+import { configNodeHeight, configNodeWidth, useCanvasStore, type CanvasGridSplitTileInput } from "./use-canvas-store";
+import type { CanvasGridSplitMode, CanvasInteractionMode, CanvasNodeData, CanvasNodeStatus, CanvasPoint, CanvasSelectionRect, CanvasState, CanvasViewport } from "./canvas-types";
 
 type CanvasWorkspaceProps = {
   onBack: (state: CanvasState) => void;
@@ -42,6 +43,11 @@ type GenerationSettings = {
   model: string;
   size: string;
   count: number;
+  generationMode?: "image" | "video";
+  videoDurationSeconds?: number;
+  videoResolution?: string;
+  videoCustomWidth?: number;
+  videoCustomHeight?: number;
 };
 
 const terminalTaskStatuses = new Set<ImageTask["status"]>(["success", "error", "cancelled"]);
@@ -53,18 +59,150 @@ function createClientTaskId(index: number) {
   return `canvas-${index + 1}-${random}`;
 }
 
-function imageUrlFromTask(task: ImageTask) {
+export function getCanvasTaskMediaPayload(task: ImageTask) {
   const first = task.data?.[0];
+  if (task.media_type === "video" || task.mode === "video" || first?.video_url) {
+    return {
+      imageUrl: "",
+      videoUrl: first?.video_url || "",
+      mediaType: "video" as const,
+    };
+  }
   if (first?.signed_url) {
-    return first.signed_url;
+    return { imageUrl: first.signed_url, videoUrl: "", mediaType: "image" as const };
   }
   if (first?.url) {
-    return first.url;
+    return { imageUrl: first.url, videoUrl: "", mediaType: "image" as const };
   }
   if (first?.b64_json) {
-    return `data:image/png;base64,${first.b64_json}`;
+    return { imageUrl: `data:image/png;base64,${first.b64_json}`, videoUrl: "", mediaType: "image" as const };
   }
-  return "";
+  return { imageUrl: "", videoUrl: "", mediaType: "image" as const };
+}
+
+export function getGridSplitDimensions(mode?: string): { cols: number; rows: number; mode: string } {
+  const match = mode?.match(/^([2-5])x([2-5])$/);
+  if (!match) {
+    return { cols: 3, rows: 3, mode: "3x3" };
+  }
+
+  const cols = Number(match[1]);
+  const rows = Number(match[2]);
+  return { cols, rows, mode: `${cols}x${rows}` };
+}
+
+function loadImageElement(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve(image), { once: true });
+    image.addEventListener("error", () => reject(new Error("读取源图片失败")), { once: true });
+    image.src = url;
+  });
+}
+
+async function splitImageIntoGridTiles(imageUrl: string, mode?: string): Promise<{ mode: string; tiles: CanvasGridSplitTileInput[] }> {
+  const dimensions = getGridSplitDimensions(mode);
+  const blob = await fetchImageBlob(imageUrl);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await loadImageElement(objectUrl);
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+      throw new Error("源图片尺寸无效，无法切分。");
+    }
+
+    const tiles: CanvasGridSplitTileInput[] = [];
+    for (let row = 0; row < dimensions.rows; row += 1) {
+      for (let col = 0; col < dimensions.cols; col += 1) {
+        const sx = Math.floor((sourceWidth * col) / dimensions.cols);
+        const sy = Math.floor((sourceHeight * row) / dimensions.rows);
+        const ex = Math.floor((sourceWidth * (col + 1)) / dimensions.cols);
+        const ey = Math.floor((sourceHeight * (row + 1)) / dimensions.rows);
+        const width = Math.max(1, ex - sx);
+        const height = Math.max(1, ey - sy);
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          throw new Error("当前浏览器不支持图片切分。");
+        }
+        context.drawImage(image, sx, sy, width, height, 0, 0, width, height);
+        tiles.push({
+          row,
+          col,
+          imageUrl: canvas.toDataURL(blob.type || "image/png"),
+          width,
+          height,
+        });
+      }
+    }
+    return { mode: dimensions.mode, tiles };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function cropImageToCanvasRect(imageUrl: string, sourceNode: CanvasNodeData, selectionRect: CanvasSelectionRect) {
+  const blob = await fetchImageBlob(imageUrl);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await loadImageElement(objectUrl);
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+      throw new Error("源图片尺寸无效，无法裁剪。");
+    }
+
+    const nodeRect = {
+      left: sourceNode.position.x,
+      top: sourceNode.position.y,
+      right: sourceNode.position.x + sourceNode.width,
+      bottom: sourceNode.position.y + sourceNode.height,
+    };
+    const visibleImageRatio = sourceWidth / sourceHeight;
+    const nodeRatio = sourceNode.width / sourceNode.height;
+    const displayedWidth = nodeRatio > visibleImageRatio ? sourceNode.height * visibleImageRatio : sourceNode.width;
+    const displayedHeight = nodeRatio > visibleImageRatio ? sourceNode.height : sourceNode.width / visibleImageRatio;
+    const imageRect = {
+      left: sourceNode.position.x + (sourceNode.width - displayedWidth) / 2,
+      top: sourceNode.position.y + (sourceNode.height - displayedHeight) / 2,
+      right: sourceNode.position.x + (sourceNode.width + displayedWidth) / 2,
+      bottom: sourceNode.position.y + (sourceNode.height + displayedHeight) / 2,
+    };
+    const cropRect = {
+      left: Math.max(selectionRect.left, nodeRect.left, imageRect.left),
+      top: Math.max(selectionRect.top, nodeRect.top, imageRect.top),
+      right: Math.min(selectionRect.right, nodeRect.right, imageRect.right),
+      bottom: Math.min(selectionRect.bottom, nodeRect.bottom, imageRect.bottom),
+    };
+    if (cropRect.right - cropRect.left < 2 || cropRect.bottom - cropRect.top < 2) {
+      throw new Error("框选区域太小，无法裁剪。");
+    }
+
+    const scaleX = sourceWidth / displayedWidth;
+    const scaleY = sourceHeight / displayedHeight;
+    const sx = Math.max(0, Math.floor((cropRect.left - imageRect.left) * scaleX));
+    const sy = Math.max(0, Math.floor((cropRect.top - imageRect.top) * scaleY));
+    const cropWidth = Math.max(1, Math.min(sourceWidth - sx, Math.round((cropRect.right - cropRect.left) * scaleX)));
+    const cropHeight = Math.max(1, Math.min(sourceHeight - sy, Math.round((cropRect.bottom - cropRect.top) * scaleY)));
+    const canvas = document.createElement("canvas");
+    canvas.width = cropWidth;
+    canvas.height = cropHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("当前浏览器不支持图片裁剪。");
+    }
+    context.drawImage(image, sx, sy, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    return {
+      imageUrl: canvas.toDataURL(blob.type || "image/png"),
+      width: cropWidth,
+      height: cropHeight,
+    };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 export function formatImageTextResultContent(result: ImageDescriptionResult) {
@@ -185,6 +323,9 @@ export function getCanvasGenerationLaunchIntent(node: CanvasNodeData | null | un
   if (!node || !["image", "config", "generation"].includes(node.type)) {
     return "ignore" as const;
   }
+  if (node.metadata?.derivativeType === "slice") {
+    return "ignore" as const;
+  }
   return node.type === "config" ? "submit" as const : "panel" as const;
 }
 
@@ -203,10 +344,13 @@ export function CanvasWorkspace({
     canUndo,
     addConfigNode,
     addConnectedNode,
+    addImageDerivativeNode,
     addConnection,
     addImageNode,
     addTextNode,
     appendGenerationNode,
+    appendCroppedImageNode,
+    appendGridSplitImageNodes,
     deleteSelected,
     disconnectNode,
     duplicateSelectedNodes,
@@ -243,6 +387,11 @@ export function CanvasWorkspace({
     model: "gpt-image-2",
     size: "1:1",
     count: 1,
+    generationMode: "image",
+    videoDurationSeconds: 6,
+    videoResolution: "720p",
+    videoCustomWidth: 1280,
+    videoCustomHeight: 720,
   });
   const [interactionMode, setInteractionMode] = useState<CanvasInteractionMode>("pointer");
   const nodesRef = useRef(state.nodes);
@@ -259,7 +408,7 @@ export function CanvasWorkspace({
   const canGenerate = Boolean(
     state.selectedNodeIds.length === 1 &&
     selectedNode &&
-    ["image", "config", "generation"].includes(selectedNode.type),
+    getCanvasGenerationLaunchIntent(selectedNode) !== "ignore",
   );
   const canDelete = Boolean(state.selectedNodeIds.length > 0 || state.selectedConnectionId);
   const lightboxImages = useMemo(
@@ -307,8 +456,9 @@ export function CanvasWorkspace({
           return;
         }
         result.items.forEach((task) => {
+          const mediaPayload = getCanvasTaskMediaPayload(task);
           updateGenerationTaskNode(task.id, {
-            imageUrl: imageUrlFromTask(task),
+            ...mediaPayload,
             status: canvasStatusFromTask(task),
             errorDetails: task.error,
           });
@@ -415,10 +565,13 @@ export function CanvasWorkspace({
       void onAcceptedImageTasks?.(acceptedTaskCount);
 
       tasks.forEach((task) => {
-        const imageUrl = imageUrlFromTask(task) || targetNode.metadata?.imageUrl || "";
+        const mediaPayload = getCanvasTaskMediaPayload(task);
+        const isVideoTask = workflowSettings.generationMode === "video" || mediaPayload.mediaType === "video";
         appendGenerationNode(targetNode.id, {
           prompt: workflowSettings.prompt.trim(),
-          imageUrl,
+          imageUrl: mediaPayload.imageUrl || (isVideoTask ? "" : targetNode.metadata?.imageUrl || ""),
+          videoUrl: mediaPayload.videoUrl,
+          mediaType: isVideoTask ? "video" : mediaPayload.mediaType,
           sourceTaskId: task.id,
           status: canvasStatusFromTask(task),
           errorDetails: task.error,
@@ -454,16 +607,26 @@ export function CanvasWorkspace({
       setSettings((current) => ({
         ...current,
         prompt: getCanvasContinuationPanelPrompt(node, workflowSettings.prompt),
-        model: workflowSettings.model || current.model,
-        size: workflowSettings.size || current.size,
-        count: workflowSettings.count || current.count,
-      }));
+          model: workflowSettings.model || current.model,
+          size: workflowSettings.size || current.size,
+          count: workflowSettings.count || current.count,
+          generationMode: workflowSettings.generationMode || current.generationMode,
+          videoDurationSeconds: workflowSettings.videoDurationSeconds || current.videoDurationSeconds,
+          videoResolution: workflowSettings.videoResolution || current.videoResolution,
+          videoCustomWidth: workflowSettings.videoCustomWidth || current.videoCustomWidth,
+          videoCustomHeight: workflowSettings.videoCustomHeight || current.videoCustomHeight,
+        }));
       if (launchIntent === "submit") {
         void handleSubmitGenerationForNode(node.id, {
           prompt: getCanvasContinuationPanelPrompt(node, workflowSettings.prompt),
           model: workflowSettings.model || settings.model,
           size: workflowSettings.size || settings.size,
           count: workflowSettings.count || settings.count,
+          generationMode: workflowSettings.generationMode || settings.generationMode,
+          videoDurationSeconds: workflowSettings.videoDurationSeconds || settings.videoDurationSeconds,
+          videoResolution: workflowSettings.videoResolution || settings.videoResolution,
+          videoCustomWidth: workflowSettings.videoCustomWidth || settings.videoCustomWidth,
+          videoCustomHeight: workflowSettings.videoCustomHeight || settings.videoCustomHeight,
         });
         return;
       }
@@ -488,7 +651,6 @@ export function CanvasWorkspace({
         imageUrl: payload.imageUrl,
         content: payload.content,
       });
-      renameNode(targetNodeId, payload.title);
       return;
     }
 
@@ -497,7 +659,7 @@ export function CanvasWorkspace({
       imageUrl: payload.imageUrl,
       title: payload.title,
     });
-  }, [addImageNode, renameNode, updateImageNode]);
+  }, [addImageNode, updateImageNode]);
 
   const openCanvasImagePreview = useCallback((nodeId: string) => {
     const nextIndex = lightboxImages.findIndex((image) => image.id === nodeId);
@@ -508,9 +670,78 @@ export function CanvasWorkspace({
     setLightboxOpen(true);
   }, [lightboxImages]);
 
+  const downloadCanvasImageNode = useCallback((nodeId: string) => {
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    const imageUrl = node?.metadata?.imageUrl;
+    if (!imageUrl) {
+      return;
+    }
+    const safeTitle = (node.title || "canvas-image")
+      .trim()
+      .replace(/[\\/:*?"<>|]+/g, "-")
+      .replace(/\s+/g, "-")
+      .slice(0, 80) || "canvas-image";
+    void downloadImageUrl(imageUrl, `${safeTitle}.png`);
+  }, []);
+
+  const runGridSplitNode = useCallback((nodeId: string) => {
+    const splitNode = nodesRef.current.find((node) => node.id === nodeId && node.metadata?.derivativeType === "slice");
+    const sourceNode = splitNode?.metadata?.sourceImageNodeId
+      ? nodesRef.current.find((node) => node.id === splitNode.metadata?.sourceImageNodeId)
+      : null;
+    const sourceImageUrl = sourceNode?.metadata?.imageUrl;
+    if (!splitNode || !sourceImageUrl) {
+      updateConfigNode(nodeId, {
+        status: "error",
+        errorDetails: "请先连接一张源图片。",
+      });
+      return;
+    }
+
+    updateConfigNode(nodeId, {
+      status: "loading",
+      errorDetails: undefined,
+    });
+    void (async () => {
+      try {
+        const payload = await splitImageIntoGridTiles(sourceImageUrl, splitNode.metadata?.gridSplitMode);
+        appendGridSplitImageNodes(nodeId, payload);
+        updateConfigNode(nodeId, {
+          status: "success",
+          errorDetails: undefined,
+        });
+      } catch (error) {
+        updateConfigNode(nodeId, {
+          status: "error",
+          errorDetails: error instanceof Error ? error.message : "宫格切分失败，请稍后重试。",
+        });
+      }
+    })();
+  }, [appendGridSplitImageNodes, updateConfigNode]);
+
+  const cropCanvasImageNode = useCallback((nodeId: string, rect: CanvasSelectionRect) => {
+    const sourceNode = nodesRef.current.find((node) => node.id === nodeId && (node.type === "image" || node.type === "generation"));
+    const sourceImageUrl = sourceNode?.metadata?.imageUrl;
+    if (!sourceNode || !sourceImageUrl) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const cropped = await cropImageToCanvasRect(sourceImageUrl, sourceNode, rect);
+        appendCroppedImageNode(nodeId, {
+          ...cropped,
+          ratio: `${Math.round(rect.right - rect.left)}x${Math.round(rect.bottom - rect.top)}`,
+        });
+      } catch {
+        // Keep the source image unchanged when browser-side cropping fails.
+      }
+    })();
+  }, [appendCroppedImageNode]);
+
   const retryGenerationNode = useCallback((nodeId: string) => {
     const retryNode = nodesRef.current.find((node) => node.id === nodeId);
-    if (!retryNode || retryNode.type !== "generation" || retryNode.metadata?.retrying || retryingNodeIdsRef.current.has(nodeId)) {
+    if (!retryNode || (retryNode.type !== "generation" && retryNode.type !== "video") || retryNode.metadata?.retrying || retryingNodeIdsRef.current.has(nodeId)) {
       return;
     }
     void (async () => {
@@ -523,6 +754,13 @@ export function CanvasWorkspace({
         {
           ...settings,
           prompt: retryNode.metadata?.prompt || retryNode.metadata?.content || settings.prompt,
+          model: retryNode.metadata?.model || settings.model,
+          size: retryNode.metadata?.size || settings.size,
+          generationMode: retryNode.metadata?.generationMode || settings.generationMode,
+          videoDurationSeconds: retryNode.metadata?.videoDurationSeconds || settings.videoDurationSeconds,
+          videoResolution: retryNode.metadata?.videoResolution || settings.videoResolution,
+          videoCustomWidth: retryNode.metadata?.videoCustomWidth || settings.videoCustomWidth,
+          videoCustomHeight: retryNode.metadata?.videoCustomHeight || settings.videoCustomHeight,
         },
       );
       const prompt = retryNode.metadata?.prompt || workflowSettings.prompt;
@@ -546,10 +784,13 @@ export function CanvasWorkspace({
         );
 
         tasks.forEach((task) => {
-          const imageUrl = imageUrlFromTask(task) || retryNode.metadata?.imageUrl || "";
+          const mediaPayload = getCanvasTaskMediaPayload(task);
+          const isVideoTask = workflowSettings.generationMode === "video" || mediaPayload.mediaType === "video" || retryNode.type === "video";
           updateGenerationNodePayload(retryNode.id, {
             prompt: prompt.trim(),
-            imageUrl,
+            imageUrl: mediaPayload.imageUrl || (isVideoTask ? "" : retryNode.metadata?.imageUrl || ""),
+            videoUrl: mediaPayload.videoUrl || retryNode.metadata?.videoUrl || "",
+            mediaType: isVideoTask ? "video" : mediaPayload.mediaType,
             sourceTaskId: task.id,
             status: canvasStatusFromTask(task),
             errorDetails: task.error,
@@ -568,6 +809,8 @@ export function CanvasWorkspace({
         updateGenerationNodePayload(retryNode.id, {
           prompt: prompt.trim(),
           imageUrl: retryNode.metadata?.imageUrl || "",
+          videoUrl: retryNode.metadata?.videoUrl || "",
+          mediaType: retryNode.metadata?.mediaType === "video" ? "video" : "image",
           status: "error",
           errorDetails: error instanceof Error ? error.message : "重试提交失败，请稍后再试。",
           model: workflowSettings.model,
@@ -691,6 +934,14 @@ export function CanvasWorkspace({
         onFinalizeHistoryBatch={finalizeHistoryBatch}
         onImageFileDrop={(file, position, targetNodeId) => void handleCanvasImageFileDrop(file, position, targetNodeId)}
         onImageNaturalSize={updateNodeImageNaturalSize}
+        onImageOptionSelect={(nodeId, option) => {
+          if (option === "upscale" || option === "slice") {
+            addImageDerivativeNode(nodeId, option);
+          }
+        }}
+        onCropImage={cropCanvasImageNode}
+        onDownloadImage={downloadCanvasImageNode}
+        onRunGridSplit={runGridSplitNode}
         onMoveNode={moveNode}
         onMoveNodes={moveNodes}
         onNudgeSelectedNodes={nudgeSelectedNodes}
@@ -758,6 +1009,11 @@ export function CanvasWorkspace({
         model={settings.model}
         size={settings.size}
         count={settings.count}
+        generationMode={settings.generationMode}
+        videoDurationSeconds={settings.videoDurationSeconds}
+        videoResolution={settings.videoResolution}
+        videoCustomWidth={settings.videoCustomWidth}
+        videoCustomHeight={settings.videoCustomHeight}
         submitting={submitting}
         onChange={handleGenerationSettingsChange}
         onClose={() => {

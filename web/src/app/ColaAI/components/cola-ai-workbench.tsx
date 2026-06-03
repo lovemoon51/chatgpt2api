@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -196,82 +197,19 @@ type CheckInDialogResult = {
 const COLA_ACTIVE_GENERATE_SESSION_STORAGE_KEY = "chatgpt2api:colaai_active_generate_conversation_id";
 const promptArchitectSystemPrompt = `你现在是一名「专业提示词架构师 Prompt Architect」。
 
-你的核心任务不是直接完成用户的创作需求，而是帮助用户把模糊、简单、随意的想法，转化为高质量、结构化、可直接用于 AI 生成内容的提示词。
+你是一名顶级提示词专家，专注将用户创意转化为高质量、生图优先的可直接执行提示词，自动补全细节、风格和构图。
 
-你需要具备以下能力：
+你的任务是把用户给出的简短创意、角色、场景或画面概念，改写成一段可直接交给图像生成模型执行的高质量提示词。只输出一段可直接用于生图的提示词正文。
 
-1. 需求理解能力
-你要准确理解用户想要生成的内容，包括但不限于：
-- 图片提示词
-- 视频提示词
-- UI / 网页设计提示词
-- 文案提示词
-- 产品 PRD 提示词
-- 前端开发提示词
-- 角色设定提示词
-- 故事分镜提示词
-- 商业分析提示词
-- Agent / 工作流提示词
+输出必须遵守：
+- 不要输出开场白、确认语、解释、Markdown 代码块、标题、项目符号、编号列表或结尾追问。
+- 不要使用“明白”“我会”“以下是”“如果你想”等聊天式话术。
+- 不要输出设计思路、可选增强方向、注意事项或二次确认。
+- 不要把用户原始输入包装成对话，只返回优化后的最终提示词。
 
-2. 主动补全能力
-当用户给出的信息不完整时，你需要根据常见创作逻辑主动补全合理细节，例如：
-- 风格
-- 画面主体
-- 构图
-- 场景
-- 光影
-- 材质
-- 情绪氛围
-- 功能结构
-- 用户体验
-- 技术要求
-- 输出格式
-- 限制条件
+优化时自动补全画面必要信息：主体特征、姿态动作、场景环境、光影、色彩、镜头语言、构图、风格、材质质感、氛围和高质量渲染细节。
 
-但你不能胡乱扩展，所有补全都必须服务于用户原始目标。
-
-3. 提示词优化能力
-你要把用户的原始描述优化成：
-- 目标明确
-- 结构清晰
-- 细节丰富
-- 可执行性强
-- 适合 AI 理解
-- 减少歧义
-- 更容易得到高质量结果的提示词
-
-4. 输出格式要求
-每次输出时，优先采用以下结构：
-
-【优化后的提示词】
-直接给出可复制使用的完整提示词。
-
-【设计思路】
-简要说明为什么这样优化，说明加入了哪些关键元素。
-
-【可选增强方向】
-给出 3-5 个可继续加强的方向，例如：
-- 更高级的视觉风格
-- 更强的商业感
-- 更适合普通用户
-- 更适合移动端
-- 更适合生成图片 / 视频 / 代码
-- 更适合 Claude / GPT / Midjourney / ComfyUI / Flux / SD
-
-5. 语言风格
-你的表达要专业、清晰、直接，不要废话。
-用户如果只想要提示词，你就只输出提示词。
-用户如果需要解释，你再补充说明。
-
-6. 重要原则
-- 不要直接替用户完成最终作品，除非用户明确要求。
-- 重点是生成「能驱动另一个 AI 完成任务」的高质量提示词。
-- 遇到模糊需求时，优先给出一个默认高质量版本，而不是频繁追问。
-- 如果用户要求“优化提示词”，你要直接给出更强版本。
-- 如果用户要求“生成提示词”，你要直接生成完整可用版本。
-- 如果用户要求“拆解提示词”，你要把提示词拆成结构模块。
-
-你的最终目标是：让用户只需要复制你生成的提示词，就能让另一个 AI 准确、高质量地完成任务。`;
+补全必须服务于用户原始目标，不能改变核心主体、角色、时代背景或风格意图。用户输入很短时，直接给出一个默认高质量版本，不要追问。`;
 
 export function buildPromptArchitectMessages(prompt: string) {
   return [
@@ -485,26 +423,32 @@ type DroppedImageData = {
     | null;
 };
 
-export function getDroppedImageFile(data: DroppedImageData | null | undefined): File | null {
+export function getDroppedImageFiles(data: DroppedImageData | null | undefined): File[] {
   if (!data) {
-    return null;
+    return [];
   }
 
   const items = Array.from(data.items ?? []);
-  for (const item of items) {
-    if (item.kind === "file" && item.type?.startsWith("image/")) {
-      const file = item.getAsFile?.() ?? null;
-      if (file?.type.startsWith("image/")) {
-        return file;
-      }
+  const itemFiles = items.flatMap((item) => {
+    if (item.kind !== "file" || !item.type?.startsWith("image/")) {
+      return [];
     }
+    const file = item.getAsFile?.() ?? null;
+    return file?.type.startsWith("image/") ? [file] : [];
+  });
+  if (itemFiles.length > 0) {
+    return itemFiles;
   }
 
   const files = Array.from(data.files ?? []);
-  return files.find((file) => file.type.startsWith("image/")) ?? null;
+  return files.filter((file) => file.type.startsWith("image/"));
 }
 
-function hasImageDragData(data: DroppedImageData | null | undefined) {
+export function getDroppedImageFile(data: DroppedImageData | null | undefined): File | null {
+  return getDroppedImageFiles(data)[0] ?? null;
+}
+
+export function hasImageDragData(data: DroppedImageData | null | undefined) {
   if (!data) {
     return false;
   }
@@ -562,15 +506,20 @@ export function handlePromptComposerKeyDown(event: PromptComposerKeyEvent, onGen
 }
 
 export function clearReferencePreviewUrl(
-  referencePreviewUrlRef: { current: string },
+  referencePreviewUrlRef: { current: string | string[] },
   revokeObjectUrl: (url: string) => void = URL.revokeObjectURL,
 ) {
-  if (!referencePreviewUrlRef.current) {
+  const urls = Array.isArray(referencePreviewUrlRef.current)
+    ? referencePreviewUrlRef.current
+    : referencePreviewUrlRef.current
+      ? [referencePreviewUrlRef.current]
+      : [];
+  if (urls.length === 0) {
     return;
   }
 
-  revokeObjectUrl(referencePreviewUrlRef.current);
-  referencePreviewUrlRef.current = "";
+  urls.forEach((url) => revokeObjectUrl(url));
+  referencePreviewUrlRef.current = Array.isArray(referencePreviewUrlRef.current) ? [] : "";
 }
 
 export function ReferenceDropOverlay({ active }: { active: boolean }) {
@@ -652,6 +601,13 @@ const imageModelOptions: Array<{
     description: "兼容 Codex 图片模型别名，用于特殊账号池配置。",
     badge: "openai",
   },
+  {
+    value: "agnes-image-2.1-flash",
+    label: "Agnes Image",
+    title: "agnes-image-2.1-flash",
+    description: "通过 Agnes AI API 调用的图片模型，使用独立 API Key。",
+    badge: "agnes",
+  },
 ];
 
 function colaApiPath(path: string) {
@@ -676,7 +632,7 @@ function extractPromptArchitectResponse(payload: unknown) {
 }
 
 function normalizeImageModel(model: string | null | undefined): GenerateImageModel {
-  return model === "gpt-image-2" || model === "codex-gpt-image-2" ? model : "auto";
+  return model === "gpt-image-2" || model === "codex-gpt-image-2" || model === "agnes-image-2.1-flash" ? model : "auto";
 }
 
 const terminalTaskStatuses = new Set<ImageTask["status"]>(["success", "error", "cancelled"]);
@@ -1305,7 +1261,7 @@ function RovaComposer({
   onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
-  onReferenceFileChange?: (file: File) => void;
+  onReferenceFileChange?: (files: File[]) => void;
   onOpenPrompts: () => void;
   onGenerate: () => void;
 }) {
@@ -1499,15 +1455,16 @@ function RovaComposer({
             ref={fileInputRef}
             type="file"
             accept="image/*"
+            multiple
             className="hidden"
             aria-label="选择参考图"
             onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file?.type.startsWith("image/")) {
+              const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/"));
+              if (files.length > 0) {
                 if (onReferenceFileChange) {
-                  onReferenceFileChange(file);
+                  onReferenceFileChange(files);
                 } else {
-                  setLocalReferenceName(file.name);
+                  setLocalReferenceName(files.length === 1 ? files[0].name : `${files.length} 张参考图`);
                 }
               }
               event.currentTarget.value = "";
@@ -1622,6 +1579,7 @@ export function GenerateComposer({
   imageModel,
   publicMode,
   referenceImage,
+  referenceImages,
   isGenerating = false,
   onPromptChange,
   onCountChange,
@@ -1641,7 +1599,8 @@ export function GenerateComposer({
   resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
-  referenceImage: ReferenceImage | null;
+  referenceImage?: ReferenceImage | null;
+  referenceImages?: ReferenceImage[];
   isGenerating?: boolean;
   onPromptChange: (prompt: string) => void;
   onCountChange: (count: number) => void;
@@ -1650,7 +1609,7 @@ export function GenerateComposer({
   onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
-  onReferenceFileChange: (file: File) => void;
+  onReferenceFileChange: (files: File[]) => void;
   onReferenceRemove: () => void;
   onOpenPrompts: () => void;
   onGenerate: () => void;
@@ -1662,6 +1621,34 @@ export function GenerateComposer({
   const selectedRatio = compositionMode === "auto" ? "Auto" : ratio;
   const selectedResolution = imageResolutionOptions.find((option) => option.value === resolution) ?? imageResolutionOptions[0];
   const selectedModel = imageModelOptions.find((option) => option.value === imageModel) ?? imageModelOptions[0];
+  const attachedReferenceImages = referenceImages ?? (referenceImage ? [referenceImage] : []);
+  const hasReferenceImages = attachedReferenceImages.length > 0;
+  const referenceCount = attachedReferenceImages.length;
+  const referenceSize = referenceCount === 0
+    ? "empty"
+    : referenceCount === 1
+      ? "single"
+      : referenceCount <= 4
+        ? "few"
+        : "many";
+  const referenceInputRowClass = referenceSize === "many"
+    ? "min-h-[144px] max-[760px]:min-h-[250px] max-[760px]:flex-col"
+    : "min-h-[116px] max-[560px]:min-h-[128px]";
+  const referenceSlotClass = referenceSize === "many"
+    ? "h-[132px] w-[min(420px,42vw)] max-[760px]:h-[118px] max-[760px]:w-full"
+    : referenceSize === "few"
+      ? "h-[104px] w-[min(248px,28vw)] max-[760px]:w-[min(248px,44vw)] max-[560px]:h-[94px] max-[560px]:w-full"
+      : referenceSize === "single"
+        ? "h-[76px] w-[76px] max-[560px]:h-[64px] max-[560px]:w-[64px]"
+        : "h-[60px] w-[60px] max-[560px]:h-[52px] max-[560px]:w-[52px]";
+  const referenceUploadLabel = hasReferenceImages
+    ? `继续添加参考图，当前 ${referenceCount} 张`
+    : "上传参考图";
+  const referenceRemoveLabel = referenceCount > 1
+    ? `删除 ${referenceCount} 张参考图`
+    : attachedReferenceImages[0]
+      ? `删除参考图 ${attachedReferenceImages[0].name}`
+      : "删除参考图";
 
   return (
     <section
@@ -1672,64 +1659,119 @@ export function GenerateComposer({
       className={cn(colaInputShellClass, "relative mx-auto w-full max-w-[1164px] overflow-visible text-left")}
     >
       <div data-cola-part="generate-input-panel" className="relative px-6 pt-5 pb-3 max-[560px]:px-4 max-[560px]:pt-4">
-        <div data-cola-part="generate-input-row" className="flex min-h-[116px] gap-4 max-[560px]:min-h-[128px] max-[560px]:gap-3">
+        <div
+          data-cola-part="generate-input-row"
+          className={cn(
+            "flex gap-4 max-[560px]:gap-3",
+            referenceInputRowClass,
+          )}
+        >
           <input
             ref={fileInputRef}
             type="file"
             accept="image/*"
+            multiple
             className="hidden"
             aria-label="选择参考图"
             onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file?.type.startsWith("image/")) {
-                onReferenceFileChange(file);
+              const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/"));
+              if (files.length > 0) {
+                onReferenceFileChange(files);
               }
               event.currentTarget.value = "";
             }}
           />
-          <div data-cola-panel="reference-material-slot" className="relative size-[60px] shrink-0 max-[560px]:size-[52px]">
+          <div
+            data-cola-panel="reference-material-slot"
+            data-cola-reference-count={referenceCount}
+            data-cola-size={referenceSize}
+            className={cn(
+              "relative shrink-0",
+              referenceSlotClass,
+            )}
+          >
             <button
               type="button"
               data-cola-action="upload-reference"
-              data-cola-state={referenceImage ? "has-reference" : "empty"}
+              data-cola-state={hasReferenceImages ? "has-references" : "empty"}
+              data-cola-reference-count={referenceCount}
+              data-cola-size={referenceSize}
               className={cn(
-                "group grid size-full place-items-center overflow-hidden rounded-[18px] border text-slate-400 transition duration-200",
+                "group grid h-full w-full overflow-hidden rounded-[18px] border text-slate-400 transition duration-200",
                 colaFocusClass,
-                referenceImage
-                  ? "border-white bg-white shadow-[0_16px_34px_-24px_rgba(15,23,42,0.62)] ring-1 ring-slate-200/80"
-                  : "border-dashed border-slate-300 bg-slate-50/80 hover:border-cyan-300 hover:bg-cyan-50/70 hover:text-cyan-700",
+                hasReferenceImages
+                  ? "place-items-stretch border-white bg-white p-2 shadow-[0_16px_34px_-24px_rgba(15,23,42,0.62)] ring-1 ring-slate-200/80"
+                  : "place-items-center border-dashed border-slate-300 bg-slate-50/80 hover:border-cyan-300 hover:bg-cyan-50/70 hover:text-cyan-700",
               )}
-              aria-label={referenceImage ? `更换参考图 ${referenceImage.name}` : "上传参考图"}
+              aria-label={referenceUploadLabel}
               onClick={() => fileInputRef.current?.click()}
             >
-              {referenceImage ? (
-                <AuthenticatedImage
-                  src={referenceImage.previewUrl}
-                  alt={referenceImage.name}
-                  data-cola-panel="reference-image-preview"
-                  className="h-full w-full object-cover"
-                  loadingMotion="static"
-                />
+              {referenceSize === "single" && attachedReferenceImages[0] ? (
+                <span data-cola-panel="reference-image-single" className="relative h-full w-full overflow-hidden rounded-[15px]">
+                  <AuthenticatedImage
+                    src={attachedReferenceImages[0].previewUrl}
+                    alt={attachedReferenceImages[0].name}
+                    data-cola-panel="reference-image-preview"
+                    className="h-full w-full object-cover"
+                    loadingMotion="static"
+                  />
+                  <span className="absolute bottom-1 left-1 grid size-5 place-items-center rounded-full bg-slate-950/86 text-[11px] font-semibold leading-none text-white ring-1 ring-white/85">
+                    1
+                  </span>
+                </span>
+              ) : hasReferenceImages ? (
+                <span data-cola-panel="reference-image-tray" className="flex h-full w-full min-w-0 flex-col gap-1.5">
+                  <span className="flex shrink-0 items-center justify-between gap-2 px-0.5">
+                    <span className="truncate text-[11px] font-semibold leading-none text-slate-500">
+                      参考图 {referenceCount}
+                    </span>
+                    <span className="text-[10px] font-medium leading-none text-slate-400">点击继续添加</span>
+                  </span>
+                  <span
+                    data-cola-panel="reference-image-grid"
+                    className="hide-scrollbar grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(44px,1fr))] gap-1.5 overflow-y-auto pr-0.5"
+                  >
+                    {attachedReferenceImages.map((image, index) => (
+                      <span
+                        key={`${image.previewUrl}-${index}`}
+                        data-cola-panel="reference-image-chip"
+                        data-cola-index={index + 1}
+                        className="relative aspect-square min-h-[44px] overflow-hidden rounded-[12px] bg-slate-100 ring-1 ring-slate-200/80"
+                      >
+                        <AuthenticatedImage
+                          src={image.previewUrl}
+                          alt={image.name}
+                          data-cola-panel="reference-image-preview"
+                          className="h-full w-full object-cover"
+                          loadingMotion="static"
+                        />
+                        <span className="absolute bottom-1 left-1 grid size-4 place-items-center rounded-full bg-slate-950/86 text-[10px] font-semibold leading-none text-white ring-1 ring-white/85">
+                          {index + 1}
+                        </span>
+                      </span>
+                    ))}
+                  </span>
+                </span>
               ) : (
                 <span className="grid size-8 place-items-center rounded-full bg-white/86 shadow-[0_10px_28px_-22px_rgba(15,23,42,0.68)] ring-1 ring-slate-200/80 transition group-hover:ring-teal-200">
                   <Plus className="size-4" />
                 </span>
               )}
             </button>
-            {referenceImage ? (
+            {hasReferenceImages ? (
               <span
                 data-cola-panel="reference-image-name"
                 className="sr-only"
               >
-                {referenceImage.name}
+                {attachedReferenceImages.map((image) => image.name).join(", ")}
               </span>
             ) : null}
-            {referenceImage ? (
+            {hasReferenceImages ? (
               <button
                 type="button"
                 data-cola-action="remove-reference"
                 className="absolute -right-1.5 -top-1.5 z-10 grid size-5 place-items-center rounded-full bg-slate-950 text-white shadow-[0_6px_16px_-10px_rgba(15,23,42,0.8)] ring-2 ring-white transition hover:bg-teal-800"
-                aria-label={`删除参考图 ${referenceImage.name}`}
+                aria-label={referenceRemoveLabel}
                 onClick={(event) => {
                   event.stopPropagation();
                   onReferenceRemove();
@@ -3241,7 +3283,7 @@ function DiscoverHome({
   resolution,
   imageModel,
   publicMode,
-  referenceImage,
+  referenceImages,
   isGenerating,
   stickyVisible,
   creations,
@@ -3268,7 +3310,7 @@ function DiscoverHome({
   resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
-  referenceImage: ReferenceImage | null;
+  referenceImages: ReferenceImage[];
   isGenerating: boolean;
   stickyVisible: boolean;
   creations: CreationItem[];
@@ -3280,7 +3322,7 @@ function DiscoverHome({
   onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
-  onReferenceFileChange: (file: File) => void;
+  onReferenceFileChange: (files: File[]) => void;
   onOpenPrompts: () => void;
   onGenerate: () => void;
   onOpenCreation: (item: CreationItem) => void;
@@ -3437,7 +3479,7 @@ function DiscoverHome({
             resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
-            referenceImageName={referenceImage?.name}
+            referenceImageName={referenceImages.length > 1 ? `${referenceImages.length} 张参考图` : referenceImages[0]?.name}
             isGenerating={isGenerating}
             onPromptChange={onPromptChange}
             onCountChange={onCountChange}
@@ -3491,7 +3533,7 @@ function DiscoverHome({
             resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
-            referenceImageName={referenceImage?.name}
+            referenceImageName={referenceImages.length > 1 ? `${referenceImages.length} 张参考图` : referenceImages[0]?.name}
             isGenerating={isGenerating}
             sticky
             onPromptChange={onPromptChange}
@@ -3519,7 +3561,7 @@ export function GenerateWorkspace({
   resolution,
   imageModel,
   publicMode,
-  referenceImage,
+  referenceImages,
   isGenerating,
   submittedTasks,
   generateSessions,
@@ -3554,7 +3596,7 @@ export function GenerateWorkspace({
   resolution: ImageResolution;
   imageModel: GenerateImageModel;
   publicMode: boolean;
-  referenceImage: ReferenceImage | null;
+  referenceImages: ReferenceImage[];
   isGenerating: boolean;
   submittedTasks: GenerateTask[];
   generateSessions: GenerateSession[];
@@ -3570,7 +3612,7 @@ export function GenerateWorkspace({
   onResolutionChange: (resolution: ImageResolution) => void;
   onImageModelChange: (model: GenerateImageModel) => void;
   onPublicChange: (publicMode: boolean) => void;
-  onReferenceFileChange: (file: File) => void;
+  onReferenceFileChange: (files: File[]) => void;
   onReferenceRemove: () => void;
   onOpenPrompts: () => void;
   onCreateSession: () => void;
@@ -3668,7 +3710,7 @@ export function GenerateWorkspace({
             resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
-            referenceImage={referenceImage}
+            referenceImages={referenceImages}
             isGenerating={isGenerating}
             onPromptChange={onPromptChange}
             onCountChange={onCountChange}
@@ -4905,7 +4947,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   const [selectedCanvasIds, setSelectedCanvasIds] = useState<string[]>([]);
   const [stickyVisible, setStickyVisible] = useState(false);
   const [landingHeroState, setLandingHeroState] = useState<LandingHeroStageState>("idle");
-  const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
+  const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
   const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
   const [canvasLibraryRevision, setCanvasLibraryRevision] = useState(0);
   const landingHeroRef = useRef<HTMLElement | null>(null);
@@ -4914,7 +4956,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   const landingHeroGeometryRef = useRef<LandingHeroOrbitLayout | null>(null);
   const lastDiscoverScrollYRef = useRef(0);
   const referenceDragDepthRef = useRef(0);
-  const referencePreviewUrlRef = useRef("");
+  const referencePreviewUrlRef = useRef<string[]>([]);
   const generateConversationsRef = useRef<ImageConversation[]>([]);
 
   const currentSession = sessionOverride ?? session;
@@ -4978,6 +5020,20 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       setCreationFeedStatus("idle");
     }
   }, [publicDiscoverImages.length]);
+
+  const refreshAssets = useCallback(async () => {
+    if (isPublicPreview) {
+      setImages([]);
+      return;
+    }
+
+    try {
+      const personalResult = await fetchManagedImages({ page_size: 12 });
+      setImages(personalResult.items);
+    } catch {
+      setImages((current) => current);
+    }
+  }, [isPublicPreview]);
 
   const scrollToDiscoverHero = useCallback((behavior: ScrollBehavior = "smooth") => {
     if (typeof window === "undefined") {
@@ -5411,17 +5467,25 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     }
   }, []);
 
-  const handleReferenceFileChange = useCallback((file: File) => {
-    const previewUrl = URL.createObjectURL(file);
-    clearReferencePreviewUrl(referencePreviewUrlRef);
-    referencePreviewUrlRef.current = previewUrl;
-    setReferenceImage({ name: file.name, previewUrl, file });
+  const handleReferenceFileChange = useCallback((files: File[]) => {
+    const nextImages = files
+      .filter((file) => file.type.startsWith("image/"))
+      .map((file) => ({
+        name: file.name,
+        previewUrl: URL.createObjectURL(file),
+        file,
+      }));
+    if (nextImages.length === 0) {
+      return;
+    }
+    referencePreviewUrlRef.current = [...referencePreviewUrlRef.current, ...nextImages.map((image) => image.previewUrl)];
+    setReferenceImages((current) => [...current, ...nextImages]);
     setMode("generate");
   }, []);
 
   const handleReferenceRemove = useCallback(() => {
     clearReferencePreviewUrl(referencePreviewUrlRef);
-    setReferenceImage(null);
+    setReferenceImages([]);
   }, []);
 
   const handleEditGeneratedImage = useCallback((image: GeneratedTaskImage) => {
@@ -5432,7 +5496,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
       try {
         const name = getGeneratedImageFileName(image, 0);
         const file = await fetchImageFile(image.src, name);
-        setReferenceImage({ name, previewUrl: image.src, file });
+        setReferenceImages([{ name, previewUrl: image.src, file }]);
       } catch (error) {
         setGenerationError(error instanceof Error ? error.message : "读取参考图失败，请稍后重试。");
       }
@@ -5472,15 +5536,24 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   }, []);
 
   const handleReferenceDrop = useCallback((event: ReactDragEvent<HTMLElement>) => {
-    const file = getDroppedImageFile(event.dataTransfer);
-    if (!file) {
+    const files = getDroppedImageFiles(event.dataTransfer);
+    if (files.length === 0) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     referenceDragDepthRef.current = 0;
     setIsReferenceDragActive(false);
-    handleReferenceFileChange(file);
+    handleReferenceFileChange(files);
+  }, [handleReferenceFileChange]);
+
+  const handleReferencePaste = useCallback((event: ReactClipboardEvent<HTMLElement>) => {
+    const files = getDroppedImageFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    handleReferenceFileChange(files);
   }, [handleReferenceFileChange]);
 
   const handleCreateGenerateSession = useCallback(() => {
@@ -5595,9 +5668,9 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     setFocusedGenerateTaskId("");
     setFocusedCanvasTask(null);
     const effectiveCount = Math.max(1, Math.min(8, count));
-    const effectiveModel: ImageModel = imageModel === "codex-gpt-image-2" ? "codex-gpt-image-2" : "gpt-image-2";
+    const effectiveModel: ImageModel = imageModel === "auto" ? "gpt-image-2" : imageModel;
     const effectiveSize = quality === "智能" ? undefined : ratio;
-    const referenceFiles = referenceImage?.file ? [referenceImage.file] : undefined;
+    const referenceFiles = referenceImages.map((image) => image.file).filter((file): file is File => Boolean(file));
     void submitGenerateTasks(
       {
         prompt,
@@ -5605,14 +5678,14 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         model: effectiveModel,
         size: effectiveSize,
         resolution,
-        referenceFiles,
+        referenceFiles: referenceFiles.length > 0 ? referenceFiles : undefined,
         publicMode,
       },
       activeGenerateSessionId,
     );
     setPrompt("");
     handleReferenceRemove();
-  }, [activeGenerateSessionId, count, handleReferenceRemove, imageModel, isPublicPreview, prompt, publicMode, quality, ratio, referenceImage, resolution, submitGenerateTasks]);
+  }, [activeGenerateSessionId, count, handleReferenceRemove, imageModel, isPublicPreview, prompt, publicMode, quality, ratio, referenceImages, resolution, submitGenerateTasks]);
 
   const handleRetryGeneration = useCallback((task: GenerateTask) => {
     if (task.submissionContext?.retrying) {
@@ -5770,6 +5843,17 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     setCanvasSubview("home");
   }, [syncActiveCanvasRecord]);
 
+  const openWorkbenchMode = useCallback((nextMode: WorkbenchMode) => {
+    if (nextMode === "canvas") {
+      handleOpenCanvasHome();
+      return;
+    }
+    if (nextMode === "assets") {
+      void refreshAssets();
+    }
+    setMode(nextMode);
+  }, [handleOpenCanvasHome, refreshAssets]);
+
   const handleOpenCanvasEditor = useCallback(() => {
     setMode("canvas");
     setCanvasSubview("editor");
@@ -5880,6 +5964,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         onDragOver={handleReferenceDragOver}
         onDragLeave={handleReferenceDragLeave}
         onDrop={handleReferenceDrop}
+        onPaste={handleReferencePaste}
       >
         <RovaMediaBackground />
         <ReferenceDropOverlay active={isReferenceDragActive} />
@@ -5908,11 +5993,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
                     active ? "font-semibold text-slate-950" : "font-medium text-slate-500 hover:text-slate-900",
                   )}
                   onClick={() => {
-                    if (item.key === "canvas") {
-                      handleOpenCanvasHome();
-                      return;
-                    }
-                    setMode(item.key);
+                    openWorkbenchMode(item.key);
                   }}
                 >
                   <span className={cn("grid size-9 place-items-center rounded-[14px] transition", active && "bg-slate-950 text-white shadow-[0_14px_34px_-24px_rgba(15,23,42,0.88)]")}>
@@ -6059,7 +6140,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
                 resolution={resolution}
                 imageModel={imageModel}
                 publicMode={publicMode}
-                referenceImage={referenceImage}
+                referenceImages={referenceImages}
                 isGenerating={isGenerating}
                 stickyVisible={stickyVisible}
                 creations={creationFeedStatus === "loading" && publicDiscoverImages.length === 0 ? [] : creations}
@@ -6092,7 +6173,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
             resolution={resolution}
             imageModel={imageModel}
             publicMode={publicMode}
-            referenceImage={referenceImage}
+            referenceImages={referenceImages}
             isGenerating={isGenerating}
             submittedTasks={submittedTasks}
             generateSessions={generateSessions}
@@ -6185,11 +6266,7 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         onOpenAnnouncement={() => openDialog("announcement")}
         onToggleLanguage={handleToggleLanguage}
         onNavigate={(nextMode) => {
-          if (nextMode === "canvas") {
-            handleOpenCanvasHome();
-          } else {
-            setMode(nextMode);
-          }
+          openWorkbenchMode(nextMode);
           setDialog(null);
         }}
       />

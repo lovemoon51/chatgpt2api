@@ -16,7 +16,7 @@ import { getCanvasSurfaceCursor, getCanvasSurfacePointerIntent, setCanvasDragCur
 import { resetCanvasViewport, setCanvasViewport } from "./canvas-viewport-store";
 import { getCanvasLayerBounds } from "./canvas-visibility";
 import { collectCanvasContinuationSettings, getCanvasContinuationInputCounts, summarizeCanvasUpstream } from "./canvas-workflow";
-import { CanvasWorkspace, findOpenCanvasNodePosition, formatImageTextResultContent, getCanvasContinuationPanelPrompt, getCanvasGenerationLaunchIntent, getCanvasGenerationPanelConfigTargetId } from "./canvas-workspace";
+import { CanvasWorkspace, findOpenCanvasNodePosition, formatImageTextResultContent, getCanvasContinuationPanelPrompt, getCanvasGenerationLaunchIntent, getCanvasGenerationPanelConfigTargetId, getCanvasTaskMediaPayload, getGridSplitDimensions } from "./canvas-workspace";
 import { CanvasZoomControls } from "./canvas-zoom-controls";
 import { createInitialCanvasState } from "./use-canvas-store";
 
@@ -261,6 +261,8 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain('data-cola-action="canvas-text-send"');
     expect(markup).toContain("bg-white/96");
     expect(markup).toContain("bg-slate-50/82");
+    expect(markup).toContain("Agnes-2.0-Flash");
+    expect(markup).toContain('data-cola-text-model-option="agnes-2.0-flash"');
     expect(markup).toContain("gpt-5.5");
     expect(markup).toContain("gpt-5.4");
     expect(markup).toContain('aria-label="翻译"');
@@ -506,7 +508,7 @@ describe("ColaAI canvas components", () => {
     expect(markup).not.toContain("提示词内容");
   });
 
-  test("renders the minimap as a compact light ColaAI canvas control stack", () => {
+  test("renders the canvas controls with the minimap hidden by default", () => {
     const state = createInitialCanvasState();
     const markup = renderToStaticMarkup(
       <CanvasMinimapPanel
@@ -521,7 +523,7 @@ describe("ColaAI canvas components", () => {
 
     expect(markup).toContain('data-cola-panel="canvas-minimap"');
     expect(markup).toContain('data-cola-control-surface="studio-map"');
-    expect(markup).toContain('data-cola-minimap-card="true"');
+    expect(markup).not.toContain('data-cola-minimap-card="true"');
     expect(markup).toContain('data-cola-zoom-controls="true"');
     expect(markup).toContain('data-cola-action="toggle-minimap"');
     expect(markup).toContain('data-cola-action="show-shortcuts"');
@@ -531,10 +533,44 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain("min-w-[48px]");
     expect(markup).toContain("w-[248px]");
     expect(markup).toContain("bg-white/92");
-    expect(markup).toContain("隐藏小地图");
+    expect(markup).toContain("显示小地图");
     expect(markup).toContain("快捷键");
-    expect(markup).toContain('data-cola-minimap-selected="true"');
+    expect(markup).not.toContain('data-cola-minimap-selected="true"');
     expect(markup).not.toContain("bg-[#11161d]/92");
+  });
+
+  test("renders video config nodes with the Agnes video model in the video tab", () => {
+    const state = createInitialCanvasState();
+    const configNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      metadata: {
+        prompt: "镜头推进产品展示。",
+        model: "agnes-video-v2.0",
+        size: "16:9",
+        count: 1,
+        generationMode: "video" as const,
+        videoDurationSeconds: 10,
+        videoResolution: "720p",
+        status: "idle" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={configNode}
+        selected
+        onConfigChange={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-config-mode="video"');
+    expect(markup).toContain('data-cola-config-mode-option="video"');
+    expect(markup).toContain('aria-pressed="true"');
+    expect(markup).toContain("agnes-video-v2.0");
+    expect(markup).toContain("16:9 · 10s · 720p");
+    expect(markup).toContain('data-cola-action="canvas-config-settings"');
   });
 
   test("uses the actual canvas interactions in the shortcut help", () => {
@@ -561,6 +597,7 @@ describe("ColaAI canvas components", () => {
       <CanvasMinimapPanel
         nodes={state.nodes}
         selectedNodeIds={[]}
+        initialOpen
         onFitView={() => undefined}
         onViewportChange={() => undefined}
         onZoomIn={() => undefined}
@@ -677,7 +714,7 @@ describe("ColaAI canvas components", () => {
     expect(markup).not.toContain("object-cover");
   });
 
-  test("renders generated image nodes as flush clickable previews", () => {
+  test("renders generated image nodes as pointer drag surfaces instead of zoom buttons", () => {
     const state = createInitialCanvasState();
     const generationNode = {
       ...state.nodes.find((node) => node.id === "seed-generation")!,
@@ -698,10 +735,40 @@ describe("ColaAI canvas components", () => {
       />,
     );
 
-    expect(markup).toContain('data-cola-action="open-canvas-image-preview"');
     expect(markup).toContain('data-cola-image-frame="flush"');
-    expect(markup).toContain("cursor-zoom-in");
+    expect(markup).toContain('data-cola-image-preview-mode="pointer-drag"');
+    expect(markup).toContain("cursor-grab");
+    expect(markup).toContain("active:cursor-grabbing");
+    expect(markup).not.toContain('data-cola-action="open-canvas-image-preview"');
+    expect(markup).not.toContain("cursor-zoom-in");
     expect(markup).not.toContain(" p-4 ");
+  });
+
+  test("keeps generated image nodes draggable in hand mode instead of exposing preview", () => {
+    const state = createInitialCanvasState();
+    const generationNode = {
+      ...state.nodes.find((node) => node.id === "seed-generation")!,
+      metadata: {
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        interactionMode="hand"
+        node={generationNode}
+        selected={false}
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onOpenImagePreview={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-image-preview-mode="drag"');
+    expect(markup).not.toContain('data-cola-action="open-canvas-image-preview"');
+    expect(markup).not.toContain("cursor-zoom-in");
   });
 
   test("renders image node images with a full-height contain fit so portrait references stay fully visible", () => {
@@ -728,6 +795,58 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain('data-cola-image-fit="adaptive-contain"');
     expect(markup).toContain("h-full w-full object-contain");
     expect(markup).not.toContain("h-auto w-full object-contain");
+  });
+
+  test("uses the default image node label instead of imported file names", () => {
+    const state = createInitialCanvasState();
+    const imageNode = {
+      ...state.nodes.find((node) => node.id === "seed-image")!,
+      title: "7a2c7268bbf91c3cfae748a05de28c2a.jpg",
+      metadata: {
+        ...state.nodes.find((node) => node.id === "seed-image")!.metadata,
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={imageNode}
+        selected={false}
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain(">图片节点</span>");
+    expect(markup).not.toContain("7a2c7268bbf91c3cfae748a05de28c2a.jpg");
+  });
+
+  test("does not render the standalone hover info bubble for image nodes", () => {
+    const state = createInitialCanvasState();
+    const imageNode = {
+      ...state.nodes.find((node) => node.id === "seed-image")!,
+      metadata: {
+        ...state.nodes.find((node) => node.id === "seed-image")!.metadata,
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={imageNode}
+        selected={false}
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).not.toContain('data-cola-node-toolbar="true"');
+    expect(markup).not.toContain('data-cola-node-toolbar-placement="above-title"');
+    expect(markup).not.toContain('data-cola-action="show-node-info"');
   });
 
   test("uses double click upload for image nodes instead of the corner generation button", () => {
@@ -764,7 +883,8 @@ describe("ColaAI canvas components", () => {
       ...state.nodes.find((node) => node.id === "seed-image")!,
       metadata: {
         ...state.nodes.find((node) => node.id === "seed-image")!.metadata,
-        imageOptions: ["panorama", "lighting"],
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        imageOptions: ["upscale"],
       } as NonNullable<(typeof state.nodes)[number]["metadata"]>,
     };
     const markup = renderToStaticMarkup(
@@ -780,17 +900,155 @@ describe("ColaAI canvas components", () => {
     );
 
     expect(markup).toContain('data-cola-image-option-toolbar="true"');
-    expect(markup).toContain("全景");
-    expect(markup).toContain("NEW");
-    expect(markup).toContain("多角度");
-    expect(markup).toContain("打光");
-    expect(markup).toContain("九宫格");
+    expect(markup).not.toContain("全景");
+    expect(markup).not.toContain("NEW");
+    expect(markup).not.toContain("多角度");
+    expect(markup).not.toContain("打光");
+    expect(markup).not.toContain("九宫格");
+    expect(markup).toContain("裁剪");
+    expect(markup).not.toContain("扩图、裁剪");
+    expect(markup).not.toContain("扩图");
+    expect(markup).not.toContain("待开发");
     expect(markup).toContain("高清");
     expect(markup).toContain("宫格切分");
-    expect(markup).toContain('data-cola-image-option="panorama"');
+    expect(markup).toContain('data-cola-image-option="crop"');
+    expect(markup).toContain('data-cola-image-option-state="idle"');
+    expect(markup).not.toContain('aria-disabled="true"');
+    expect(markup).not.toContain("disabled");
+    expect(markup).toContain('data-cola-image-option="upscale"');
     expect(markup).toContain('data-cola-image-option-state="active"');
+    expect(markup).toContain('data-cola-image-option="slice"');
+    expect(markup).toContain('data-cola-image-option-state="idle"');
     expect(markup).toContain('aria-pressed="true"');
+    expect(markup).toContain('data-cola-image-toolbar-actions="true"');
+    expect(markup).toContain('data-cola-image-toolbar-separator="true"');
+    expect(markup).toContain('data-cola-action="show-node-info"');
+    expect(markup).toContain('data-cola-action="download-canvas-image-node"');
+    expect(markup).toContain('aria-label="下载图片节点图片"');
+    expect(markup).toContain('data-cola-action="preview-canvas-image-node"');
+    expect(markup).toContain('aria-label="预览图片节点图片"');
+    expect(markup.indexOf('data-cola-action="download-canvas-image-node"')).toBeLessThan(
+      markup.indexOf('data-cola-action="preview-canvas-image-node"'),
+    );
+    expect(markup).not.toContain('data-cola-node-toolbar-placement="above-title"');
     expect(markup).toContain('data-cola-action="double-click-upload-image"');
+  });
+
+  test("renders GPT upscale config nodes with 1K 2K 4K controls", () => {
+    const state = createInitialCanvasState();
+    const upscaleNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      id: "upscale-config",
+      title: "高清",
+      metadata: {
+        derivativeType: "upscale" as const,
+        model: "gpt-image-2",
+        upscaleResolution: "4k" as const,
+        sourceImageNodeId: "seed-image",
+        prompt: "配置参数生成高清图像。",
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={upscaleNode}
+        selected
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-node-layout="upscale-config"');
+    expect(markup).toContain('data-cola-panel="canvas-upscale-config"');
+    expect(markup).toContain("配置参数生成高清图像");
+    expect(markup).toContain("GPT Image 2");
+    expect(markup).toContain('data-cola-upscale-resolution-option="1k"');
+    expect(markup).toContain('data-cola-upscale-resolution-option="2k"');
+    expect(markup).toContain('data-cola-upscale-resolution-option="4k"');
+    expect(markup).not.toContain('data-cola-upscale-resolution-option="8k"');
+    expect(markup).toContain("1K");
+    expect(markup).toContain("2K");
+    expect(markup).toContain("4K");
+    expect(markup).not.toContain("8K");
+  });
+
+  test("renders grid split config nodes with liblib-style mode controls", () => {
+    const state = createInitialCanvasState();
+    const splitNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      id: "grid-split-config",
+      title: "宫格切分",
+      metadata: {
+        derivativeType: "slice" as const,
+        gridSplitMode: "3x3" as const,
+        sourceImageNodeId: "seed-image",
+        prompt: "将源图片按宫格切分成独立图片节点。",
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={splitNode}
+        selected
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-node-layout="grid-split-config"');
+    expect(markup).toContain('data-cola-panel="canvas-grid-split-config"');
+    expect(markup).toContain("宫格切分");
+    expect(markup).toContain("border-dashed border-violet-200/80");
+    expect(markup).toContain("bg-[linear-gradient(135deg,rgba(124,58,237,0.08),rgba(14,165,233,0.06)_45%,rgba(255,255,255,0.86))]");
+    expect(markup).toContain("text-slate-700");
+    expect(markup).toContain('data-cola-action="canvas-grid-split-mode-menu"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain("9宫格 (3×3)");
+    expect(markup).not.toContain('data-cola-group="canvas-grid-split-mode-options"');
+    expect(markup).toContain('data-cola-action="inline-grid-split-start"');
+    expect(markup).toContain("bg-slate-950");
+    expect(markup).toContain("开始切分");
+    expect(markup).not.toContain("bg-[#262626]");
+    expect(markup).not.toContain("bg-[#202020]");
+    expect(markup).not.toContain("text-white/42");
+  });
+
+  test("renders custom grid split mode as a real selectable state", () => {
+    const state = createInitialCanvasState();
+    const splitNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      id: "grid-split-custom-config",
+      title: "宫格切分",
+      metadata: {
+        derivativeType: "slice" as const,
+        gridSplitMode: "4x3",
+        sourceImageNodeId: "seed-image",
+        prompt: "将源图片按宫格切分成独立图片节点。",
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={splitNode}
+        selected
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-action="canvas-grid-split-mode-menu"');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain("自定义 · 4 × 3");
+    expect(markup).not.toContain("bg-[#2f2f2f]");
+  });
+
+  test("parses custom grid split dimensions for real slicing", () => {
+    expect(getGridSplitDimensions("4x3")).toEqual({ cols: 4, rows: 3, mode: "4x3" });
+    expect(getGridSplitDimensions("5x5")).toEqual({ cols: 5, rows: 5, mode: "5x5" });
+    expect(getGridSplitDimensions("8x1")).toEqual({ cols: 3, rows: 3, mode: "3x3" });
   });
 
   test("renders connection layer with GPU compositing hint", () => {
@@ -810,14 +1068,20 @@ describe("ColaAI canvas components", () => {
     expect(markup).not.toContain("strokeDasharray");
   });
 
-  test("renders video placeholder nodes without enabling generation", () => {
+  test("renders playable video result nodes", () => {
     const state = createInitialCanvasState();
     const videoNode = {
       ...state.nodes[0],
       id: "video-1",
       type: "video" as const,
-      title: "视频节点",
-      metadata: { content: "视频节点未开发，请勿使用。" },
+      title: "AI 视频结果",
+      metadata: {
+        content: "镜头推进产品展示",
+        videoUrl: "https://cdn.example.test/result.mp4",
+        mediaType: "video",
+        generationMode: "video" as const,
+        status: "success" as const,
+      },
     };
     const markup = renderToStaticMarkup(
       <CanvasNode
@@ -830,9 +1094,11 @@ describe("ColaAI canvas components", () => {
     );
 
     expect(markup).toContain('data-cola-canvas-node="video"');
-    expect(markup).toContain("视频节点");
-    expect(markup).toContain("未开发");
-    expect(markup).not.toContain("基于节点继续生成");
+    expect(markup).toContain("AI 视频结果");
+    expect(markup).toContain('data-cola-video-container="true"');
+    expect(markup).toContain("<video");
+    expect(markup).toContain("controls");
+    expect(markup).toContain('src="https://cdn.example.test/result.mp4"');
   });
 
   test("renders generation node status and error feedback", () => {
@@ -1347,6 +1613,67 @@ describe("ColaAI canvas components", () => {
 
     expect(getCanvasGenerationLaunchIntent(configNode)).toBe("submit");
     expect(getCanvasGenerationLaunchIntent(generationNode)).toBe("panel");
+  });
+
+  test("renders the right-side generation panel in video mode with Agnes model", () => {
+    const state = createInitialCanvasState();
+    const markup = renderToStaticMarkup(
+      <CanvasGenerationPanel
+        open
+        selectedNode={state.nodes[2]}
+        prompt="镜头推进产品展示"
+        model="agnes-video-v2.0"
+        size="16:9"
+        count={1}
+        generationMode="video"
+        videoDurationSeconds={12}
+        videoResolution="480p"
+        submitting={false}
+        onChange={() => undefined}
+        onClose={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('aria-pressed="true"');
+    expect(markup).toContain('data-cola-generation-mode="video"');
+    expect(markup).toContain('data-cola-generation-model-option="agnes-video-v2.0"');
+    expect(markup).toContain("agnes-video-v2.0");
+    expect(markup).toContain("16:9 · 12s · 480p");
+    expect(markup).toContain('data-cola-generation-video-duration-option="6"');
+    expect(markup).toContain('data-cola-generation-video-resolution-option="custom"');
+    expect(markup).not.toContain("最多 4 张");
+  });
+
+  test("maps image task data into video canvas payloads", () => {
+    expect(getCanvasTaskMediaPayload({
+      id: "video-task-1",
+      status: "success",
+      mode: "video",
+      media_type: "video",
+      model: "agnes-video-v2.0",
+      created_at: "",
+      updated_at: "",
+      data: [{ video_url: "https://cdn.example.test/result.mp4" }],
+    })).toEqual({
+      imageUrl: "",
+      videoUrl: "https://cdn.example.test/result.mp4",
+      mediaType: "video",
+    });
+  });
+
+  test("keeps grid split config nodes out of the AI generation launch path", () => {
+    const state = createInitialCanvasState();
+    const splitNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      metadata: {
+        derivativeType: "slice" as const,
+        gridSplitMode: "3x3" as const,
+        sourceImageNodeId: "seed-image",
+      },
+    };
+
+    expect(getCanvasGenerationLaunchIntent(splitNode)).toBe("ignore");
   });
 
   test("counts continuation inputs from the current generated image and newly linked prompts", () => {

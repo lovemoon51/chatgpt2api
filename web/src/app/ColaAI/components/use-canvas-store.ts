@@ -6,6 +6,8 @@ import type {
   CanvasCreatableNodeType,
   CanvasConnectionData,
   CanvasGenerationPayload,
+  CanvasGridSplitMode,
+  CanvasImageOption,
   CanvasNodeData,
   CanvasPoint,
   CanvasState,
@@ -21,13 +23,35 @@ const persistenceDelayMs = 180;
 const duplicateOffset = { x: 48, y: 48 };
 const maxHistoryEntries = 80;
 export const configNodeWidth = 430;
-export const configNodeHeight = 260;
+export const configNodeHeight = 300;
+export const upscaleConfigNodeWidth = 420;
+export const upscaleConfigNodeHeight = 360;
+export const gridSplitConfigNodeWidth = 420;
+export const gridSplitConfigNodeHeight = 320;
 export const imageReversePromptInstruction = "根据图片生成结构化中文提示词，包括主体描述、环境、光影、镜头语言、风格关键词。";
+const gridSplitTileNodeWidth = 160;
+const gridSplitTileNodeHeight = 160;
+const gridSplitTileNodeGap = 18;
 const adaptiveImageMinWidth = 260;
 const adaptiveImageMaxWidth = 420;
 const adaptiveImageMinHeight = 150;
 const adaptiveImageMaxHeight = 440;
-export type CanvasConfigPatch = Partial<Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count">>;
+export type CanvasConfigPatch = Partial<Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count" | "upscaleResolution" | "gridSplitMode" | "status" | "errorDetails" | "generationMode" | "videoDurationSeconds" | "videoResolution" | "videoCustomWidth" | "videoCustomHeight">>;
+
+export type CanvasGridSplitTileInput = {
+  imageUrl: string;
+  row: number;
+  col: number;
+  width?: number;
+  height?: number;
+};
+
+export type CanvasCropImageInput = {
+  imageUrl: string;
+  ratio: string;
+  width?: number;
+  height?: number;
+};
 
 export type CanvasHistoryState = {
   past: CanvasState[];
@@ -59,6 +83,24 @@ function touch(state: CanvasState): CanvasState {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function getGridSplitTileNodeSize(naturalWidth?: number, naturalHeight?: number) {
+  if (
+    !Number.isFinite(naturalWidth)
+    || !Number.isFinite(naturalHeight)
+    || !naturalWidth
+    || !naturalHeight
+    || naturalWidth <= 0
+    || naturalHeight <= 0
+  ) {
+    return { width: gridSplitTileNodeWidth, height: gridSplitTileNodeHeight };
+  }
+
+  return {
+    width: gridSplitTileNodeWidth,
+    height: Math.max(1, Math.round((gridSplitTileNodeWidth * naturalHeight) / naturalWidth)),
+  };
 }
 
 export function getImageAdaptiveNodeSize(naturalWidth: number, naturalHeight: number) {
@@ -236,6 +278,8 @@ export function createInitialCanvasState(): CanvasState {
       model: "auto",
       size: "智能",
       count: 1,
+      videoDurationSeconds: 6,
+      videoResolution: "720p",
       status: "idle",
     },
   };
@@ -441,14 +485,74 @@ function createConfigNode(position: CanvasPoint): CanvasNodeData {
       model: "auto",
       size: "智能",
       count: 1,
+      videoDurationSeconds: 6,
+      videoResolution: "720p",
       status: "idle",
     },
   };
 }
 
 export function normalizeCanvasNode(node: CanvasNodeData): CanvasNodeData {
+  if (node.type === "image" && node.metadata?.derivativeType === "slice") {
+    const tileSize = getGridSplitTileNodeSize(node.metadata.imageNaturalWidth, node.metadata.imageNaturalHeight);
+    if (
+      node.width === tileSize.width
+      && node.height === tileSize.height
+    ) {
+      return node;
+    }
+    return {
+      ...node,
+      width: tileSize.width,
+      height: tileSize.height,
+    };
+  }
+
   if (node.type !== "config") {
     return node;
+  }
+
+  if (node.metadata?.derivativeType === "slice") {
+    const gridSplitMode = typeof node.metadata.gridSplitMode === "string" && /^[2-5]x[2-5]$/.test(node.metadata.gridSplitMode)
+      ? node.metadata.gridSplitMode
+      : "3x3";
+    const normalizedMetadata = {
+      ...node.metadata,
+      gridSplitMode,
+    };
+    if (
+      node.width >= gridSplitConfigNodeWidth
+      && node.height >= gridSplitConfigNodeHeight
+      && normalizedMetadata.gridSplitMode === node.metadata.gridSplitMode
+    ) {
+      return node;
+    }
+    return {
+      ...node,
+      width: gridSplitConfigNodeWidth,
+      height: gridSplitConfigNodeHeight,
+      metadata: normalizedMetadata,
+    };
+  }
+
+  if (node.metadata?.derivativeType === "upscale") {
+    const normalizedMetadata = {
+      ...node.metadata,
+      upscaleResolution: node.metadata.upscaleResolution === "8k" ? "4k" : node.metadata.upscaleResolution,
+    };
+    if (
+      node.width >= upscaleConfigNodeWidth
+      && node.height >= upscaleConfigNodeHeight
+      && normalizedMetadata.upscaleResolution === node.metadata.upscaleResolution
+    ) {
+      return node;
+    }
+    return {
+      ...node,
+      width: upscaleConfigNodeWidth,
+      height: upscaleConfigNodeHeight,
+      metadata: normalizedMetadata,
+    };
   }
 
   const isOversizedInlineConfig = node.width > configNodeWidth || node.height > configNodeHeight;
@@ -461,6 +565,199 @@ export function normalizeCanvasNode(node: CanvasNodeData): CanvasNodeData {
     width: configNodeWidth,
     height: configNodeHeight,
   };
+}
+
+export function addImageDerivativeNode(
+  state: CanvasState,
+  sourceNodeId: string,
+  derivativeType: CanvasImageOption,
+): CanvasState {
+  const sourceNode = state.nodes.find((node) => node.id === sourceNodeId && (node.type === "image" || node.type === "generation"));
+  if (!sourceNode) {
+    return state;
+  }
+
+  if (derivativeType !== "upscale" && derivativeType !== "slice") {
+    return state;
+  }
+
+  const existingDerivativeCount = state.connections
+    .filter((connection) => connection.fromNodeId === sourceNode.id)
+    .map((connection) => state.nodes.find((node) => node.id === connection.toNodeId))
+    .filter((node) => node?.metadata?.derivativeType === derivativeType).length;
+  const isSlice = derivativeType === "slice";
+  const nodeWidth = isSlice ? gridSplitConfigNodeWidth : upscaleConfigNodeWidth;
+  const nodeHeight = isSlice ? gridSplitConfigNodeHeight : upscaleConfigNodeHeight;
+  const node: CanvasNodeData = {
+    id: createId(isSlice ? "slice" : "upscale"),
+    type: "config",
+    title: isSlice ? "宫格切分" : "高清",
+    position: {
+      x: sourceNode.position.x + sourceNode.width + 96,
+      y: sourceNode.position.y + existingDerivativeCount * (nodeHeight + 40),
+    },
+    width: nodeWidth,
+    height: nodeHeight,
+    metadata: {
+      derivativeType,
+      sourceImageNodeId: sourceNode.id,
+      prompt: isSlice ? "将源图片按宫格切分成独立图片节点。" : "配置参数生成高清图像。",
+      ...(isSlice
+        ? {
+            gridSplitMode: "3x3" satisfies CanvasGridSplitMode,
+          }
+        : {
+            model: "gpt-image-2",
+            size: "智能",
+            upscaleResolution: "4k",
+          }),
+      count: 1,
+      status: "idle",
+    },
+  };
+  const connection: CanvasConnectionData = {
+    id: createId("connection"),
+    fromNodeId: sourceNode.id,
+    toNodeId: node.id,
+  };
+
+  return touch(withNodeSelection({
+    ...state,
+    nodes: [...state.nodes, node],
+    connections: [...state.connections, connection],
+  }, [node.id]));
+}
+
+export function appendGridSplitImageNodes(
+  state: CanvasState,
+  sourceNodeId: string,
+  payload: { mode: CanvasGridSplitMode | string; tiles: CanvasGridSplitTileInput[] },
+): CanvasState {
+  const sourceNode = state.nodes.find((node) => node.id === sourceNodeId);
+  if (!sourceNode || payload.tiles.length === 0) {
+    return state;
+  }
+
+  const previousTileIds = new Set(
+    state.nodes
+      .filter((node) => node.type === "image" && node.metadata?.derivativeType === "slice" && node.metadata.sourceImageNodeId === sourceNodeId)
+      .map((node) => node.id),
+  );
+  const tileNodeIds: string[] = [];
+  const tileSizes = payload.tiles.map((tile) => getGridSplitTileNodeSize(tile.width, tile.height));
+  const rowHeights = payload.tiles.reduce<Record<number, number>>((heights, tile, index) => {
+    heights[tile.row] = Math.max(heights[tile.row] ?? 0, tileSizes[index].height);
+    return heights;
+  }, {});
+  const rowOffsets = Object.keys(rowHeights)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .reduce<Record<number, number>>((offsets, row, index, rows) => {
+      const previousRow = rows[index - 1];
+      offsets[row] = previousRow === undefined
+        ? 0
+        : offsets[previousRow] + rowHeights[previousRow] + gridSplitTileNodeGap;
+      return offsets;
+    }, {});
+  const tileNodes = payload.tiles.map((tile, index): CanvasNodeData => {
+    const id = createId("slice-tile");
+    const tileSize = tileSizes[index];
+    tileNodeIds.push(id);
+    return {
+      id,
+      type: "image",
+      title: `宫格 ${tile.row + 1}-${tile.col + 1}`,
+      position: {
+        x: sourceNode.position.x + sourceNode.width + 96 + tile.col * (gridSplitTileNodeWidth + gridSplitTileNodeGap),
+        y: sourceNode.position.y + (rowOffsets[tile.row] ?? 0),
+      },
+      width: tileSize.width,
+      height: tileSize.height,
+      metadata: {
+        content: `宫格切分 ${payload.mode} · 第 ${index + 1} 张`,
+        imageUrl: tile.imageUrl,
+        derivativeType: "slice",
+        sourceImageNodeId: sourceNodeId,
+        status: "success",
+        ...(tile.width && tile.height
+          ? {
+              imageNaturalWidth: tile.width,
+              imageNaturalHeight: tile.height,
+            }
+          : {}),
+      },
+    };
+  });
+  const tileConnections: CanvasConnectionData[] = tileNodes.map((node) => ({
+    id: createId("connection"),
+    fromNodeId: sourceNodeId,
+    toNodeId: node.id,
+  }));
+
+  return touch(withNodeSelection({
+    ...state,
+    nodes: [
+      ...state.nodes.filter((node) => !previousTileIds.has(node.id)),
+      ...tileNodes,
+    ],
+    connections: [
+      ...state.connections.filter((connection) => !previousTileIds.has(connection.fromNodeId) && !previousTileIds.has(connection.toNodeId)),
+      ...tileConnections,
+    ],
+  }, [sourceNode.id]));
+}
+
+export function appendCroppedImageNode(
+  state: CanvasState,
+  sourceNodeId: string,
+  payload: CanvasCropImageInput,
+): CanvasState {
+  const sourceNode = state.nodes.find((node) => node.id === sourceNodeId && (node.type === "image" || node.type === "generation"));
+  if (!sourceNode || !payload.imageUrl) {
+    return state;
+  }
+
+  const existingCropCount = state.connections
+    .filter((connection) => connection.fromNodeId === sourceNode.id)
+    .map((connection) => state.nodes.find((node) => node.id === connection.toNodeId))
+    .filter((node) => node?.metadata?.derivativeType === "crop").length;
+  const imageSize = getImageAdaptiveNodeSize(payload.width ?? sourceNode.metadata?.imageNaturalWidth ?? sourceNode.width, payload.height ?? sourceNode.metadata?.imageNaturalHeight ?? sourceNode.height);
+  const node: CanvasNodeData = {
+    id: createId("crop"),
+    type: "image",
+    title: "裁剪结果",
+    position: {
+      x: sourceNode.position.x + sourceNode.width + 96,
+      y: sourceNode.position.y + existingCropCount * (imageSize.height + 40),
+    },
+    width: imageSize.width,
+    height: imageSize.height,
+    metadata: {
+      content: `裁剪 ${payload.ratio}`,
+      imageUrl: payload.imageUrl,
+      derivativeType: "crop",
+      sourceImageNodeId: sourceNode.id,
+      cropRatio: payload.ratio,
+      status: "success",
+      ...(payload.width && payload.height
+        ? {
+            imageNaturalWidth: payload.width,
+            imageNaturalHeight: payload.height,
+          }
+        : {}),
+    },
+  };
+  const connection: CanvasConnectionData = {
+    id: createId("connection"),
+    fromNodeId: sourceNode.id,
+    toNodeId: node.id,
+  };
+
+  return touch(withNodeSelection({
+    ...state,
+    nodes: [...state.nodes, node],
+    connections: [...state.connections, connection],
+  }, [node.id]));
 }
 
 export function normalizeCanvasState(state: CanvasState): CanvasState {
@@ -760,6 +1057,28 @@ export function updateNodeImageNaturalSize(
     if (node.id !== nodeId || !["generation", "image"].includes(node.type)) {
       return node;
     }
+    if (node.type === "image" && node.metadata?.derivativeType === "slice") {
+      const tileSize = getGridSplitTileNodeSize(naturalWidth, naturalHeight);
+      if (
+        node.width === tileSize.width
+        && node.height === tileSize.height
+        && node.metadata.imageNaturalWidth === naturalWidth
+        && node.metadata.imageNaturalHeight === naturalHeight
+      ) {
+        return node;
+      }
+      updated = true;
+      return {
+        ...node,
+        width: tileSize.width,
+        height: tileSize.height,
+        metadata: {
+          ...node.metadata,
+          imageNaturalWidth: naturalWidth,
+          imageNaturalHeight: naturalHeight,
+        },
+      };
+    }
     if (
       node.width === adaptiveSize.width &&
       node.height === adaptiveSize.height &&
@@ -919,26 +1238,30 @@ export function updateViewport(state: CanvasState, viewport: CanvasViewport): Ca
 
 export function appendGenerationNode(state: CanvasState, sourceNodeId: string, payload: CanvasGenerationPayload): CanvasState {
   const sourceNode = state.nodes.find((node) => node.id === sourceNodeId);
+  const isVideo = payload.mediaType === "video" || Boolean(payload.videoUrl);
   const existingGeneratedChildren = state.connections
     .filter((connection) => connection.fromNodeId === sourceNodeId)
     .map((connection) => state.nodes.find((node) => node.id === connection.toNodeId))
-    .filter((node) => node?.type === "generation" && Boolean(node.metadata?.sourceTaskId)).length;
+    .filter((node) => (node?.type === "generation" || node?.type === "video") && Boolean(node.metadata?.sourceTaskId)).length;
   const position = sourceNode
     ? { x: sourceNode.position.x + sourceNode.width + 140, y: sourceNode.position.y + 26 + existingGeneratedChildren * 260 }
     : { x: 320, y: 220 };
   const node: CanvasNodeData = {
-    id: createId("generation"),
-    type: "generation",
-    title: "AI 生图结果",
+    id: createId(isVideo ? "video" : "generation"),
+    type: isVideo ? "video" : "generation",
+    title: isVideo ? "AI 视频结果" : "AI 生图结果",
     position,
-    width: 280,
-    height: 220,
+    width: isVideo ? 320 : 280,
+    height: isVideo ? 220 : 220,
     metadata: {
       content: payload.prompt,
       imageUrl: payload.imageUrl,
+      videoUrl: payload.videoUrl,
+      mediaType: isVideo ? "video" : payload.mediaType,
+      generationMode: isVideo ? "video" : "image",
       prompt: payload.prompt,
       sourceTaskId: payload.sourceTaskId,
-      status: payload.status || (payload.imageUrl ? "success" : "idle"),
+      status: payload.status || (payload.imageUrl || payload.videoUrl ? "success" : "idle"),
       errorDetails: payload.errorDetails,
       model: payload.model,
       size: payload.size,
@@ -964,19 +1287,26 @@ export function updateGenerationNodePayload(
 ): CanvasState {
   let updated = false;
   const nodes = state.nodes.map((node) => {
-    if (node.id !== nodeId || node.type !== "generation") {
+    if (node.id !== nodeId || (node.type !== "generation" && node.type !== "video")) {
       return node;
     }
+    const isVideo = payload.mediaType === "video" || Boolean(payload.videoUrl) || node.type === "video";
+    const generationMode: "image" | "video" = isVideo ? "video" : "image";
     updated = true;
     return {
       ...node,
+      type: isVideo ? "video" : node.type,
+      title: isVideo ? "AI 视频结果" : node.title,
       metadata: {
         ...node.metadata,
         content: payload.prompt,
         imageUrl: payload.imageUrl,
+        videoUrl: payload.videoUrl,
+        mediaType: isVideo ? "video" : payload.mediaType,
+        generationMode,
         prompt: payload.prompt,
         sourceTaskId: payload.sourceTaskId,
-        status: payload.status || (payload.imageUrl ? "success" : "idle"),
+        status: payload.status || (payload.imageUrl || payload.videoUrl ? "success" : "idle"),
         errorDetails: payload.errorDetails,
         model: payload.model,
         size: payload.size,
@@ -995,7 +1325,7 @@ export function updateGenerationNodePayload(
 export function updateGenerationTaskNode(
   state: CanvasState,
   sourceTaskId: string,
-  patch: Pick<NonNullable<CanvasNodeData["metadata"]>, "imageUrl" | "status" | "errorDetails">,
+  patch: Pick<NonNullable<CanvasNodeData["metadata"]>, "imageUrl" | "status" | "errorDetails" | "videoUrl">,
 ): CanvasState {
   let updated = false;
   const nodes = state.nodes.map((node) =>
@@ -1003,17 +1333,23 @@ export function updateGenerationTaskNode(
       ? (() => {
           if (
             node.metadata.imageUrl === patch.imageUrl &&
+            node.metadata.videoUrl === patch.videoUrl &&
             node.metadata.status === patch.status &&
             node.metadata.errorDetails === patch.errorDetails
           ) {
             return node;
           }
           updated = true;
+          const isVideo = node.type === "video" || Boolean(patch.videoUrl) || node.metadata.mediaType === "video";
           return {
             ...node,
+            type: isVideo ? "video" : node.type,
+            title: isVideo ? "AI 视频结果" : node.title,
             metadata: {
               ...node.metadata,
               ...patch,
+              mediaType: isVideo ? "video" : node.metadata.mediaType,
+              generationMode: isVideo ? "video" : node.metadata.generationMode,
             },
           };
         })()
@@ -1034,7 +1370,7 @@ export function updateGenerationNodeRetrying(
 ): CanvasState {
   let updated = false;
   const nodes = state.nodes.map((node) => {
-    if (node.id !== nodeId || node.type !== "generation") {
+    if (node.id !== nodeId || (node.type !== "generation" && node.type !== "video")) {
       return node;
     }
     if (node.metadata?.retrying === retrying) {
@@ -1187,12 +1523,20 @@ export function useCanvasStore(initialStateOverride?: CanvasState) {
         applyRecordableMutation((current) => addImageNode(current, input)),
       startImageReversePrompt: (textNodeId: string) => applyRecordableMutation((current) => startImageReversePrompt(current, textNodeId)),
       addConfigNode: (position: CanvasPoint) => applyRecordableMutation((current) => addConfigNode(current, position)),
+      addImageDerivativeNode: (sourceNodeId: string, derivativeType: CanvasImageOption) =>
+        applyRecordableMutation((current) => addImageDerivativeNode(current, sourceNodeId, derivativeType)),
       addVideoNode: (position: CanvasPoint) => applyRecordableMutation((current) => addVideoNode(current, position)),
       addConnection: (fromNodeId: string, toNodeId: string) => applyRecordableMutation((current) => addConnection(current, fromNodeId, toNodeId)),
       addConnectedNode: (fromNodeId: string, nodeType: CanvasCreatableNodeType, position: CanvasPoint) =>
         applyRecordableMutation((current) => addConnectedNode(current, fromNodeId, nodeType, position)),
       appendGenerationNode: (sourceNodeId: string, payload: CanvasGenerationPayload) =>
         applyRecordableMutation((current) => appendGenerationNode(current, sourceNodeId, payload)),
+      appendGridSplitImageNodes: (
+        sourceNodeId: string,
+        payload: { mode: CanvasGridSplitMode | string; tiles: CanvasGridSplitTileInput[] },
+      ) => applyRecordableMutation((current) => appendGridSplitImageNodes(current, sourceNodeId, payload)),
+      appendCroppedImageNode: (sourceNodeId: string, payload: CanvasCropImageInput) =>
+        applyRecordableMutation((current) => appendCroppedImageNode(current, sourceNodeId, payload)),
       updateGenerationNodePayload: (nodeId: string, payload: CanvasGenerationPayload) =>
         updateCurrentState((current) => updateGenerationNodePayload(current, nodeId, payload)),
       deleteSelected: () => applyRecordableMutation((current) => deleteSelected(current)),

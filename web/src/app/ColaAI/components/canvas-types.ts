@@ -13,12 +13,21 @@ export type CanvasNodeType = "text" | "image" | "video" | "config" | "generation
 export type CanvasCreatableNodeType = Exclude<CanvasNodeType, "generation">;
 
 export type CanvasNodeStatus = "idle" | "loading" | "success" | "error";
-export type CanvasImageOption = "panorama" | "multiAngle" | "lighting" | "grid" | "upscale" | "slice";
+export type CanvasImageOption = "panorama" | "multiAngle" | "lighting" | "grid" | "upscale" | "slice" | "crop";
+export type CanvasUpscaleResolution = "1k" | "2k" | "4k";
+export type CanvasVideoResolution = "480p" | "720p" | "custom";
+export type CanvasGridSplitMode = "2x2" | "3x3" | "4x4" | "5x5";
+export type CanvasCropRatio = "original" | "1:1" | "4:3" | "3:4" | "16:9" | "9:16";
 
 export type CanvasNodeMetadata = {
   content?: string;
   imageUrl?: string;
+  videoUrl?: string;
+  mediaType?: "image" | "video" | string;
+  generationMode?: "image" | "video";
   imageOptions?: CanvasImageOption[];
+  derivativeType?: CanvasImageOption;
+  sourceImageNodeId?: string;
   prompt?: string;
   promptMode?: "optimize" | "imageReverse" | "imageToText";
   referenceImageNodeIds?: string[];
@@ -37,6 +46,13 @@ export type CanvasNodeMetadata = {
   };
   model?: "gpt-image-2" | "codex-gpt-image-2" | string;
   size?: string;
+  upscaleResolution?: CanvasUpscaleResolution | string;
+  videoDurationSeconds?: number;
+  videoResolution?: CanvasVideoResolution | string;
+  videoCustomWidth?: number;
+  videoCustomHeight?: number;
+  gridSplitMode?: CanvasGridSplitMode | string;
+  cropRatio?: CanvasCropRatio | string;
   count?: number;
   status?: CanvasNodeStatus;
   sourceTaskId?: string;
@@ -91,6 +107,8 @@ export type CanvasState = {
 export type CanvasGenerationPayload = {
   prompt: string;
   imageUrl: string;
+  videoUrl?: string;
+  mediaType?: "image" | "video";
   sourceTaskId?: string;
   status?: CanvasNodeStatus;
   errorDetails?: string;

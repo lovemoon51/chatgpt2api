@@ -11,7 +11,8 @@ from curl_cffi import requests
 from fastapi import HTTPException
 from utils.log import logger
 
-IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
+AGNES_IMAGE_MODEL = "agnes-image-2.1-flash"
+IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2", AGNES_IMAGE_MODEL}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 

@@ -34,6 +34,10 @@ class VideoGenerationTaskRequest(BaseModel):
     model: str = "agnes-video-v2.0"
     size: str | None = None
     reference_image_urls: list[str] = Field(default_factory=list)
+    duration_seconds: int | None = None
+    resolution: str | None = None
+    custom_width: int | None = None
+    custom_height: int | None = None
 
 
 class ImageTaskTimingRequest(BaseModel):
@@ -162,6 +166,10 @@ def create_router() -> APIRouter:
                 size=body.size,
                 base_url=resolve_image_base_url(request),
                 reference_image_urls=body.reference_image_urls,
+                duration_seconds=body.duration_seconds,
+                resolution=body.resolution,
+                custom_width=body.custom_width,
+                custom_height=body.custom_height,
                 acquire_usage_limit=lambda: _acquire_image_usage_limit(identity, body.model, amount=1),
             )
         except UsageLimitError as exc:

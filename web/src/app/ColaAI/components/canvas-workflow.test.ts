@@ -67,6 +67,44 @@ describe("canvas workflow helpers", () => {
     expect(settings.sourceNodeIds).toEqual(["seed-text", "seed-image", "seed-config"]);
   });
 
+  test("collects video mode and Agnes video model from config nodes", () => {
+    const state = withCustomWorkflow();
+    const videoState = {
+      ...state,
+      nodes: state.nodes.map((node) => (
+        node.id === "seed-config"
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                generationMode: "video" as const,
+                model: "agnes-video-v2.0",
+                size: "16:9",
+                count: 4,
+                videoDurationSeconds: 10,
+                videoResolution: "720p",
+              },
+            }
+          : node
+      )),
+    };
+
+    const settings = collectCanvasGenerationSettings(videoState, "seed-config", {
+      prompt: "默认提示词",
+      model: "gpt-image-2",
+      size: "1:1",
+      count: 1,
+      generationMode: "image",
+    });
+
+    expect(settings.generationMode).toBe("video");
+    expect(settings.model).toBe("agnes-video-v2.0");
+    expect(settings.size).toBe("16:9");
+    expect(settings.count).toBe(1);
+    expect(settings.videoDurationSeconds).toBe(10);
+    expect(settings.videoResolution).toBe("720p");
+  });
+
   test("walks transitive upstream nodes when selected node is a generated result", () => {
     const settings = collectCanvasGenerationSettings(withCustomWorkflow(), "seed-generation", {
       prompt: "默认提示词",

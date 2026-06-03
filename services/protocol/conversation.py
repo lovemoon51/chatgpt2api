@@ -18,6 +18,12 @@ from services.account_service import account_service
 from services.config import config
 from services.image_service import record_image_owner
 from services.openai_backend_api import ChatGPTCheckoutRequiredError, OpenAIBackendAPI
+from services.protocol.agnes_ai_image import (
+    collect_agnes_image_urls,
+    download_image_bytes as download_agnes_image_bytes,
+    is_agnes_image_model,
+    request_agnes_image,
+)
 from utils.helper import IMAGE_MODELS, extract_image_from_message_content
 from utils.log import logger
 
@@ -1427,9 +1433,70 @@ def _stream_parallel_image_outputs_with_pool(request: ConversationRequest, total
             yield output
 
 
+def stream_agnes_image_outputs(request: ConversationRequest) -> Iterator[ImageOutput]:
+    submit_started = time.time()
+    emit_image_progress(request.progress_callback, phase="submitting", label="提交中")
+    result = request_agnes_image(request)
+    urls = collect_agnes_image_urls(result)
+    emit_image_progress(
+        request.progress_callback,
+        phase="downloading",
+        label="下载中",
+        timing_key="upstream_submit_ms",
+        duration_ms=elapsed_ms(submit_started),
+    )
+    if not urls:
+        message = str(result.get("message") or "Agnes AI did not return image URLs.")
+        yield ImageOutput(kind="message", model=request.model, index=1, total=1, text=message)
+        return
+
+    download_started = time.time()
+    image_items = [
+        {"b64_json": base64.b64encode(image_data).decode("ascii")}
+        for image_data in download_agnes_image_bytes(urls)
+    ]
+    emit_image_progress(
+        request.progress_callback,
+        phase="saving",
+        label="保存中",
+        timing_key="download_image_ms",
+        duration_ms=elapsed_ms(download_started),
+    )
+    save_started = time.time()
+    created = result.get("created")
+    data = format_image_result(
+        image_items,
+        request.prompt,
+        request.response_format,
+        request.base_url,
+        int(created) if isinstance(created, (int, float)) else int(time.time()),
+        owner_identity=request.owner_identity,
+        model=request.model,
+        size=request.size,
+        mode=request.mode or ("edit" if request.images else "generate"),
+        source_task_id=request.source_task_id,
+        public=request.public,
+    )["data"]
+    emit_image_progress(
+        request.progress_callback,
+        phase="saving",
+        label="保存中",
+        timing_key="save_image_ms",
+        duration_ms=elapsed_ms(save_started),
+    )
+    if data:
+        yield ImageOutput(kind="result", model=request.model, index=1, total=1, data=data)
+        return
+    yield ImageOutput(kind="message", model=request.model, index=1, total=1, text="Agnes AI image response could not be saved.")
+
+
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     if str(request.model or "").strip() not in IMAGE_MODELS:
         raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(IMAGE_MODELS))
+
+    if is_agnes_image_model(request.model):
+        yield from stream_agnes_image_outputs(request)
+        return
 
     account_service.begin_image_request()
     try:

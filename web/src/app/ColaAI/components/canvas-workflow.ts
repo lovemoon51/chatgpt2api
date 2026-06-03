@@ -10,7 +10,13 @@ export type CanvasGenerationSettings = {
   prompt: string;
   model: string;
   size: string;
+  resolution?: string;
+  videoDurationSeconds?: number;
+  videoResolution?: string;
+  videoCustomWidth?: number;
+  videoCustomHeight?: number;
   count: number;
+  generationMode?: "image" | "video";
   referenceImages: CanvasReferenceImage[];
   sourceNodeIds: string[];
 };
@@ -29,7 +35,7 @@ export type CanvasUpstreamSummary = {
   promptPreview: string;
 };
 
-type BaseGenerationSettings = Pick<CanvasGenerationSettings, "prompt" | "model" | "size" | "count">;
+type BaseGenerationSettings = Pick<CanvasGenerationSettings, "prompt" | "model" | "size" | "count" | "generationMode" | "videoDurationSeconds" | "videoResolution" | "videoCustomWidth" | "videoCustomHeight">;
 
 function getPromptPart(node: CanvasNodeData) {
   if (node.type === "text") {
@@ -101,12 +107,19 @@ export function collectCanvasGenerationSettings(
   });
   const configNodes = sourceNodes.filter((node) => node.type === "config");
   const config = configNodes.at(-1);
+  const generationMode = config?.metadata?.generationMode || fallback.generationMode || "image";
 
   return {
     prompt,
     model: config?.metadata?.model || fallback.model,
     size: config?.metadata?.size || fallback.size,
-    count: config?.metadata?.count || fallback.count,
+    resolution: config?.metadata?.upscaleResolution,
+    videoDurationSeconds: config?.metadata?.videoDurationSeconds ?? fallback.videoDurationSeconds,
+    videoResolution: config?.metadata?.videoResolution ?? fallback.videoResolution,
+    videoCustomWidth: config?.metadata?.videoCustomWidth ?? fallback.videoCustomWidth,
+    videoCustomHeight: config?.metadata?.videoCustomHeight ?? fallback.videoCustomHeight,
+    count: generationMode === "video" ? 1 : config?.metadata?.count || fallback.count,
+    generationMode,
     referenceImages,
     sourceNodeIds: sourceNodes.map((node) => node.id),
   };

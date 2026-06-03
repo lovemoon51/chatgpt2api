@@ -29,6 +29,7 @@ from services.image_service import (
 )
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
+from services.protocol.agnes_ai_image import test_agnes_ai_connection
 from services.proxy_service import test_proxy
 from services.auth_service import auth_service
 from services.register_service import register_service
@@ -44,6 +45,14 @@ class AIReviewSettingsRequest(BaseModel):
     api_key: str | None = None
     model: str | None = None
     prompt: str | None = None
+
+
+class AgnesAISettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    api_key: str | None = None
+    api_keys: list[dict[str, object]] | None = None
+    base_url: str | None = None
 
 
 class BackupIncludeRequest(BaseModel):
@@ -107,6 +116,7 @@ class SettingsUpdateRequest(BaseModel):
     global_system_prompt: str | None = None
     sensitive_words: list[str] | None = None
     ai_review: AIReviewSettingsRequest | None = None
+    agnes_ai: AgnesAISettingsRequest | None = None
     refresh_account_interval_minute: int | str | None = None
     image_retention_days: int | str | None = None
     image_poll_timeout_secs: int | str | None = None
@@ -122,6 +132,12 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class AgnesAITestRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    agnes_ai: AgnesAISettingsRequest | None = None
 
 
 class LoginRequest(BaseModel):
@@ -178,6 +194,9 @@ AUDITED_SETTING_FIELDS = {
     "ai_review.api_key",
     "ai_review.model",
     "ai_review.prompt",
+    "agnes_ai.api_key",
+    "agnes_ai.api_keys",
+    "agnes_ai.base_url",
     "auto_remove_invalid_accounts",
     "auto_remove_rate_limited_accounts",
     "backup.enabled",
@@ -197,6 +216,8 @@ AUDITED_SETTING_FIELDS = {
 
 SECRET_SETTING_FIELDS = {
     "ai_review.api_key",
+    "agnes_ai.api_key",
+    "agnes_ai.api_keys",
     "backup.secret_access_key",
     "backup.passphrase",
 }
@@ -523,6 +544,14 @@ def create_router(app_version: str) -> APIRouter:
         if not candidate:
             raise HTTPException(status_code=400, detail={"error": "proxy url is required"})
         return {"result": await run_in_threadpool(test_proxy, candidate)}
+
+    @router.post("/api/agnes-ai/test")
+    async def test_agnes_ai_endpoint(body: AgnesAITestRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        settings = None
+        if body.agnes_ai is not None:
+            settings = body.agnes_ai.model_dump(mode="python", exclude_unset=True)
+        return {"result": await run_in_threadpool(test_agnes_ai_connection, settings)}
 
     @router.get("/api/storage/info")
     async def get_storage_info(authorization: str | None = Header(default=None)):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import queue
@@ -10,13 +11,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.image_metadata_storage import get_image_metadata_storage
 from services.log_service import LOG_TYPE_CALL, log_service
-from services.protocol.conversation import no_image_result_message
+from services.protocol.conversation import no_image_result_message, save_image_bytes
 from services.protocol import agnes_ai_video, openai_v1_image_edit, openai_v1_image_generations
+from services.signed_url_service import generate_signed_image_url
 from services.system_status_service import worker_error, worker_heartbeat, worker_started, worker_stopped
 
 TASK_STATUS_QUEUED = "queued"
@@ -115,6 +118,103 @@ def _timestamp(value: object) -> float:
 
 def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
+
+
+def _video_duration_seconds(value: object) -> int:
+    try:
+        duration = int(value)
+    except (TypeError, ValueError):
+        duration = agnes_ai_video.DEFAULT_VIDEO_DURATION_SECONDS
+    if duration not in agnes_ai_video.SUPPORTED_VIDEO_DURATIONS:
+        return agnes_ai_video.DEFAULT_VIDEO_DURATION_SECONDS
+    return duration
+
+
+def _video_resolution(value: object) -> str:
+    resolution = _clean(value).lower()
+    if resolution not in agnes_ai_video.SUPPORTED_VIDEO_RESOLUTIONS:
+        return agnes_ai_video.DEFAULT_VIDEO_RESOLUTION
+    return resolution
+
+
+def _is_localhost_url(value: str) -> bool:
+    parsed = urlparse(value)
+    hostname = (parsed.hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def _is_public_remote_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not _is_localhost_url(value)
+
+
+def _image_path_from_url(value: str, base_url: str) -> str:
+    stripped = value.strip()
+    parsed = urlparse(stripped)
+    path = parsed.path if parsed.scheme in {"http", "https"} else stripped
+    if parsed.scheme in {"http", "https"}:
+        base = urlparse(base_url)
+        if parsed.netloc and base.netloc and parsed.netloc != base.netloc:
+            return ""
+    if path.startswith("/images/"):
+        return path[len("/images/"):].lstrip("/")
+    if path.startswith("images/"):
+        return path[len("images/"):].lstrip("/")
+    return ""
+
+
+def _save_data_url_as_video_reference(value: str, payload: dict[str, Any], base_url: str) -> str:
+    header, separator, encoded = value.partition(",")
+    if not separator or not header.lower().startswith("data:image/"):
+        raise RuntimeError("视频参考图需要公网可访问的图片地址。请配置公网 base_url 或使用公网图片节点。")
+    try:
+        image_data = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise RuntimeError("视频参考图数据无效，请重新上传参考图片。") from exc
+    if not image_data:
+        raise RuntimeError("视频参考图数据为空，请重新上传参考图片。")
+    saved_url = save_image_bytes(
+        image_data,
+        base_url,
+        payload.get("owner_identity") if isinstance(payload.get("owner_identity"), dict) else None,
+        prompt=_clean(payload.get("prompt")),
+        model=_clean(payload.get("model")),
+        size=_clean(payload.get("size")) or None,
+        mode="video-reference",
+        source_task_id=_clean(payload.get("source_task_id")),
+    )
+    image_path = _image_path_from_url(saved_url, base_url)
+    if not image_path:
+        raise RuntimeError("视频参考图保存失败，请稍后重试。")
+    return generate_signed_image_url(image_path, base_url, expires_in=3600)
+
+
+def _prepare_video_reference_image_urls(payload: dict[str, Any], base_url: str) -> list[str]:
+    urls = payload.get("reference_image_urls")
+    if not isinstance(urls, list):
+        return []
+    normalized_base_url = _clean(base_url).rstrip("/")
+    prepared: list[str] = []
+    for item in urls:
+        value = _clean(item)
+        if not value:
+            continue
+        if value.lower().startswith("data:image/"):
+            if not normalized_base_url or _is_localhost_url(normalized_base_url):
+                raise RuntimeError("视频参考图需要公网可访问的图片地址。请配置公网 base_url 或使用公网图片节点。")
+            prepared.append(_save_data_url_as_video_reference(value, payload, normalized_base_url))
+            continue
+        image_path = _image_path_from_url(value, normalized_base_url)
+        if image_path:
+            if not normalized_base_url or _is_localhost_url(normalized_base_url):
+                raise RuntimeError("视频参考图需要公网可访问的图片地址。请配置公网 base_url 或使用公网图片节点。")
+            prepared.append(generate_signed_image_url(image_path, normalized_base_url, expires_in=3600))
+            continue
+        if _is_public_remote_url(value):
+            prepared.append(value)
+            continue
+        raise RuntimeError("视频参考图需要公网可访问的图片地址。请配置公网 base_url 或使用公网图片节点。")
+    return prepared
 
 
 def _owner_id(identity: dict[str, object]) -> str:
@@ -243,6 +343,10 @@ def _public_task(task: dict[str, Any], base_url: str = "") -> dict[str, Any]:
         "model": task.get("model"),
         "size": task.get("size"),
         "resolution": task.get("resolution"),
+        "video_duration_seconds": _video_duration_seconds(task.get("video_duration_seconds")) if task.get("mode") == "video" else None,
+        "video_resolution": _video_resolution(task.get("video_resolution") or task.get("resolution")) if task.get("mode") == "video" else None,
+        "video_custom_width": task.get("video_custom_width"),
+        "video_custom_height": task.get("video_custom_height"),
         "media_type": task.get("media_type") or ("video" if task.get("mode") == "video" else "image"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
@@ -406,6 +510,10 @@ class ImageTaskService:
         size: str | None,
         base_url: str,
         reference_image_urls: list[str] | None = None,
+        duration_seconds: int | None = None,
+        resolution: str | None = None,
+        custom_width: int | None = None,
+        custom_height: int | None = None,
         release_usage_limit: Callable[[], None] | None = None,
         acquire_usage_limit: Callable[[], Callable[[], None]] | None = None,
     ) -> dict[str, Any]:
@@ -414,6 +522,10 @@ class ImageTaskService:
             "model": model,
             "size": size,
             "reference_image_urls": list(reference_image_urls or []),
+            "duration_seconds": _video_duration_seconds(duration_seconds),
+            "resolution": _video_resolution(resolution),
+            "custom_width": custom_width,
+            "custom_height": custom_height,
             "base_url": base_url,
             "owner_identity": dict(identity),
             "source_task_id": client_task_id,
@@ -658,6 +770,10 @@ class ImageTaskService:
             "model": _clean(payload.get("model"), "gpt-image-2"),
             "size": _clean(payload.get("size")),
             "resolution": _clean(payload.get("resolution")),
+            "video_duration_seconds": _video_duration_seconds(payload.get("duration_seconds")) if mode == "video" else None,
+            "video_resolution": _video_resolution(payload.get("resolution")) if mode == "video" else "",
+            "video_custom_width": payload.get("custom_width") if mode == "video" else None,
+            "video_custom_height": payload.get("custom_height") if mode == "video" else None,
             "created_at": now,
             "updated_at": now,
             "queued_at": now,
@@ -795,6 +911,10 @@ class ImageTaskService:
         try:
             if job.mode == "video":
                 handler = self.video_handler
+                job.payload["reference_image_urls"] = _prepare_video_reference_image_urls(
+                    job.payload,
+                    _clean(job.payload.get("base_url")),
+                )
             else:
                 handler = self.edit_handler if job.mode == "edit" else self.generation_handler
             progress_callback = self._make_progress_callback(key, started)
@@ -1059,6 +1179,11 @@ class ImageTaskService:
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
+            if task["mode"] == "video":
+                task["video_duration_seconds"] = _video_duration_seconds(item.get("video_duration_seconds"))
+                task["video_resolution"] = _video_resolution(item.get("video_resolution") or item.get("resolution"))
+                task["video_custom_width"] = item.get("video_custom_width")
+                task["video_custom_height"] = item.get("video_custom_height")
             task["phase_label"] = _clean(item.get("phase_label")) or _clean(item.get("label")) or _phase_label(task["phase"])
             for key in ("queued_at", "started_at", "finished_at"):
                 value = _clean(item.get(key))
@@ -1101,7 +1226,8 @@ class ImageTaskService:
             if task.get("status") in UNFINISHED_STATUSES:
                 task["status"] = TASK_STATUS_ERROR
                 task.update(_phase_updates(TASK_PHASE_ERROR, _task_timings(task)))
-                task["error"] = "服务已重启，未完成的图片任务已中断"
+                media_label = "视频" if task.get("mode") == "video" else "图片"
+                task["error"] = f"服务已重启，未完成的{media_label}任务已中断"
                 task["updated_at"] = _now_iso()
                 changed = True
         return changed

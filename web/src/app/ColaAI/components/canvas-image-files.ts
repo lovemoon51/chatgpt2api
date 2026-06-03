@@ -21,7 +21,7 @@ export async function readCanvasImageFile(file: File): Promise<CanvasImageFilePa
   const imageUrl = typeof FileReader === "undefined"
     ? await readFileWithArrayBuffer(file)
     : await readFileWithFileReader(file);
-  const title = file.name || "图片节点";
+  const title = "图片节点";
 
   return {
     imageUrl,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { getUnauthorizedRedirectPath, getUnauthorizedRedirectPlan } from "./request";
+import { getAuthFailureRedirectPlan, getUnauthorizedRedirectPath, getUnauthorizedRedirectPlan } from "./request";
 
 describe("unauthorized redirect routing", () => {
   test("keeps ColaAI unauthorized redirects inside ColaAI auth", () => {
@@ -28,6 +28,27 @@ describe("unauthorized redirect routing", () => {
     expect(getUnauthorizedRedirectPlan("/studio")).toEqual({
       redirectPath: "/login",
       clearColaAuth: false,
+    });
+  });
+
+  test("redirects management permission failures back to admin login", () => {
+    expect(getAuthFailureRedirectPlan(403, "/settings")).toEqual({
+      redirectPath: "/login",
+      clearColaAuth: false,
+      clearMainAuth: true,
+    });
+    expect(getAuthFailureRedirectPlan(403, "/accounts")).toEqual({
+      redirectPath: "/login",
+      clearColaAuth: false,
+      clearMainAuth: true,
+    });
+  });
+
+  test("does not redirect ColaAI permission failures to admin login", () => {
+    expect(getAuthFailureRedirectPlan(403, "/ColaAI")).toEqual({
+      redirectPath: "",
+      clearColaAuth: false,
+      clearMainAuth: false,
     });
   });
 });

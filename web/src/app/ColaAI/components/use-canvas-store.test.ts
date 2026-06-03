@@ -5,7 +5,10 @@ import {
   addConfigNode,
   addConnectedNode,
   addConnection,
+  addImageDerivativeNode,
   addImageNode,
+  appendCroppedImageNode,
+  appendGridSplitImageNodes,
   startImageReversePrompt,
   startImageToText,
   addTextNode,
@@ -23,6 +26,7 @@ import {
   loadCanvasState,
   moveNode,
   moveSelectedNodes,
+  normalizeCanvasNode,
   nudgeSelectedNodes,
   renameNode,
   saveCanvasState,
@@ -114,6 +118,256 @@ describe("use-canvas-store helpers", () => {
     expect(configNode.metadata?.size).toBe("智能");
     expect(configNode.metadata?.count).toBe(1);
     expect(connected.connections.some((connection) => connection.fromNodeId === imageNode.id && connection.toNodeId === configNode.id)).toBe(true);
+  });
+
+  test("creates a right-side GPT upscale config node from an image node", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const updated = addImageDerivativeNode(state, imageNode.id, "upscale");
+    const upscaleNode = updated.nodes.at(-1)!;
+
+    expect(upscaleNode.type).toBe("config");
+    expect(upscaleNode.title).toBe("高清");
+    expect(upscaleNode.position.x).toBe(imageNode.position.x + imageNode.width + 96);
+    expect(upscaleNode.position.y).toBe(imageNode.position.y);
+    expect(upscaleNode.metadata?.derivativeType).toBe("upscale");
+    expect(upscaleNode.metadata?.model).toBe("gpt-image-2");
+    expect(upscaleNode.metadata?.upscaleResolution).toBe("4k");
+    expect(upscaleNode.metadata?.sourceImageNodeId).toBe(imageNode.id);
+    expect(updated.connections.some((connection) => connection.fromNodeId === imageNode.id && connection.toNodeId === upscaleNode.id)).toBe(true);
+    expect(updated.selectedNodeIds).toEqual([upscaleNode.id]);
+  });
+
+  test("creates a right-side grid split config node from an image node", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const updated = addImageDerivativeNode(state, imageNode.id, "slice");
+    const splitNode = updated.nodes.at(-1)!;
+
+    expect(splitNode.type).toBe("config");
+    expect(splitNode.title).toBe("宫格切分");
+    expect(splitNode.position.x).toBe(imageNode.position.x + imageNode.width + 96);
+    expect(splitNode.position.y).toBe(imageNode.position.y);
+    expect(splitNode.metadata?.derivativeType).toBe("slice");
+    expect(splitNode.metadata?.gridSplitMode).toBe("3x3");
+    expect(splitNode.metadata?.sourceImageNodeId).toBe(imageNode.id);
+    expect(updated.connections.some((connection) => connection.fromNodeId === imageNode.id && connection.toNodeId === splitNode.id)).toBe(true);
+    expect(updated.selectedNodeIds).toEqual([splitNode.id]);
+  });
+
+  test("appends a cropped image node without replacing the source image", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const updated = appendCroppedImageNode(state, imageNode.id, {
+      imageUrl: "data:image/png;base64,MA==",
+      ratio: "1:1",
+      width: 512,
+      height: 512,
+    });
+    const cropNode = updated.nodes.at(-1)!;
+
+    expect(cropNode.type).toBe("image");
+    expect(cropNode.title).toBe("裁剪结果");
+    expect(cropNode.position.x).toBe(imageNode.position.x + imageNode.width + 96);
+    expect(cropNode.position.y).toBe(imageNode.position.y);
+    expect(cropNode.metadata?.derivativeType).toBe("crop");
+    expect(cropNode.metadata?.sourceImageNodeId).toBe(imageNode.id);
+    expect(cropNode.metadata?.cropRatio).toBe("1:1");
+    expect(cropNode.metadata?.imageUrl).toBe("data:image/png;base64,MA==");
+    expect(state.nodes.find((node) => node.id === imageNode.id)?.metadata?.imageUrl).toBe(imageNode.metadata?.imageUrl);
+    expect(updated.connections.some((connection) => connection.fromNodeId === imageNode.id && connection.toNodeId === cropNode.id)).toBe(true);
+    expect(updated.selectedNodeIds).toEqual([cropNode.id]);
+  });
+
+  test("appends grid split tiles as connected image nodes laid out in a grid", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const withSplitNode = addImageDerivativeNode(state, imageNode.id, "slice");
+    const splitNode = withSplitNode.nodes.at(-1)!;
+    const updated = appendGridSplitImageNodes(withSplitNode, splitNode.id, {
+      mode: "2x2",
+      tiles: [
+        { imageUrl: "data:image/png;base64,MA==", row: 0, col: 0 },
+        { imageUrl: "data:image/png;base64,MQ==", row: 0, col: 1 },
+        { imageUrl: "data:image/png;base64,Mg==", row: 1, col: 0 },
+        { imageUrl: "data:image/png;base64,Mw==", row: 1, col: 1 },
+      ],
+    });
+    const tileNodes = updated.nodes.filter((node) => node.metadata?.derivativeType === "slice" && node.type === "image");
+
+    expect(tileNodes).toHaveLength(4);
+    expect(tileNodes.map((node) => node.title)).toEqual(["宫格 1-1", "宫格 1-2", "宫格 2-1", "宫格 2-2"]);
+    expect(tileNodes.map((node) => node.metadata?.imageUrl)).toEqual([
+      "data:image/png;base64,MA==",
+      "data:image/png;base64,MQ==",
+      "data:image/png;base64,Mg==",
+      "data:image/png;base64,Mw==",
+    ]);
+    expect(tileNodes[0].position.x).toBe(splitNode.position.x + splitNode.width + 96);
+    expect(tileNodes[1].position.x).toBeGreaterThan(tileNodes[0].position.x);
+    expect(tileNodes[2].position.y).toBeGreaterThan(tileNodes[0].position.y);
+    expect(updated.connections.filter((connection) => connection.fromNodeId === splitNode.id && tileNodes.some((node) => node.id === connection.toNodeId))).toHaveLength(4);
+    expect(updated.selectedNodeIds).toEqual([splitNode.id]);
+  });
+
+  test("updates grid split tile nodes to the sliced image aspect ratio after image load", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const withSplitNode = addImageDerivativeNode(state, imageNode.id, "slice");
+    const splitNode = withSplitNode.nodes.at(-1)!;
+    const withTiles = appendGridSplitImageNodes(withSplitNode, splitNode.id, {
+      mode: "2x2",
+      tiles: [
+        { imageUrl: "data:image/png;base64,MA==", row: 0, col: 0 },
+      ],
+    });
+    const tileNode = withTiles.nodes.find((node) => node.type === "image" && node.metadata?.derivativeType === "slice")!;
+    const resized = updateNodeImageNaturalSize(withTiles, tileNode.id, 1536, 512);
+    const resizedTile = resized.nodes.find((node) => node.id === tileNode.id)!;
+
+    expect(resizedTile.width).toBe(160);
+    expect(resizedTile.height).toBe(53);
+    expect(resizedTile.metadata?.imageNaturalWidth).toBe(1536);
+    expect(resizedTile.metadata?.imageNaturalHeight).toBe(512);
+  });
+
+  test("sizes grid split tile nodes to the sliced image aspect ratio", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const withSplitNode = addImageDerivativeNode(state, imageNode.id, "slice");
+    const splitNode = withSplitNode.nodes.at(-1)!;
+    const updated = appendGridSplitImageNodes(withSplitNode, splitNode.id, {
+      mode: "2x2",
+      tiles: [
+        { imageUrl: "data:image/png;base64,MA==", row: 0, col: 0, width: 320, height: 180 },
+        { imageUrl: "data:image/png;base64,MQ==", row: 0, col: 1, width: 320, height: 180 },
+        { imageUrl: "data:image/png;base64,Mg==", row: 1, col: 0, width: 320, height: 180 },
+        { imageUrl: "data:image/png;base64,Mw==", row: 1, col: 1, width: 320, height: 180 },
+      ],
+    });
+    const tileNodes = updated.nodes.filter((node) => node.metadata?.derivativeType === "slice" && node.type === "image");
+
+    expect(tileNodes.map((node) => [node.width, node.height])).toEqual([
+      [160, 90],
+      [160, 90],
+      [160, 90],
+      [160, 90],
+    ]);
+    expect(tileNodes[2].position.y).toBe(tileNodes[0].position.y + 90 + 18);
+    expect(tileNodes[3].position.y).toBe(tileNodes[1].position.y + 90 + 18);
+  });
+
+  test("normalizes stored grid split tile image nodes to the sliced image aspect ratio", () => {
+    const state = createInitialCanvasState();
+    const legacyTileNode = {
+      ...state.nodes.find((node) => node.id === "seed-image")!,
+      id: "legacy-slice-tile",
+      title: "宫格 1-1",
+      width: 420,
+      height: 158,
+      metadata: {
+        imageUrl: "data:image/png;base64,MA==",
+        derivativeType: "slice" as const,
+        sourceImageNodeId: "slice-config",
+        imageNaturalWidth: 1536,
+        imageNaturalHeight: 576,
+      },
+    };
+    const normalized = normalizeCanvasNode(legacyTileNode);
+
+    expect(normalized.width).toBe(160);
+    expect(normalized.height).toBe(60);
+    expect(normalized.metadata?.imageNaturalWidth).toBe(1536);
+    expect(normalized.metadata?.imageNaturalHeight).toBe(576);
+  });
+
+  test("replaces previous grid split tiles from the same split node", () => {
+    const state = createInitialCanvasState();
+    const imageNode = state.nodes.find((node) => node.id === "seed-image")!;
+    const withSplitNode = addImageDerivativeNode(state, imageNode.id, "slice");
+    const splitNode = withSplitNode.nodes.at(-1)!;
+    const firstSplit = appendGridSplitImageNodes(withSplitNode, splitNode.id, {
+      mode: "2x2",
+      tiles: [
+        { imageUrl: "data:image/png;base64,MA==", row: 0, col: 0 },
+        { imageUrl: "data:image/png;base64,MQ==", row: 0, col: 1 },
+        { imageUrl: "data:image/png;base64,Mg==", row: 1, col: 0 },
+        { imageUrl: "data:image/png;base64,Mw==", row: 1, col: 1 },
+      ],
+    });
+    const secondSplit = appendGridSplitImageNodes(firstSplit, splitNode.id, {
+      mode: "3x3",
+      tiles: [
+        { imageUrl: "data:image/png;base64,MTA=", row: 0, col: 0 },
+        { imageUrl: "data:image/png;base64,MTE=", row: 0, col: 1 },
+        { imageUrl: "data:image/png;base64,MTI=", row: 0, col: 2 },
+        { imageUrl: "data:image/png;base64,MTM=", row: 1, col: 0 },
+        { imageUrl: "data:image/png;base64,MTQ=", row: 1, col: 1 },
+        { imageUrl: "data:image/png;base64,MTU=", row: 1, col: 2 },
+        { imageUrl: "data:image/png;base64,MTY=", row: 2, col: 0 },
+        { imageUrl: "data:image/png;base64,MTc=", row: 2, col: 1 },
+        { imageUrl: "data:image/png;base64,MTg=", row: 2, col: 2 },
+      ],
+    });
+    const tileNodes = secondSplit.nodes.filter((node) => node.metadata?.derivativeType === "slice" && node.type === "image");
+
+    expect(tileNodes).toHaveLength(9);
+    expect(tileNodes.map((node) => node.title)).toEqual([
+      "宫格 1-1",
+      "宫格 1-2",
+      "宫格 1-3",
+      "宫格 2-1",
+      "宫格 2-2",
+      "宫格 2-3",
+      "宫格 3-1",
+      "宫格 3-2",
+      "宫格 3-3",
+    ]);
+    expect(tileNodes.map((node) => node.metadata?.imageUrl)).not.toContain("data:image/png;base64,MA==");
+    expect(secondSplit.connections.filter((connection) => connection.fromNodeId === splitNode.id && tileNodes.some((node) => node.id === connection.toNodeId))).toHaveLength(9);
+  });
+
+  test("normalizes stored 8k upscale config nodes to 4k", () => {
+    const state = createInitialCanvasState();
+    const legacyUpscaleNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      metadata: {
+        derivativeType: "upscale" as const,
+        model: "gpt-image-2",
+        upscaleResolution: "8k",
+      },
+    };
+    const normalized = normalizeCanvasNode(legacyUpscaleNode);
+
+    expect(normalized.metadata?.upscaleResolution).toBe("4k");
+  });
+
+  test("keeps stored 5x5 grid split config nodes during normalization", () => {
+    const state = createInitialCanvasState();
+    const gridSplitNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      metadata: {
+        derivativeType: "slice" as const,
+        gridSplitMode: "5x5" as const,
+      },
+    };
+    const normalized = normalizeCanvasNode(gridSplitNode);
+
+    expect(normalized.metadata?.gridSplitMode).toBe("5x5");
+  });
+
+  test("keeps stored custom grid split config nodes during normalization", () => {
+    const state = createInitialCanvasState();
+    const gridSplitNode = {
+      ...state.nodes.find((node) => node.id === "seed-config")!,
+      metadata: {
+        derivativeType: "slice" as const,
+        gridSplitMode: "4x3",
+      },
+    };
+    const normalized = normalizeCanvasNode(gridSplitNode);
+
+    expect(normalized.metadata?.gridSplitMode).toBe("4x3");
   });
 
   test("updates config node generation choices inline", () => {
@@ -225,6 +479,32 @@ describe("use-canvas-store helpers", () => {
     expect(resultNode.metadata?.model).toBe("gpt-image-2");
     expect(resultNode.metadata?.size).toBe("1:1");
     expect(resultNode.metadata?.attempt).toBe(1);
+    expect(generated.connections.some((connection) => connection.fromNodeId === configNode.id && connection.toNodeId === resultNode.id)).toBe(true);
+    expect(generated.selectedNodeIds).toEqual([resultNode.id]);
+  });
+
+  test("appends video result nodes with a connection", () => {
+    const state = createInitialCanvasState();
+    const configNode = state.nodes.find((node) => node.type === "config")!;
+    const generated = appendGenerationNode(state, configNode.id, {
+      imageUrl: "",
+      videoUrl: "https://cdn.example.test/result.mp4",
+      mediaType: "video",
+      prompt: "镜头推进产品展示",
+      sourceTaskId: "video-task-1",
+      model: "agnes-video-v2.0",
+      size: "16:9",
+      status: "loading",
+      attempt: 1,
+    });
+    const resultNode = generated.nodes.at(-1)!;
+
+    expect(resultNode.type).toBe("video");
+    expect(resultNode.title).toBe("AI 视频结果");
+    expect(resultNode.metadata?.videoUrl).toBe("https://cdn.example.test/result.mp4");
+    expect(resultNode.metadata?.mediaType).toBe("video");
+    expect(resultNode.metadata?.generationMode).toBe("video");
+    expect(resultNode.metadata?.sourceTaskId).toBe("video-task-1");
     expect(generated.connections.some((connection) => connection.fromNodeId === configNode.id && connection.toNodeId === resultNode.id)).toBe(true);
     expect(generated.selectedNodeIds).toEqual([resultNode.id]);
   });
@@ -364,6 +644,29 @@ describe("use-canvas-store helpers", () => {
     expect(resultNode.metadata?.imageUrl).toBe("/api/images/result.png");
   });
 
+  test("updates video task nodes after polling", () => {
+    const state = createInitialCanvasState();
+    const configNode = state.nodes.find((node) => node.type === "config")!;
+    const pending = appendGenerationNode(state, configNode.id, {
+      imageUrl: "",
+      videoUrl: "",
+      mediaType: "video",
+      prompt: "镜头推进产品展示",
+      sourceTaskId: "video-task-1",
+      status: "loading",
+    });
+    const updated = updateGenerationTaskNode(pending, "video-task-1", {
+      imageUrl: "",
+      videoUrl: "https://cdn.example.test/result.mp4",
+      status: "success",
+    });
+    const resultNode = updated.nodes.find((node) => node.metadata?.sourceTaskId === "video-task-1")!;
+
+    expect(resultNode.type).toBe("video");
+    expect(resultNode.metadata?.status).toBe("success");
+    expect(resultNode.metadata?.videoUrl).toBe("https://cdn.example.test/result.mp4");
+  });
+
   test("keeps state reference when generation polling returns the same payload", () => {
     const state = createInitialCanvasState();
     const configNode = state.nodes.find((node) => node.type === "config")!;
@@ -453,7 +756,7 @@ describe("use-canvas-store helpers", () => {
     expect(loaded?.title).toBe("未命名画布");
   });
 
-  test("normalizes stored config nodes to the compact inline generation card size", () => {
+  test("normalizes stored config nodes to the inline generation card size", () => {
     const storage = createMemoryStorage();
     const state = createInitialCanvasState();
     const legacyState = {
@@ -470,7 +773,7 @@ describe("use-canvas-store helpers", () => {
     const configNode = loaded?.nodes.find((node) => node.type === "config");
 
     expect(configNode?.width).toBe(430);
-    expect(configNode?.height).toBe(260);
+    expect(configNode?.height).toBe(300);
   });
 
   test("undoes and redoes recordable canvas history mutations", () => {

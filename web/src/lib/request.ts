@@ -9,6 +9,12 @@ type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
 };
 
+type AuthFailureRedirectPlan = {
+    redirectPath: string;
+    clearColaAuth: boolean;
+    clearMainAuth: boolean;
+};
+
 type ErrorPayload = {
     detail?: string | { error?: string | { message?: string; code?: string; type?: string } };
     error?: string | { message?: string; code?: string; type?: string };
@@ -50,6 +56,28 @@ export function getUnauthorizedRedirectPlan(pathname: string) {
     return {redirectPath: "/login", clearColaAuth: false};
 }
 
+export function getAuthFailureRedirectPlan(status: number | undefined, pathname: string): AuthFailureRedirectPlan {
+    if (status === 401) {
+        const plan = getUnauthorizedRedirectPlan(pathname);
+        return {
+            ...plan,
+            clearMainAuth: Boolean(plan.redirectPath),
+        };
+    }
+    if (status === 403 && pathname !== "/ColaAI" && !pathname.startsWith("/ColaAI/") && pathname !== "/login" && !pathname.startsWith("/login/")) {
+        return {
+            redirectPath: "/login",
+            clearColaAuth: false,
+            clearMainAuth: true,
+        };
+    }
+    return {
+        redirectPath: "",
+        clearColaAuth: false,
+        clearMainAuth: false,
+    };
+}
+
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
     const authKey = await getStoredAuthKey();
@@ -68,10 +96,12 @@ request.interceptors.response.use(
     async (error: AxiosError<ErrorPayload>) => {
         const status = error.response?.status;
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
-        if (status === 401 && shouldRedirect && typeof window !== "undefined") {
-            const redirectPlan = getUnauthorizedRedirectPlan(window.location.pathname);
+        if ((status === 401 || status === 403) && shouldRedirect && typeof window !== "undefined") {
+            const redirectPlan = getAuthFailureRedirectPlan(status, window.location.pathname);
             if (redirectPlan.redirectPath) {
-                await clearStoredAuthSession();
+                if (redirectPlan.clearMainAuth) {
+                    await clearStoredAuthSession();
+                }
                 if (redirectPlan.clearColaAuth) {
                     await clearStoredColaAuthSession();
                 }

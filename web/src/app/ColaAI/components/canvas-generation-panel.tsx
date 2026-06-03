@@ -11,6 +11,11 @@ type CanvasGenerationSettings = {
   model: string;
   size: string;
   count: number;
+  generationMode?: "image" | "video";
+  videoDurationSeconds?: number;
+  videoResolution?: string;
+  videoCustomWidth?: number;
+  videoCustomHeight?: number;
 };
 
 type CanvasGenerationPanelProps = CanvasGenerationSettings & {
@@ -28,6 +33,10 @@ const modelOptions = [
   { value: "auto", label: "Auto", description: "按当前链路自动选择" },
   { value: "gpt-image-2", label: "gpt-image-2", description: "官方图片生成模型" },
   { value: "codex-gpt-image-2", label: "codex-gpt-image-2", description: "Codex 兼容别名" },
+  { value: "agnes-image-2.1-flash", label: "agnes-image-2.1-flash", description: "Agnes AI 图片模型" },
+];
+const videoModelOptions = [
+  { value: "agnes-video-v2.0", label: "agnes-video-v2.0", description: "Agnes AI 视频生成模型" },
 ];
 const sizeOptions = [
   { value: "智能", label: "Auto" },
@@ -40,7 +49,13 @@ const sizeOptions = [
 const modeOptions = [
   { key: "image", label: "生图", icon: ImageIcon, enabled: true },
   { key: "text", label: "文本", icon: MessageSquareText, enabled: false },
-  { key: "video", label: "视频", icon: Video, enabled: false },
+  { key: "video", label: "视频", icon: Video, enabled: true },
+] as const;
+const videoDurationOptions = [6, 10, 12, 16] as const;
+const videoResolutionOptions = [
+  { value: "480p", label: "480p" },
+  { value: "720p", label: "720p" },
+  { value: "custom", label: "自定义" },
 ] as const;
 
 export function CanvasGenerationPanel({
@@ -52,6 +67,11 @@ export function CanvasGenerationPanel({
   model,
   size,
   count,
+  generationMode = "image",
+  videoDurationSeconds = 6,
+  videoResolution = "720p",
+  videoCustomWidth = 1280,
+  videoCustomHeight = 720,
   submitting,
   onChange,
   onClose,
@@ -65,13 +85,17 @@ export function CanvasGenerationPanel({
 
   const promptCount = promptCountProp ?? (prompt.trim() ? 1 : 0);
   const referenceCount = referenceCountProp ?? (selectedNode?.type === "image" && selectedNode.metadata?.imageUrl ? 1 : 0);
-  const activeModel = modelOptions.find((option) => option.value === model) ?? modelOptions[0];
-  const modeSummary = `${size === "智能" ? "自动比例" : size} · ${count}张`;
+  const isVideoMode = generationMode === "video";
+  const availableModelOptions = isVideoMode ? videoModelOptions : modelOptions;
+  const activeModel = availableModelOptions.find((option) => option.value === model) ?? availableModelOptions[0];
+  const videoResolutionLabel = videoResolution === "custom" ? `${videoCustomWidth}x${videoCustomHeight}` : videoResolution;
+  const modeSummary = isVideoMode ? `${size === "智能" ? "16:9" : size} · ${videoDurationSeconds}s · ${videoResolutionLabel}` : `${size === "智能" ? "自动比例" : size} · ${count}张`;
 
   return (
     <aside
       data-cola-panel="canvas-generation-panel"
       data-cola-panel-style="studio-inspector"
+      data-cola-generation-mode={generationMode}
       className={cn(
         "absolute bottom-4 right-4 top-4 z-50 flex w-[min(374px,calc(100vw-32px))] flex-col overflow-hidden rounded-[26px] border border-slate-200/75 bg-white/96 text-slate-950 shadow-[0_28px_80px_-54px_rgba(15,23,42,0.78)] ring-1 ring-white/80 backdrop-blur-xl transition",
         "translate-x-0 opacity-100",
@@ -98,13 +122,32 @@ export function CanvasGenerationPanel({
             <button
               key={key}
               type="button"
-              aria-pressed={key === "image"}
+              aria-pressed={key === generationMode}
               disabled={!enabled}
               className={cn(
                 "inline-flex h-10 items-center justify-center gap-1.5 rounded-[14px] text-sm font-medium transition",
-                key === "image" ? "bg-white text-slate-950 shadow-[0_8px_18px_-14px_rgba(15,23,42,0.68)] ring-1 ring-slate-200/80" : "text-slate-400",
+                key === generationMode ? "bg-white text-slate-950 shadow-[0_8px_18px_-14px_rgba(15,23,42,0.68)] ring-1 ring-slate-200/80" : "text-slate-400",
                 !enabled && "cursor-not-allowed opacity-60",
               )}
+              onClick={() => {
+                if (key === "video") {
+                  onChange({
+                    generationMode: "video",
+                    model: "agnes-video-v2.0",
+                    count: 1,
+                    size: size === "智能" ? "16:9" : size,
+                    videoDurationSeconds,
+                    videoResolution,
+                  });
+                  return;
+                }
+                if (key === "image") {
+                  onChange({
+                    generationMode: "image",
+                    model: model === "agnes-video-v2.0" ? "gpt-image-2" : model,
+                  });
+                }
+              }}
             >
               <Icon className="size-3.5" />
               {label}
@@ -186,7 +229,7 @@ export function CanvasGenerationPanel({
                 !modelMenuOpen && "hidden",
               )}
             >
-              {modelOptions.map((option) => {
+              {availableModelOptions.map((option) => {
                 const selected = option.value === model;
                 return (
                   <button
@@ -215,7 +258,7 @@ export function CanvasGenerationPanel({
 
           <div className="mt-4">
             <div className="flex items-center justify-between">
-              <p className="text-[11px] font-semibold text-slate-400">图片比例</p>
+              <p className="text-[11px] font-semibold text-slate-400">{isVideoMode ? "视频比例" : "图片比例"}</p>
               <span className="text-[11px] font-medium text-slate-400">{size === "智能" ? "自动判断" : "固定画幅"}</span>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2 rounded-[18px] bg-slate-50/80 p-1.5 ring-1 ring-slate-200/70">
@@ -236,6 +279,7 @@ export function CanvasGenerationPanel({
             </div>
           </div>
 
+          {!isVideoMode ? (
           <div className="mt-4">
             <div className="flex items-center justify-between">
               <p className="text-[11px] font-semibold text-slate-400">生成数量</p>
@@ -258,6 +302,77 @@ export function CanvasGenerationPanel({
               ))}
             </div>
           </div>
+          ) : (
+            <>
+              <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-semibold text-slate-400">生成时长</p>
+                  <span className="text-[11px] font-medium text-slate-400">Agnes Video</span>
+                </div>
+                <div className="mt-2 grid grid-cols-4 gap-2">
+                  {videoDurationOptions.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      aria-pressed={videoDurationSeconds === item}
+                      data-cola-generation-video-duration-option={item}
+                      className={cn(
+                        "h-10 rounded-[14px] text-sm font-semibold transition hover:-translate-y-px active:translate-y-0",
+                        videoDurationSeconds === item ? "bg-violet-50 text-violet-700 ring-1 ring-violet-200 shadow-[0_12px_28px_-22px_rgba(109,40,217,0.58)]" : "bg-slate-100/82 text-slate-500 hover:bg-slate-200/70 hover:text-slate-800",
+                      )}
+                      onClick={() => onChange({ videoDurationSeconds: item })}
+                    >
+                      {item}s
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-semibold text-slate-400">清晰度</p>
+                  <span className="text-[11px] font-medium text-slate-400">{videoResolutionLabel}</span>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {videoResolutionOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={videoResolution === option.value}
+                      data-cola-generation-video-resolution-option={option.value}
+                      className={cn(
+                        "h-10 rounded-[14px] text-sm font-semibold transition hover:-translate-y-px active:translate-y-0",
+                        videoResolution === option.value ? "bg-violet-50 text-violet-700 ring-1 ring-violet-200 shadow-[0_12px_28px_-22px_rgba(109,40,217,0.58)]" : "bg-slate-100/82 text-slate-500 hover:bg-slate-200/70 hover:text-slate-800",
+                      )}
+                      onClick={() => onChange({ videoResolution: option.value })}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                {videoResolution === "custom" ? (
+                  <div data-cola-generation-video-custom-resolution="true" className="mt-2 grid grid-cols-2 gap-2">
+                    <input
+                      aria-label="自定义视频宽度"
+                      type="number"
+                      min={1}
+                      value={videoCustomWidth}
+                      className="h-10 rounded-[14px] border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300"
+                      onChange={(event) => onChange({ videoCustomWidth: Math.max(1, Number(event.target.value) || 1) })}
+                    />
+                    <input
+                      aria-label="自定义视频高度"
+                      type="number"
+                      min={1}
+                      value={videoCustomHeight}
+                      className="h-10 rounded-[14px] border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300"
+                      onChange={(event) => onChange({ videoCustomHeight: Math.max(1, Number(event.target.value) || 1) })}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </>
+          )}
         </section>
       </div>
 

@@ -29,6 +29,8 @@ import {
   clearReferencePreviewUrl,
   decrementSessionImageQuota,
   getDroppedImageFile,
+  getDroppedImageFiles,
+  hasImageDragData,
   handlePromptComposerKeyDown,
   imageResolutionCreditCost,
   timestampFromIso,
@@ -188,6 +190,11 @@ describe("ColaAIWorkbench", () => {
   test("builds prompt architect chat messages for canvas text optimization", () => {
     const messages = buildPromptArchitectMessages("生成一张芙莉莲");
 
+    expect(messages[0]?.content).toContain("你是一名顶级提示词专家，专注将用户创意转化为高质量、生图优先的可直接执行提示词，自动补全细节、风格和构图。");
+    expect(messages[0]?.content).toContain("只输出一段可直接用于生图的提示词正文");
+    expect(messages[0]?.content).toContain("不要输出开场白、确认语、解释、Markdown 代码块、标题、项目符号、编号列表或结尾追问");
+    expect(messages[0]?.content).not.toContain("【设计思路】");
+    expect(messages[0]?.content).not.toContain("【可选增强方向】");
     expect(messages).toEqual([
       expect.objectContaining({
         role: "system",
@@ -399,6 +406,50 @@ describe("ColaAIWorkbench", () => {
     expect(getDroppedImageFile({ files: [textFile] })).toBeNull();
   });
 
+  test("selects all image files from dragged data in source order", () => {
+    const textFile = new File(["not an image"], "notes.txt", { type: "text/plain" });
+    const pngFile = new File(["png"], "reference.png", { type: "image/png" });
+    const jpegFile = new File(["jpeg"], "portrait.jpg", { type: "image/jpeg" });
+
+    expect(getDroppedImageFiles({ files: [textFile, pngFile, jpegFile] })).toEqual([pngFile, jpegFile]);
+    expect(
+      getDroppedImageFiles({
+        items: [
+          { kind: "file", type: "text/plain", getAsFile: () => textFile },
+          { kind: "file", type: "image/png", getAsFile: () => pngFile },
+          { kind: "file", type: "image/jpeg", getAsFile: () => jpegFile },
+        ],
+      }),
+    ).toEqual([pngFile, jpegFile]);
+    expect(getDroppedImageFiles({ files: [textFile] })).toEqual([]);
+  });
+
+  test("detects image drag data before files are available", () => {
+    expect(
+      hasImageDragData({
+        items: [
+          { kind: "file", type: "image/png", getAsFile: () => null },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  test("selects all image files from pasted clipboard data in source order", () => {
+    const textFile = new File(["not an image"], "notes.txt", { type: "text/plain" });
+    const pngFile = new File(["png"], "reference.png", { type: "image/png" });
+    const jpegFile = new File(["jpeg"], "portrait.jpg", { type: "image/jpeg" });
+
+    expect(
+      getDroppedImageFiles({
+        items: [
+          { kind: "string", type: "text/plain", getAsFile: () => textFile },
+          { kind: "file", type: "image/png", getAsFile: () => pngFile },
+          { kind: "file", type: "image/jpeg", getAsFile: () => jpegFile },
+        ],
+      }),
+    ).toEqual([pngFile, jpegFile]);
+  });
+
   test("clears reference preview urls when removing a reference image", () => {
     const revokedUrls: string[] = [];
     const referencePreviewUrlRef = { current: "blob:cola-reference" };
@@ -441,8 +492,105 @@ describe("ColaAIWorkbench", () => {
 
     expect(markup).toContain('data-cola-action="remove-reference"');
     expect(markup).toContain('aria-label="删除参考图 reference.png"');
+    expect(markup).toContain('data-cola-reference-count="1"');
+    expect(markup).toContain('data-cola-size="single"');
+    expect(markup).toContain("h-[76px]");
+    expect(markup).toContain("w-[76px]");
     expect(markup).toContain('data-cola-panel="reference-image-preview"');
     expect(markup).toContain('data-cola-panel="reference-image-name"');
+    expect(markup).not.toContain('data-cola-panel="reference-image-tray"');
+    expect(markup).not.toContain("h-[132px]");
+  });
+
+  test("renders multiple attached reference images with a combined remove control", () => {
+    const noop = () => {};
+    const referenceImages = Array.from({ length: 7 }, (_, index) => ({
+      name: `reference-${index + 1}.png`,
+      previewUrl: `blob:cola-reference-${index + 1}`,
+    }));
+    const markup = renderToStaticMarkup(
+      <GenerateComposer
+        prompt=""
+        count={1}
+        quality="智能"
+        ratio="1:1"
+        resolution="1k"
+        imageModel="auto"
+        publicMode={false}
+        referenceImages={referenceImages}
+        onPromptChange={noop}
+        onCountChange={noop}
+        onQualityChange={noop}
+        onRatioChange={noop}
+        onResolutionChange={noop}
+        onImageModelChange={noop}
+        onPublicChange={noop}
+        onReferenceFileChange={noop}
+        onReferenceRemove={noop}
+        onOpenPrompts={noop}
+        onGenerate={noop}
+      />,
+    );
+
+    expect(markup).toContain('multiple=""');
+    expect(markup).toContain('data-cola-state="has-references"');
+    expect(markup).toContain('data-cola-reference-count="7"');
+    expect(markup).toContain('data-cola-size="many"');
+    expect(markup).toContain("h-[132px]");
+    expect(markup).toContain('data-cola-panel="reference-image-tray"');
+    expect(markup).toContain('data-cola-panel="reference-image-grid"');
+    expect(markup).toContain('data-cola-panel="reference-image-chip"');
+    expect(markup).toContain("overflow-y-auto");
+    expect(markup).toContain("grid-cols-[repeat(auto-fill,minmax(44px,1fr))]");
+    expect(markup).not.toContain('data-cola-panel="reference-image-strip"');
+    expect(markup).not.toContain('data-cola-panel="reference-image-strip" class="hide-scrollbar flex h-full w-full items-center gap-1.5 overflow-x-auto"');
+    expect(markup).not.toContain('data-cola-panel="reference-image-stack"');
+    expect(markup).not.toContain('data-cola-panel="reference-image-count"');
+    for (const image of referenceImages) {
+      expect(markup).toContain(image.name);
+    }
+    for (let index = 1; index <= referenceImages.length; index += 1) {
+      expect(markup).toContain(`data-cola-index="${index}"`);
+    }
+    expect(markup).toContain('aria-label="删除 7 张参考图"');
+  });
+
+  test("scales the reference image tray for a small multi-image set", () => {
+    const noop = () => {};
+    const markup = renderToStaticMarkup(
+      <GenerateComposer
+        prompt=""
+        count={1}
+        quality="智能"
+        ratio="1:1"
+        resolution="1k"
+        imageModel="auto"
+        publicMode={false}
+        referenceImages={[
+          { name: "reference-1.png", previewUrl: "blob:cola-reference-1" },
+          { name: "reference-2.png", previewUrl: "blob:cola-reference-2" },
+          { name: "reference-3.png", previewUrl: "blob:cola-reference-3" },
+        ]}
+        onPromptChange={noop}
+        onCountChange={noop}
+        onQualityChange={noop}
+        onRatioChange={noop}
+        onResolutionChange={noop}
+        onImageModelChange={noop}
+        onPublicChange={noop}
+        onReferenceFileChange={noop}
+        onReferenceRemove={noop}
+        onOpenPrompts={noop}
+        onGenerate={noop}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-reference-count="3"');
+    expect(markup).toContain('data-cola-size="few"');
+    expect(markup).toContain("h-[104px]");
+    expect(markup).toContain("w-[min(248px,28vw)]");
+    expect(markup).toContain('aria-label="删除 3 张参考图"');
+    expect(markup).not.toContain("h-[132px]");
   });
 
   test("renders the generation composer as a clear studio composer", () => {
@@ -456,7 +604,7 @@ describe("ColaAIWorkbench", () => {
         resolution="2k"
         imageModel="auto"
         publicMode={false}
-        referenceImage={null}
+        referenceImages={[]}
         onPromptChange={noop}
         onCountChange={noop}
         onQualityChange={noop}
@@ -480,7 +628,8 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain('data-cola-resolution-option="4k"');
     expect(markup).toContain("2K");
     expect(markup).toContain("创作控制台");
-    expect(markup).toContain("size-[60px]");
+    expect(markup).toContain("h-[60px]");
+    expect(markup).toContain("w-[60px]");
     expect(markup).toContain("bg-slate-950");
     expect(markup).not.toContain('data-cola-design="creative-instrument-panel"');
     expect(markup).not.toContain('data-cola-effect="shimmer-button"');
@@ -1002,7 +1151,7 @@ describe("ColaAIWorkbench", () => {
         resolution="1k"
         imageModel="auto"
         publicMode={false}
-        referenceImage={null}
+        referenceImages={[]}
         isGenerating={false}
         submittedTasks={[failedTaskWithContext]}
         generateSessions={[
@@ -1196,6 +1345,8 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain('data-cola-drop-scope="global-reference-image"');
     expect(markup).toContain('data-cola-performance="paint-optimized"');
     expect(markup).toContain('data-cola-mode="discover"');
+    expect(workbenchSource).toContain("onPaste={handleReferencePaste}");
+    expect(workbenchSource).toContain("event.clipboardData");
     expect(markup).toContain('data-cola-panel="side-nav"');
     expect(markup).toContain('data-cola-behavior="rova-glass-rail"');
     expect(markup).toContain('data-cola-panel="discover-home"');
@@ -1659,7 +1810,8 @@ describe("ColaAIWorkbench", () => {
     expect(markup).toContain("max-w-[1164px]");
     expect(markup).toContain("rounded-[24px]");
     expect(markup).toContain("px-6 pt-5 pb-3");
-    expect(markup).toContain("size-[52px]");
+    expect(markup).toContain("max-[560px]:h-[52px]");
+    expect(markup).toContain("max-[560px]:w-[52px]");
     expect(markup).toContain("flex h-dvh");
     expect(markup).toContain("overflow-hidden");
     expect(markup).toContain("md:pt-[30px]");

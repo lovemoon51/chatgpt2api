@@ -86,6 +86,19 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       model: String(config.ai_review?.model || ""),
       prompt: String(config.ai_review?.prompt || ""),
     },
+    agnes_ai: {
+      base_url: String(config.agnes_ai?.base_url || "https://apihub.agnes-ai.com/v1"),
+      api_key: String(config.agnes_ai?.api_key || ""),
+      api_keys: Array.isArray(config.agnes_ai?.api_keys)
+        ? config.agnes_ai.api_keys
+          .map((item, index) => ({
+            name: String(item?.name || `Key ${index + 1}`),
+            api_key: String(item?.api_key || ""),
+            enabled: Boolean(item?.enabled ?? true),
+          }))
+          .filter((item) => item.api_key.trim())
+        : [],
+    },
     backup: {
       ...backup,
       enabled: Boolean(backup.enabled),
@@ -228,6 +241,10 @@ type SettingsStore = {
   setGlobalSystemPrompt: (value: string) => void;
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
+  setAgnesAIBaseUrl: (value: string) => void;
+  addAgnesAIKey: () => void;
+  updateAgnesAIKey: (index: number, updates: { name?: string; api_key?: string; enabled?: boolean }) => void;
+  deleteAgnesAIKey: (index: number) => void;
   setAutoRegisterField: (key: keyof AutoRegisterSettings, value: string | boolean) => void;
   setAccountPoolField: (key: keyof AccountPoolSettings, value: string) => void;
   setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
@@ -369,6 +386,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           api_key: String(config.ai_review?.api_key || "").trim(),
           model: String(config.ai_review?.model || "").trim(),
           prompt: String(config.ai_review?.prompt || "").trim(),
+        },
+        agnes_ai: {
+          base_url: String(config.agnes_ai?.base_url || "https://apihub.agnes-ai.com/v1").trim(),
+          api_key: String(config.agnes_ai?.api_key || "").trim(),
+          api_keys: (config.agnes_ai?.api_keys || [])
+            .map((item, index) => ({
+              name: String(item?.name || `Key ${index + 1}`).trim() || `Key ${index + 1}`,
+              api_key: String(item?.api_key || "").trim(),
+              enabled: Boolean(item?.enabled ?? true),
+            }))
+            .filter((item) => item.api_key),
         },
         auto_register: {
           enabled: Boolean(config.auto_register?.enabled),
@@ -525,6 +553,69 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setAIReviewField: (key, value) => {
     set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } } } : {});
+  },
+
+  setAgnesAIBaseUrl: (value) => {
+    set((state) => state.config ? {
+      config: {
+        ...state.config,
+        agnes_ai: {
+          ...(state.config.agnes_ai || {}),
+          base_url: value,
+        },
+      },
+    } : {});
+  },
+
+  addAgnesAIKey: () => {
+    set((state) => {
+      if (!state.config) return {};
+      const current = state.config.agnes_ai?.api_keys || [];
+      return {
+        config: {
+          ...state.config,
+          agnes_ai: {
+            ...(state.config.agnes_ai || {}),
+            api_keys: [
+              ...current,
+              { name: `Key ${current.length + 1}`, api_key: "", enabled: true },
+            ],
+          },
+        },
+      };
+    });
+  },
+
+  updateAgnesAIKey: (index, updates) => {
+    set((state) => {
+      if (!state.config) return {};
+      const current = state.config.agnes_ai?.api_keys || [];
+      return {
+        config: {
+          ...state.config,
+          agnes_ai: {
+            ...(state.config.agnes_ai || {}),
+            api_keys: current.map((item, itemIndex) => itemIndex === index ? { ...item, ...updates } : item),
+          },
+        },
+      };
+    });
+  },
+
+  deleteAgnesAIKey: (index) => {
+    set((state) => {
+      if (!state.config) return {};
+      const current = state.config.agnes_ai?.api_keys || [];
+      return {
+        config: {
+          ...state.config,
+          agnes_ai: {
+            ...(state.config.agnes_ai || {}),
+            api_keys: current.filter((_, itemIndex) => itemIndex !== index),
+          },
+        },
+      };
+    });
   },
 
   setAutoRegisterField: (key, value) => {

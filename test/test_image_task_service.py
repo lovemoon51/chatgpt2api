@@ -347,6 +347,10 @@ class ImageTaskServiceTests(unittest.TestCase):
                 size="16:9",
                 base_url="http://local.test",
                 reference_image_urls=["https://cdn.example.test/reference.png"],
+                duration_seconds=10,
+                resolution="720p",
+                custom_width=None,
+                custom_height=None,
             )
 
             self.assertEqual(created["mode"], "video")
@@ -357,9 +361,115 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(payloads[0]["model"], "agnes-video-v2.0")
             self.assertEqual(payloads[0]["size"], "16:9")
             self.assertEqual(payloads[0]["reference_image_urls"], ["https://cdn.example.test/reference.png"])
+            self.assertEqual(payloads[0]["duration_seconds"], 10)
+            self.assertEqual(payloads[0]["resolution"], "720p")
             self.assertEqual(task["mode"], "video")
             self.assertEqual(task["media_type"], "video")
+            self.assertEqual(task["video_duration_seconds"], 10)
+            self.assertEqual(task["video_resolution"], "720p")
             self.assertEqual(task["data"][0]["video_url"], "http://example.test/video.mp4")
+
+    def test_video_task_converts_local_image_references_to_signed_public_urls(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payloads = []
+
+            def video_handler(payload):
+                payloads.append(payload)
+                return {"data": [{"url": "http://example.test/video.mp4", "video_url": "http://example.test/video.mp4"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", video_handler=video_handler)
+            service.submit_video(
+                OWNER,
+                client_task_id="video-local-reference",
+                prompt="animate cat",
+                model="agnes-video-v2.0",
+                size="16:9",
+                base_url="https://public.example.test",
+                reference_image_urls=[
+                    "/images/2026/06/04/reference.png",
+                    "https://cdn.example.test/reference.png",
+                ],
+            )
+
+            wait_for_task(service, OWNER, "video-local-reference", "success")
+
+            self.assertEqual(len(payloads[0]["reference_image_urls"]), 2)
+            self.assertTrue(payloads[0]["reference_image_urls"][0].startswith("https://public.example.test/public-images/2026/06/04/reference.png?"))
+            self.assertEqual(payloads[0]["reference_image_urls"][1], "https://cdn.example.test/reference.png")
+
+    def test_video_task_rejects_localhost_references_instead_of_dropping_them(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payloads = []
+
+            def video_handler(payload):
+                payloads.append(payload)
+                return {"data": [{"url": "http://example.test/video.mp4", "video_url": "http://example.test/video.mp4"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", video_handler=video_handler)
+            service.submit_video(
+                OWNER,
+                client_task_id="video-localhost-reference",
+                prompt="animate cat",
+                model="agnes-video-v2.0",
+                size="16:9",
+                base_url="http://127.0.0.1:8000",
+                reference_image_urls=["/images/2026/06/04/reference.png"],
+            )
+
+            task = wait_for_task(service, OWNER, "video-localhost-reference", "error")
+
+            self.assertEqual(payloads, [])
+            self.assertIn("公网", task["error"])
+
+    def test_video_task_saves_data_url_references_as_signed_public_urls(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payloads = []
+
+            def video_handler(payload):
+                payloads.append(payload)
+                return {"data": [{"url": "http://example.test/video.mp4", "video_url": "http://example.test/video.mp4"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", video_handler=video_handler)
+            service.submit_video(
+                OWNER,
+                client_task_id="video-data-reference",
+                prompt="animate cat",
+                model="agnes-video-v2.0",
+                size="16:9",
+                base_url="https://public.example.test",
+                reference_image_urls=["data:image/png;base64,iVBORw0KGgo="],
+            )
+
+            wait_for_task(service, OWNER, "video-data-reference", "success")
+
+            self.assertEqual(len(payloads[0]["reference_image_urls"]), 1)
+            self.assertTrue(payloads[0]["reference_image_urls"][0].startswith("https://public.example.test/public-images/"))
+
+    def test_video_task_defaults_and_reload_preserve_video_settings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            service = self.make_service(path)
+            created = service.submit_video(
+                OWNER,
+                client_task_id="video-defaults",
+                prompt="animate cat",
+                model="agnes-video-v2.0",
+                size="16:9",
+                base_url="http://local.test",
+            )
+
+            self.assertEqual(created["video_duration_seconds"], 6)
+            self.assertEqual(created["video_resolution"], "720p")
+            task = wait_for_task(service, OWNER, "video-defaults", "success")
+            self.assertEqual(task["video_duration_seconds"], 6)
+            self.assertEqual(task["video_resolution"], "720p")
+
+            reloaded = self.make_service(path)
+            listed = reloaded.list_tasks(OWNER, ["video-defaults"])["items"][0]
+
+            self.assertEqual(listed["video_duration_seconds"], 6)
+            self.assertEqual(listed["video_resolution"], "720p")
+            self.assertEqual(listed["data"][0]["video_url"], "http://example.test/video.mp4")
 
     def test_single_worker_leaves_later_tasks_queued(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -598,6 +708,15 @@ class ImageTaskServiceTests(unittest.TestCase):
                                 "created_at": "2099-01-01 00:00:00",
                                 "updated_at": "2099-01-01 00:00:00",
                             },
+                            {
+                                "id": "running-video-task",
+                                "owner_id": "owner-1",
+                                "status": "running",
+                                "mode": "video",
+                                "model": "agnes-video-v2.0",
+                                "created_at": "2099-01-01 00:00:00",
+                                "updated_at": "2099-01-01 00:00:00",
+                            },
                         ]
                     }
                 ),
@@ -605,11 +724,13 @@ class ImageTaskServiceTests(unittest.TestCase):
             )
 
             service = self.make_service(path)
-            result = service.list_tasks(OWNER, ["queued-task", "running-task"])
+            result = service.list_tasks(OWNER, ["queued-task", "running-task", "running-video-task"])
 
-            self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
-            self.assertEqual([item["phase"] for item in result["items"]], ["error", "error"])
-            self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+            self.assertEqual([item["status"] for item in result["items"]], ["error", "error", "error"])
+            self.assertEqual([item["phase"] for item in result["items"]], ["error", "error", "error"])
+            self.assertEqual(result["items"][0]["error"], "服务已重启，未完成的图片任务已中断")
+            self.assertEqual(result["items"][1]["error"], "服务已重启，未完成的图片任务已中断")
+            self.assertEqual(result["items"][2]["error"], "服务已重启，未完成的视频任务已中断")
 
 
 if __name__ == "__main__":

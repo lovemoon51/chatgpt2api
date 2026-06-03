@@ -24,6 +24,36 @@ class AgnesAIVideoTests(unittest.TestCase):
         self.assertNotIn("image", payload)
         self.assertNotIn("extra_body", payload)
 
+    def test_builds_duration_and_resolution_video_payload(self) -> None:
+        payload = agnes_ai_video.build_agnes_video_payload(
+            agnes_ai_video.AgnesVideoRequest(
+                prompt="A cinematic cat walks on the beach",
+                size="16:9",
+                duration_seconds=10,
+                resolution="720p",
+            )
+        )
+
+        self.assertEqual(payload["width"], 1280)
+        self.assertEqual(payload["height"], 720)
+        self.assertEqual(payload["num_frames"], 241)
+        self.assertEqual(payload["frame_rate"], 24)
+
+    def test_builds_custom_resolution_video_payload(self) -> None:
+        payload = agnes_ai_video.build_agnes_video_payload(
+            agnes_ai_video.AgnesVideoRequest(
+                prompt="A cinematic cat walks on the beach",
+                duration_seconds=16,
+                resolution="custom",
+                custom_width=1024,
+                custom_height=576,
+            )
+        )
+
+        self.assertEqual(payload["width"], 1024)
+        self.assertEqual(payload["height"], 576)
+        self.assertEqual(payload["num_frames"], 385)
+
     def test_builds_image_to_video_payload(self) -> None:
         payload = agnes_ai_video.build_agnes_video_payload(
             agnes_ai_video.AgnesVideoRequest(
@@ -107,6 +137,64 @@ class AgnesAIVideoTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer secret-key")
         self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer secret-key")
         self.assertEqual(get.call_args.args[0], "https://agnes.example/v1/videos/task_123")
+
+    def test_request_agnes_video_accepts_v2_remixed_video_url_field(self) -> None:
+        create_response = mock.Mock(status_code=200)
+        create_response.json.return_value = {"id": "task_123", "status": "queued"}
+        poll_response = mock.Mock(status_code=200)
+        poll_response.json.return_value = {
+            "id": "task_123",
+            "object": "video",
+            "model": agnes_ai_video.AGNES_VIDEO_MODEL,
+            "status": "completed",
+            "progress": 100,
+            "remixed_from_video_id": "https://cdn.example.test/result.mp4",
+        }
+
+        with (
+            mock.patch(
+                "services.protocol.agnes_ai_video.agnes_ai_settings",
+                return_value={
+                    "api_keys": [{"name": "video-key", "api_key": "secret-key", "enabled": True}],
+                    "base_url": "https://agnes.example/v1",
+                },
+            ),
+            mock.patch("services.protocol.agnes_ai_video.requests.post", return_value=create_response),
+            mock.patch("services.protocol.agnes_ai_video.requests.get", return_value=poll_response),
+        ):
+            result = agnes_ai_video.request_agnes_video(
+                agnes_ai_video.AgnesVideoRequest(prompt="A cinematic cat walks")
+            )
+
+        self.assertEqual(result["data"][0]["video_url"], "https://cdn.example.test/result.mp4")
+
+    def test_request_agnes_video_uses_long_video_polling_window_by_default(self) -> None:
+        create_response = mock.Mock(status_code=200)
+        create_response.json.return_value = {"id": "task_123", "status": "queued"}
+        poll_response = mock.Mock(status_code=200)
+        poll_response.json.return_value = {
+            "id": "task_123",
+            "status": "completed",
+            "video_url": "https://cdn.example.test/result.mp4",
+        }
+
+        with (
+            mock.patch(
+                "services.protocol.agnes_ai_video.agnes_ai_settings",
+                return_value={
+                    "api_keys": [{"name": "video-key", "api_key": "secret-key", "enabled": True}],
+                    "base_url": "https://agnes.example/v1",
+                },
+            ),
+            mock.patch("services.protocol.agnes_ai_video.requests.post", return_value=create_response),
+            mock.patch("services.protocol.agnes_ai_video.requests.get", return_value=poll_response),
+            mock.patch("services.protocol.agnes_ai_video._poll_agnes_video_task", return_value={"data": [{"video_url": "https://cdn.example.test/result.mp4"}]}) as poll,
+        ):
+            agnes_ai_video.request_agnes_video(
+                agnes_ai_video.AgnesVideoRequest(prompt="A cinematic cat walks")
+            )
+
+        self.assertGreaterEqual(poll.call_args.kwargs["max_poll_attempts"] * poll.call_args.kwargs["poll_interval_seconds"], 1200)
 
     def test_request_agnes_video_raises_for_failed_task(self) -> None:
         create_response = mock.Mock(status_code=200)

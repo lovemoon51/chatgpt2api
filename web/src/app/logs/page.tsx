@@ -21,18 +21,22 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
   Call: "call",
+  Video: "video",
   Text: "text",
   Account: "account",
 } as const;
 
 const typeLabels: Record<string, string> = {
   [LogType.Call]: "图片调用日志",
+  [LogType.Video]: "视频调用日志",
   [LogType.Text]: "文本生成日志",
   [LogType.Account]: "账号管理日志",
 };
 
 const textLogEndpoints = new Set(["/api/prompts/optimize", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"]);
 const textLogSummaryPrefixes = ["提示词优化", "文本生成", "Responses", "Messages", "Embeddings"];
+const videoLogEndpoints = new Set(["/api/image-tasks/videos"]);
+const videoLogSummaryPrefixes = ["视频生成", "视频生成任务"];
 
 const statusOptions = [
   { label: "全部状态", value: "all" },
@@ -101,10 +105,14 @@ function getStatusValue(item: SystemLog) {
 }
 
 function getLogType(item: SystemLog) {
+  if (item.type === LogType.Video) return LogType.Video;
   if (item.type === LogType.Text) return LogType.Text;
   if (item.type !== LogType.Call) return item.type;
   const endpoint = typeof item.detail?.endpoint === "string" ? item.detail.endpoint : "";
   const summary = item.summary || "";
+  if (videoLogEndpoints.has(endpoint) || videoLogSummaryPrefixes.some((prefix) => summary.startsWith(prefix))) {
+    return LogType.Video;
+  }
   return textLogEndpoints.has(endpoint) || textLogSummaryPrefixes.some((prefix) => summary.startsWith(prefix))
     ? LogType.Text
     : LogType.Call;
@@ -165,12 +173,15 @@ function LogsContent() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const detailUrls = getUrls(detailLog);
-  const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
+  const detailVideos = detailLog?.type === LogType.Video ? detailUrls : [];
+  const detailImages = detailLog?.type === LogType.Video ? [] : detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
+  const isVideoLog = type === LogType.Video;
   const isTextLog = type === LogType.Text;
-  const hasCallMeta = isCallLog || isTextLog;
+  const hasCallMeta = isCallLog || isVideoLog || isTextLog;
   const showDuration = hasCallMeta || type === LogType.Account;
-  const showImages = isCallLog;
+  const showImages = type === LogType.Call;
+  const showVideos = isVideoLog;
   const pageSize = 10;
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
@@ -276,6 +287,7 @@ function LogsContent() {
             <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white lg:w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={LogType.Call}>图片调用日志</SelectItem>
+              <SelectItem value={LogType.Video}>视频调用日志</SelectItem>
               <SelectItem value={LogType.Text}>文本生成日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
             </SelectContent>
@@ -371,6 +383,7 @@ function LogsContent() {
                   {hasCallMeta ? <TableHead>状态</TableHead> : null}
                   {hasCallMeta ? <TableHead>模型</TableHead> : null}
                   {showImages ? <TableHead className="w-36">图片</TableHead> : null}
+                  {showVideos ? <TableHead className="w-40">视频</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
                 </TableRow>
@@ -412,6 +425,25 @@ function LogsContent() {
                               ))}
                               {urls.length > 3 ? <span className="text-xs text-stone-400">+{urls.length - 3}</span> : null}
                             </div>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs text-stone-400">
+                              <ImageIcon className="size-3.5" />
+                              -
+                            </span>
+                          )}
+                        </TableCell>
+                      ) : null}
+                      {showVideos ? (
+                        <TableCell>
+                          {urls.length ? (
+                            <button
+                              type="button"
+                              className="relative block h-14 w-24 overflow-hidden rounded-lg border border-stone-200 bg-stone-950"
+                              onClick={() => openDetail(item)}
+                              title="预览视频"
+                            >
+                              <video src={urls[0]} className="h-full w-full object-cover" muted preload="metadata" />
+                            </button>
                           ) : (
                             <span className="inline-flex items-center gap-1 text-xs text-stone-400">
                               <ImageIcon className="size-3.5" />
@@ -488,11 +520,11 @@ function LogsContent() {
                   </div>
                 </div>
               ))}
-              {detailUrls.length ? (
+              {detailImages.length ? (
                 <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                  {detailUrls.map((url, index) => (
+                  {detailImages.map((image, index) => (
                     <button
-                      key={url}
+                      key={image.src}
                       type="button"
                       className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
                       onClick={() => {
@@ -500,8 +532,21 @@ function LogsContent() {
                         setLightboxOpen(true);
                       }}
                     >
-                      <AuthenticatedImage src={url} alt="" className="h-full w-full object-cover" />
+                      <AuthenticatedImage src={image.src} alt="" className="h-full w-full object-cover" />
                     </button>
+                  ))}
+                </div>
+              ) : null}
+              {detailVideos.length ? (
+                <div className="grid gap-3">
+                  {detailVideos.map((url) => (
+                    <video
+                      key={url}
+                      src={url}
+                      className="max-h-[520px] w-full rounded-xl border border-stone-200 bg-stone-950"
+                      controls
+                      preload="metadata"
+                    />
                   ))}
                 </div>
               ) : null}

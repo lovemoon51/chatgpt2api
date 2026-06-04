@@ -22,9 +22,12 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 LOG_TYPE_CALL = "call"
 LOG_TYPE_TEXT = "text"
 LOG_TYPE_ACCOUNT = "account"
+LOG_TYPE_VIDEO = "video"
 
 TEXT_LOG_ENDPOINTS = {"/api/prompts/optimize", "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"}
 TEXT_LOG_SUMMARIES = ("提示词优化", "文本生成", "Responses", "Messages", "Embeddings")
+VIDEO_LOG_ENDPOINTS = {"/api/image-tasks/videos"}
+VIDEO_LOG_SUMMARIES = ("视频生成", "视频生成任务")
 DEFAULT_LOG_RETENTION_MAX_ENTRIES = 5000
 LOG_RETENTION_CONFIG_KEY = "log_retention_max_entries"
 LOG_RETENTION_ENV_KEY = "CHATGPT2API_LOG_RETENTION_MAX_ENTRIES"
@@ -193,8 +196,23 @@ class LogService:
         summary = str(item.get("summary") or "")
         return endpoint in TEXT_LOG_ENDPOINTS or summary.startswith(TEXT_LOG_SUMMARIES)
 
+    @staticmethod
+    def _is_video_call(item: dict[str, Any]) -> bool:
+        if item.get("type") == LOG_TYPE_VIDEO:
+            return True
+        if item.get("type") != LOG_TYPE_CALL:
+            return False
+        detail = item.get("detail")
+        endpoint = str(detail.get("endpoint") or "") if isinstance(detail, dict) else ""
+        summary = str(item.get("summary") or "")
+        return endpoint in VIDEO_LOG_ENDPOINTS or summary.startswith(VIDEO_LOG_SUMMARIES)
+
     @classmethod
     def _normalized_item(cls, item: dict[str, Any]) -> dict[str, Any]:
+        if cls._is_video_call(item) and item.get("type") != LOG_TYPE_VIDEO:
+            normalized = dict(item)
+            normalized["type"] = LOG_TYPE_VIDEO
+            return normalized
         if cls._is_text_call(item) and item.get("type") != LOG_TYPE_TEXT:
             normalized = dict(item)
             normalized["type"] = LOG_TYPE_TEXT
@@ -328,6 +346,8 @@ class LoggedCall:
     request_text: str = ""
 
     def _log_type(self) -> str:
+        if self.endpoint in VIDEO_LOG_ENDPOINTS or self.summary.startswith(VIDEO_LOG_SUMMARIES):
+            return LOG_TYPE_VIDEO
         if self.endpoint in TEXT_LOG_ENDPOINTS or self.summary.startswith(TEXT_LOG_SUMMARIES):
             return LOG_TYPE_TEXT
         return LOG_TYPE_CALL

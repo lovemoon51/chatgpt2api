@@ -8,7 +8,7 @@ from pathlib import Path
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
-from services.log_service import LOG_TYPE_CALL, LOG_TYPE_TEXT, REDACTED_VALUE, LogService
+from services.log_service import LOG_TYPE_CALL, LOG_TYPE_TEXT, LOG_TYPE_VIDEO, REDACTED_VALUE, LogService
 
 
 class LogServiceSecurityTests(unittest.TestCase):
@@ -154,6 +154,36 @@ class LogServiceSecurityTests(unittest.TestCase):
             self.assertEqual(len(text_items), 1)
             self.assertEqual(text_items[0]["type"], LOG_TYPE_TEXT)
             self.assertEqual(text_items[0]["detail"]["model"], "gpt-5.5")
+
+    def test_legacy_video_calls_are_listed_as_video_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "id": "video-call",
+                        "time": "2026-06-04 07:30:00",
+                        "type": LOG_TYPE_CALL,
+                        "summary": "视频生成调用完成",
+                        "detail": {
+                            "endpoint": "/api/image-tasks/videos",
+                            "model": "agnes-video-v2.0",
+                            "urls": ["https://cdn.example.test/result.mp4"],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            service = self._service(path)
+
+            self.assertEqual(service.list(type=LOG_TYPE_CALL), [])
+            video_items = service.list(type=LOG_TYPE_VIDEO)
+            self.assertEqual(len(video_items), 1)
+            self.assertEqual(video_items[0]["type"], LOG_TYPE_VIDEO)
+            self.assertEqual(video_items[0]["detail"]["model"], "agnes-video-v2.0")
 
     def test_corrupt_utf8_log_bytes_do_not_break_listing_or_append(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

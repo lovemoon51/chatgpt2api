@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.image_metadata_storage import get_image_metadata_storage
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import LOG_TYPE_CALL, LOG_TYPE_VIDEO, log_service
 from services.protocol.conversation import no_image_result_message, save_image_bytes
 from services.protocol import agnes_ai_video, openai_v1_image_edit, openai_v1_image_generations
 from services.signed_url_service import generate_signed_image_url
@@ -1076,7 +1076,7 @@ class ImageTaskService:
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
         try:
-            log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
+            log_service.add(LOG_TYPE_VIDEO if mode == "video" else LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:
             pass
 

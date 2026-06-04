@@ -36,6 +36,7 @@ const adaptiveImageMinWidth = 260;
 const adaptiveImageMaxWidth = 420;
 const adaptiveImageMinHeight = 150;
 const adaptiveImageMaxHeight = 440;
+const legacyDefaultConfigPrompt = "整合上游节点后生成图片。";
 export type CanvasConfigPatch = Partial<Pick<NonNullable<CanvasNodeData["metadata"]>, "prompt" | "model" | "size" | "count" | "upscaleResolution" | "gridSplitMode" | "status" | "errorDetails" | "generationMode" | "videoDurationSeconds" | "videoResolution" | "videoCustomWidth" | "videoCustomHeight">>;
 
 export type CanvasGridSplitTileInput = {
@@ -100,6 +101,27 @@ function getGridSplitTileNodeSize(naturalWidth?: number, naturalHeight?: number)
   return {
     width: gridSplitTileNodeWidth,
     height: Math.max(1, Math.round((gridSplitTileNodeWidth * naturalHeight) / naturalWidth)),
+  };
+}
+
+function removeLegacyDefaultConfigPrompt(value: string | undefined) {
+  if (!value?.includes(legacyDefaultConfigPrompt)) {
+    return value;
+  }
+  return value.replaceAll(legacyDefaultConfigPrompt, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function normalizeNodePrompt(node: CanvasNodeData): CanvasNodeData {
+  const prompt = removeLegacyDefaultConfigPrompt(node.metadata?.prompt);
+  if (prompt === node.metadata?.prompt) {
+    return node;
+  }
+  return {
+    ...node,
+    metadata: {
+      ...node.metadata,
+      prompt,
+    },
   };
 }
 
@@ -481,7 +503,7 @@ function createConfigNode(position: CanvasPoint): CanvasNodeData {
     width: configNodeWidth,
     height: configNodeHeight,
     metadata: {
-      prompt: "整合上游节点后生成图片。",
+      prompt: "",
       model: "auto",
       size: "智能",
       count: 1,
@@ -493,6 +515,8 @@ function createConfigNode(position: CanvasPoint): CanvasNodeData {
 }
 
 export function normalizeCanvasNode(node: CanvasNodeData): CanvasNodeData {
+  node = normalizeNodePrompt(node);
+
   if (node.type === "image" && node.metadata?.derivativeType === "slice") {
     const tileSize = getGridSplitTileNodeSize(node.metadata.imageNaturalWidth, node.metadata.imageNaturalHeight);
     if (

@@ -117,6 +117,7 @@ describe("use-canvas-store helpers", () => {
     expect(configNode.metadata?.model).toBe("auto");
     expect(configNode.metadata?.size).toBe("智能");
     expect(configNode.metadata?.count).toBe(1);
+    expect(configNode.metadata?.prompt).toBe("");
     expect(connected.connections.some((connection) => connection.fromNodeId === imageNode.id && connection.toNodeId === configNode.id)).toBe(true);
   });
 
@@ -449,6 +450,7 @@ describe("use-canvas-store helpers", () => {
 
     expect(configNode.type).toBe("config");
     expect(configNode.position).toEqual({ x: 640, y: 260 });
+    expect(configNode.metadata?.prompt).toBe("");
     expect(connected.connections.some((connection) => connection.fromNodeId === "seed-text" && connection.toNodeId === configNode.id)).toBe(true);
     expect(connected.selectedNodeIds).toEqual([configNode.id]);
   });
@@ -774,6 +776,41 @@ describe("use-canvas-store helpers", () => {
 
     expect(configNode?.width).toBe(430);
     expect(configNode?.height).toBe(300);
+  });
+
+  test("removes the old default prompt sentence from stored canvas nodes", () => {
+    const storage = createMemoryStorage();
+    const state = createInitialCanvasState();
+    const legacyState = {
+      ...state,
+      nodes: state.nodes.map((node) => (
+        node.id === "seed-config"
+          ? {
+              ...node,
+              metadata: {
+                ...node.metadata,
+                prompt: "换个姿势\n\n整合上游节点后生成图片。",
+              },
+            }
+          : node.id === "seed-generation"
+            ? {
+                ...node,
+                metadata: {
+                  ...node.metadata,
+                  prompt: "整合上游节点后生成图片。",
+                },
+              }
+            : node
+      )),
+    };
+
+    saveCanvasState(storage, legacyState);
+    const loaded = loadCanvasState(storage);
+    const configNode = loaded?.nodes.find((node) => node.id === "seed-config");
+    const resultNode = loaded?.nodes.find((node) => node.id === "seed-generation");
+
+    expect(configNode?.metadata?.prompt).toBe("换个姿势");
+    expect(resultNode?.metadata?.prompt).toBe("");
   });
 
   test("undoes and redoes recordable canvas history mutations", () => {

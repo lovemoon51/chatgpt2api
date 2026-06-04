@@ -48,7 +48,7 @@ const configModelOptions = [
   { value: "agnes-image-2.1-flash", title: "agnes-image-2.1-flash", description: "通过 Agnes AI API 调用，使用独立 API Key。", badge: "agnes" },
 ] as const;
 const configVideoModelOptions = [
-  { value: "agnes-video-v2.0", title: "agnes-video-v2.0", description: "通过 Agnes AI API 调用的视频生成模型。", badge: "agnes" },
+  { value: "agnes-video-v2.0", title: "seedance-1.5", description: "通过 Agnes AI API 调用的视频生成模型。", badge: "seedance" },
 ] as const;
 type ImageOptionToolbarItem =
   | { value: CanvasImageOption; label: string; menu?: boolean };
@@ -179,6 +179,7 @@ function CanvasNodeComponent({
   const [submittingTextPrompt, setSubmittingTextPrompt] = useState(false);
   const [hoveredGridSplitMode, setHoveredGridSplitMode] = useState<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const nodeElementRef = useRef<HTMLElement | null>(null);
   const Icon = nodeIcons[node.type];
   const canShowGenerationAction = node.type === "config" || node.type === "generation";
   const canPreviewImage = interactionMode === "pointer";
@@ -202,6 +203,7 @@ function CanvasNodeComponent({
 
   const imageUrl = node.metadata?.imageUrl || "";
   const videoUrl = node.metadata?.videoUrl || "";
+  const canUseImageOptionToolbar = node.type === "image" || (node.type === "generation" && Boolean(imageUrl));
   const content = node.metadata?.content || node.metadata?.prompt || "";
   const status = node.metadata?.status || "idle";
   const showStatus = (node.type === "generation" || node.type === "video") && status !== "idle";
@@ -251,6 +253,27 @@ function CanvasNodeComponent({
       setHoveredGridSplitMode(null);
     }
   }, [configPopover]);
+
+  useEffect(() => {
+    if (!configPopover && !textPromptModelOpen) {
+      return;
+    }
+
+    function handleOutsidePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (nodeElementRef.current?.contains(target)) {
+        return;
+      }
+      setConfigPopover(null);
+      setTextPromptModelOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handleOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
+  }, [configPopover, textPromptModelOpen]);
 
   useEffect(() => {
     if (!selected || node.type !== "image") {
@@ -308,6 +331,7 @@ function CanvasNodeComponent({
 
   return (
     <article
+      ref={nodeElementRef}
       data-cola-canvas-node={node.type}
       data-node-id={node.id}
       data-cola-state={selected ? "selected" : "idle"}
@@ -953,7 +977,7 @@ function CanvasNodeComponent({
         </div>
       ) : null}
 
-      {!isConfigNode && node.type !== "image" ? (
+      {!isConfigNode && !canUseImageOptionToolbar ? (
         <div
           data-cola-node-toolbar="true"
           data-cola-node-toolbar-placement="above-title"
@@ -991,7 +1015,7 @@ function CanvasNodeComponent({
         </div>
       ) : null}
 
-      {selected && node.type === "image" ? (
+      {selected && canUseImageOptionToolbar ? (
         <div
           data-cola-image-option-toolbar="true"
           className="absolute left-1/2 top-0 z-[70] flex w-max max-w-none -translate-x-1/2 -translate-y-[calc(100%+48px)] items-center gap-1 rounded-[18px] border border-white/70 bg-white/94 px-2 py-1.5 text-slate-600 shadow-[0_18px_38px_-24px_rgba(15,23,42,0.48)] ring-1 ring-slate-900/5 backdrop-blur-md"

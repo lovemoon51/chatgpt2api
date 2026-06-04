@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, ChevronDown, Eye, ImageIcon, MessageSquareText, Play, Settings2, Sparkles, Video, X, Zap } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 import type { CanvasNodeData } from "./canvas-types";
@@ -36,7 +36,7 @@ const modelOptions = [
   { value: "agnes-image-2.1-flash", label: "agnes-image-2.1-flash", description: "Agnes AI 图片模型" },
 ];
 const videoModelOptions = [
-  { value: "agnes-video-v2.0", label: "agnes-video-v2.0", description: "Agnes AI 视频生成模型" },
+  { value: "agnes-video-v2.0", label: "seedance-1.5", description: "Agnes AI 视频生成模型" },
 ];
 const sizeOptions = [
   { value: "智能", label: "Auto" },
@@ -78,6 +78,27 @@ export function CanvasGenerationPanel({
   onSubmit,
 }: CanvasGenerationPanelProps) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const panelElementRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!modelMenuOpen) {
+      return;
+    }
+
+    function handleOutsidePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (panelElementRef.current?.contains(target)) {
+        return;
+      }
+      setModelMenuOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handleOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
+  }, [modelMenuOpen]);
 
   if (!open) {
     return null;
@@ -93,6 +114,7 @@ export function CanvasGenerationPanel({
 
   return (
     <aside
+      ref={panelElementRef}
       data-cola-panel="canvas-generation-panel"
       data-cola-panel-style="studio-inspector"
       data-cola-generation-mode={generationMode}

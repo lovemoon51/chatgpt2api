@@ -73,6 +73,29 @@ describe("CanvasWorkspace prop wiring", () => {
     expect(nodeSource).not.toContain("cursor-zoom-in");
   });
 
+  test("displays the seedance label and badge while preserving the Agnes video model value", () => {
+    const nodeSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "canvas-node.tsx"), "utf-8");
+
+    expect(nodeSource).toContain('{ value: "agnes-video-v2.0", title: "seedance-1.5", description: "通过 Agnes AI API 调用的视频生成模型。", badge: "seedance" }');
+  });
+
+  test("closes canvas node dropdowns when clicking outside the node", () => {
+    const nodeSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "canvas-node.tsx"), "utf-8");
+
+    expect(nodeSource).toContain("nodeElementRef");
+    expect(nodeSource).toContain('document.addEventListener("pointerdown", handleOutsidePointerDown, true)');
+    expect(nodeSource).toContain("setConfigPopover(null)");
+    expect(nodeSource).toContain("setTextPromptModelOpen(false)");
+  });
+
+  test("closes the generation panel model dropdown when clicking outside the panel", () => {
+    const panelSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "canvas-generation-panel.tsx"), "utf-8");
+
+    expect(panelSource).toContain("panelElementRef");
+    expect(panelSource).toContain('document.addEventListener("pointerdown", handleOutsidePointerDown, true)');
+    expect(panelSource).toContain("setModelMenuOpen(false)");
+  });
+
   test("forwards canvas image download handlers to nodes", () => {
     const workspaceSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "canvas-workspace.tsx"), "utf-8");
     const surfaceSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "infinite-canvas-surface.tsx"), "utf-8");

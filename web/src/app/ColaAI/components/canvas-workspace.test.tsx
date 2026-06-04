@@ -539,7 +539,7 @@ describe("ColaAI canvas components", () => {
     expect(markup).not.toContain("bg-[#11161d]/92");
   });
 
-  test("renders video config nodes with the Agnes video model in the video tab", () => {
+  test("renders video config nodes with the seedance display name while keeping the Agnes backend model", () => {
     const state = createInitialCanvasState();
     const configNode = {
       ...state.nodes.find((node) => node.id === "seed-config")!,
@@ -568,7 +568,7 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain('data-cola-config-mode="video"');
     expect(markup).toContain('data-cola-config-mode-option="video"');
     expect(markup).toContain('aria-pressed="true"');
-    expect(markup).toContain("agnes-video-v2.0");
+    expect(markup).toContain("seedance-1.5");
     expect(markup).toContain("16:9 · 10s · 720p");
     expect(markup).toContain('data-cola-action="canvas-config-settings"');
   });
@@ -932,6 +932,37 @@ describe("ColaAI canvas components", () => {
     );
     expect(markup).not.toContain('data-cola-node-toolbar-placement="above-title"');
     expect(markup).toContain('data-cola-action="double-click-upload-image"');
+  });
+
+  test("renders the same image option toolbar for selected AI image result nodes", () => {
+    const state = createInitialCanvasState();
+    const resultNode = {
+      ...state.nodes.find((node) => node.id === "seed-generation")!,
+      metadata: {
+        imageUrl: "data:image/png;base64,iVBORw0KGgo=",
+        status: "success" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <CanvasNode
+        node={resultNode}
+        selected
+        onConnectionStart={() => undefined}
+        onContentChange={() => undefined}
+        onImageFileChange={() => undefined}
+        onOpenGeneration={() => undefined}
+        onPointerDown={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('data-cola-image-option-toolbar="true"');
+    expect(markup).toContain("高清");
+    expect(markup).toContain("宫格切分");
+    expect(markup).toContain('data-cola-image-option="upscale"');
+    expect(markup).toContain('data-cola-image-option="slice"');
+    expect(markup).toContain('data-cola-action="download-canvas-image-node"');
+    expect(markup).toContain('data-cola-action="preview-canvas-image-node"');
+    expect(markup).not.toContain('data-cola-action="double-click-upload-image"');
   });
 
   test("renders GPT upscale config nodes with 1K 2K 4K controls", () => {
@@ -1615,7 +1646,7 @@ describe("ColaAI canvas components", () => {
     expect(getCanvasGenerationLaunchIntent(generationNode)).toBe("panel");
   });
 
-  test("renders the right-side generation panel in video mode with Agnes model", () => {
+  test("renders the right-side generation panel in video mode with the seedance display name", () => {
     const state = createInitialCanvasState();
     const markup = renderToStaticMarkup(
       <CanvasGenerationPanel
@@ -1638,7 +1669,7 @@ describe("ColaAI canvas components", () => {
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).toContain('data-cola-generation-mode="video"');
     expect(markup).toContain('data-cola-generation-model-option="agnes-video-v2.0"');
-    expect(markup).toContain("agnes-video-v2.0");
+    expect(markup).toContain("seedance-1.5");
     expect(markup).toContain("16:9 · 12s · 480p");
     expect(markup).toContain('data-cola-generation-video-duration-option="6"');
     expect(markup).toContain('data-cola-generation-video-resolution-option="custom"');

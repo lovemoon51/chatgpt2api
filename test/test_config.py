@@ -137,6 +137,34 @@ class ConfigLoadingTests(unittest.TestCase):
             saved = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["agnes_ai"]["api_keys"][0]["api_key"], "key-a")
 
+    def test_config_update_merges_partial_ai_review_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth-key": "test-admin",
+                        "ai_review": {
+                            "enabled": False,
+                            "base_url": "https://review.example/v1",
+                            "api_key": "review-key",
+                            "model": "review-model",
+                            "prompt": "review prompt",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = self.config_module.ConfigStore(config_path)
+            updated = store.update({"ai_review": {"enabled": True}})
+
+            self.assertTrue(updated["ai_review"]["enabled"])
+            self.assertEqual(updated["ai_review"]["base_url"], "https://review.example/v1")
+            self.assertEqual(updated["ai_review"]["api_key"], "review-key")
+            self.assertEqual(updated["ai_review"]["model"], "review-model")
+            self.assertEqual(updated["ai_review"]["prompt"], "review prompt")
+
     def test_config_diagnostics_masks_secret_values_and_reports_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "config.json"

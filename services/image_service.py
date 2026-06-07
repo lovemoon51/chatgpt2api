@@ -190,6 +190,13 @@ def thumbnail_url(base_url: str, relative_path: str) -> str:
     return f"{base_url.rstrip('/')}/image-thumbnails/{_safe_relative_path(relative_path)}"
 
 
+def thumbnail_source_path(relative_path: str) -> str | None:
+    rel = _safe_relative_path(relative_path)
+    if rel.startswith("image-thumbnails/"):
+        return rel.removeprefix("image-thumbnails/")
+    return None
+
+
 def _image_dimensions(path: Path) -> tuple[int, int] | None:
     try:
         with Image.open(path) as image:
@@ -221,7 +228,8 @@ def ensure_thumbnail(relative_path: str) -> Path:
 
 
 def get_thumbnail_response(relative_path: str, identity: dict[str, object] | None = None) -> FileResponse:
-    require_image_access(identity, relative_path)
+    if identity is not None:
+        require_image_access(identity, relative_path)
     return FileResponse(ensure_thumbnail(relative_path))
 
 
@@ -467,13 +475,15 @@ def _public_discover_item(item: dict[str, object], base_url: str) -> dict[str, o
     height = item.get("height")
     subtitle = f"{width} x {height}" if width and height else str(item.get("subtitle") or "").strip() or "ColaAI 公共精选"
     signed_url = generate_signed_image_url(path, base_url.rstrip("/"), expires_in=3600)
+    signed_thumbnail_url = generate_signed_image_url(f"image-thumbnails/{path}", base_url.rstrip("/"), expires_in=3600)
     return {
         "id": path,
         "title": title,
         "subtitle": subtitle,
         "prompt": revised_prompt or prompt or "复用这张公共精选的视觉风格继续创作。",
         "imageUrl": signed_url,
-        "imageFallbackUrl": signed_url,
+        "imageFallbackUrl": signed_thumbnail_url,
+        "thumbnail_url": signed_thumbnail_url,
         "path": path,
         "created_at": str(item.get("created_at") or ""),
         "tags": item.get("tags") if isinstance(item.get("tags"), list) else [],

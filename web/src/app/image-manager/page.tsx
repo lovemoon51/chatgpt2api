@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageTags, fetchManagedImages, setImageTags, updateManagedImagesPublicVisibility, type ManagedImage } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
@@ -542,7 +543,7 @@ function ImageManagerContent() {
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1 font-medium text-stone-700">
                       <CalendarDays className="size-3.5" />
-                      {item.created_at}
+                      {formatDateTime(item.created_at)}
                     </div>
                     <div className="flex items-center gap-1">
                       <Button
@@ -694,7 +695,7 @@ function ImageManagerContent() {
               />
               <div className="min-w-0 overflow-hidden text-xs text-stone-500">
                 <div className="truncate font-medium text-stone-700">{deleteTarget.name}</div>
-                <div className="truncate">{deleteTarget.created_at}</div>
+                <div className="truncate">{formatDateTime(deleteTarget.created_at)}</div>
                 <div>{formatSize(deleteTarget.size)}</div>
               </div>
             </div>

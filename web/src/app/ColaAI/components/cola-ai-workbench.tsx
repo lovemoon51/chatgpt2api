@@ -66,6 +66,7 @@ import {
   type PromptTemplateApplyPayload,
   type UserKeyLimits,
 } from "@/lib/api";
+import { backendDateTimeMs, parseBackendDateTime } from "@/lib/datetime";
 import {
   downloadImageUrl,
   fetchImageBlob,
@@ -312,13 +313,7 @@ function averageDuration(values: Array<number | undefined>) {
 }
 
 export function timestampFromIso(value?: string) {
-  if (!value) {
-    return undefined;
-  }
-  const normalized = value.trim();
-  const plainDateTimeMatch = normalized.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
-  const timestamp = new Date(plainDateTimeMatch ? `${plainDateTimeMatch[1]}T${plainDateTimeMatch[2]}Z` : normalized).getTime();
-  return Number.isFinite(timestamp) ? timestamp : undefined;
+  return backendDateTimeMs(value);
 }
 
 function getTaskTimingStats(task: GenerateTask) {
@@ -1061,8 +1056,7 @@ function findGenerateSessionIdForTask(sessions: GenerateSession[], taskId: strin
 }
 
 function formatGenerateSessionTime(value: string) {
-  const date = value ? new Date(value) : new Date();
-  const safeDate = Number.isFinite(date.getTime()) ? date : new Date();
+  const safeDate = parseBackendDateTime(value) ?? new Date();
   const now = new Date();
   const dateKeyFormatter = new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",

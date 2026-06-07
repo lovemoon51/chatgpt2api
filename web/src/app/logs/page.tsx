@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
@@ -85,6 +86,13 @@ function formatValue(value: unknown) {
     return JSON.stringify(value);
   }
   return String(value);
+}
+
+function formatLogValue(key: string, value: unknown) {
+  if (key === "started_at" || key === "ended_at" || key.endsWith("_at")) {
+    return typeof value === "string" ? formatDateTime(value) : formatValue(value);
+  }
+  return formatValue(value);
 }
 
 function getUrls(item: SystemLog | null) {
@@ -396,7 +404,7 @@ function LogsContent() {
                       <TableCell>
                         <Checkbox checked={selectedSet.has(item.id)} onCheckedChange={(checked) => toggleIds([item.id], Boolean(checked))} />
                       </TableCell>
-                      <TableCell className="whitespace-nowrap">{item.time}</TableCell>
+                      <TableCell className="whitespace-nowrap">{formatDateTime(item.time)}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {hasCallMeta ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {showDuration ? <TableCell className="whitespace-nowrap tabular-nums">{formatDuration(item)}</TableCell> : null}
@@ -491,7 +499,7 @@ function LogsContent() {
               <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-3">
                 <div>
                   <div className="text-xs text-stone-400">时间</div>
-                  <div className="mt-1 font-medium text-stone-700">{detailLog?.time || "-"}</div>
+                  <div className="mt-1 font-medium text-stone-700">{detailLog?.time ? formatDateTime(detailLog.time) : "-"}</div>
                 </div>
                 <div>
                   <div className="text-xs text-stone-400">类型</div>
@@ -514,7 +522,7 @@ function LogsContent() {
                     {section.entries.map(([key, value]) => (
                       <div key={key} className="flex items-start justify-between gap-4">
                         <span className="shrink-0 text-stone-400">{key}</span>
-                        <span className="text-right font-medium break-all text-stone-700">{formatValue(value)}</span>
+                        <span className="text-right font-medium break-all text-stone-700">{formatLogValue(key, value)}</span>
                       </div>
                     ))}
                   </div>

@@ -195,6 +195,7 @@ class AuthService:
                 "user_id": self._clean(raw.get("user_id")) or item_id,
                 "role": role,
                 "key_hash": key_hash,
+                "raw_key": self._clean(raw.get("raw_key")) or None,
                 "enabled": bool(raw.get("enabled", True)),
                 "created_at": created_at,
                 "last_used_at": last_used_at,
@@ -286,6 +287,7 @@ class AuthService:
             "password_hash": user.get("password_hash"),
             "role": "user",
             "key_hash": key_item.get("key_hash"),
+            "raw_key": key_item.get("raw_key"),
             "enabled": bool(user.get("enabled", True)),
             "key_enabled": bool(key_item.get("enabled", True)),
             "key_consumed_at": key_item.get("consumed_at"),
@@ -373,18 +375,20 @@ class AuthService:
                         "last_checkin_date": self._clean(item.get("last_checkin_date")) or None,
                     }
                 )
-                auth_keys.append(
-                    {
-                        "id": self._clean(item.get("key_id")) or user_id,
-                        "user_id": user_id,
-                        "role": "user",
-                        "key_hash": self._clean(item.get("key_hash")),
-                        "enabled": bool(item.get("key_enabled", item.get("enabled", True))),
-                        "created_at": self._clean(item.get("key_created_at")) or self._clean(item.get("created_at")) or _now_iso(),
-                        "last_used_at": self._clean(item.get("last_used_at")) or None,
-                        "consumed_at": self._clean(item.get("key_consumed_at")) or None,
-                    }
-                )
+                auth_key = {
+                    "id": self._clean(item.get("key_id")) or user_id,
+                    "user_id": user_id,
+                    "role": "user",
+                    "key_hash": self._clean(item.get("key_hash")),
+                    "enabled": bool(item.get("key_enabled", item.get("enabled", True))),
+                    "created_at": self._clean(item.get("key_created_at")) or self._clean(item.get("created_at")) or _now_iso(),
+                    "last_used_at": self._clean(item.get("last_used_at")) or None,
+                    "consumed_at": self._clean(item.get("key_consumed_at")) or None,
+                }
+                raw_key = self._clean(item.get("raw_key"))
+                if raw_key and self._is_unused_user_key(item):
+                    auth_key["raw_key"] = raw_key
+                auth_keys.append(auth_key)
                 continue
             auth_keys.append(
                 {
@@ -426,6 +430,41 @@ class AuthService:
             self._reload_locked()
             items = [item for item in self._items if role is None or item.get("role") == role]
             return [self._public_item(item) for item in items]
+
+    @staticmethod
+    def _is_unused_user_key(item: dict[str, object]) -> bool:
+        return (
+            item.get("role") == "user"
+            and bool(item.get("enabled", True))
+            and bool(item.get("key_enabled", True))
+            and not _normalize_email(item.get("email"))
+            and not AuthService._clean(item.get("key_consumed_at"))
+            and not AuthService._clean(item.get("last_used_at"))
+        )
+
+    @staticmethod
+    def _public_unused_user_key(item: dict[str, object]) -> dict[str, object]:
+        raw_key = AuthService._clean(item.get("raw_key"))
+        return {
+            "id": item.get("id"),
+            "key_id": item.get("key_id"),
+            "name": item.get("name"),
+            "email": _normalize_email(item.get("email")),
+            "created_at": item.get("created_at"),
+            "key_created_at": item.get("key_created_at"),
+            "limits": AuthService.normalize_limits(item.get("limits")),
+            "key": raw_key,
+            "copyable": bool(raw_key),
+        }
+
+    def list_unused_user_keys(self) -> list[dict[str, object]]:
+        with self._lock:
+            self._reload_locked()
+            return [
+                self._public_unused_user_key(item)
+                for item in self._items
+                if self._is_unused_user_key(item)
+            ]
 
     def _has_key_hash_locked(self, key_hash: str, *, exclude_id: str = "") -> bool:
         for item in self._items:
@@ -513,6 +552,7 @@ class AuthService:
                 "name": normalized_name,
                 "role": role,
                 "key_hash": key_hash,
+                "raw_key": raw_key if role == "user" else None,
                 "enabled": True,
                 "key_enabled": True,
                 "key_consumed_at": None,
@@ -557,10 +597,13 @@ class AuthService:
                         raise ValueError("这个邮箱已经绑定过 ColaAI 账号")
                     next_item["email"] = normalized_email
                 if "key" in updates and updates.get("key") is not None:
-                    next_item["key_hash"] = self._build_key_hash_locked(str(updates.get("key") or ""), exclude_id=normalized_id)
+                    raw_key = str(updates.get("key") or "")
+                    next_item["key_hash"] = self._build_key_hash_locked(raw_key, exclude_id=normalized_id)
                     if next_role == "user":
+                        next_item["raw_key"] = self._clean(raw_key)
                         next_item["key_enabled"] = True
                         next_item["key_consumed_at"] = None
+                        next_item["last_used_at"] = None
                 if "limits" in updates and updates.get("limits") is not None:
                     next_item["limits"] = self.normalize_limits(updates.get("limits"), current=next_item.get("limits"))
                 if next_role == "user" and any(key in updates for key in ("name", "email", "enabled", "limits")):
@@ -586,6 +629,25 @@ class AuthService:
                 return False
             self._save()
             return True
+
+    def delete_unused_user_keys(self, ids: list[str] | None = None) -> dict[str, object]:
+        target_ids = {self._clean(item_id) for item_id in (ids or []) if self._clean(item_id)}
+        with self._lock:
+            self._reload_locked()
+            removed_ids: list[str] = []
+            kept_items: list[dict[str, object]] = []
+            for item in self._items:
+                item_id = self._clean(item.get("id"))
+                should_consider = not target_ids or item_id in target_ids or self._clean(item.get("key_id")) in target_ids
+                if should_consider and self._is_unused_user_key(item):
+                    removed_ids.append(item_id)
+                    continue
+                kept_items.append(item)
+            if not removed_ids:
+                return {"removed": 0, "removed_ids": []}
+            self._items = kept_items
+            self._save()
+            return {"removed": len(removed_ids), "removed_ids": removed_ids}
 
     def get_user(self, user_id: str) -> dict[str, object] | None:
         normalized_id = self._clean(user_id)
@@ -638,6 +700,7 @@ class AuthService:
                 next_item["password_hash"] = _hash_password(normalized_password)
                 next_item["key_enabled"] = False
                 next_item["key_consumed_at"] = now.isoformat()
+                next_item.pop("raw_key", None)
                 next_item["last_used_at"] = now.isoformat()
                 next_item["last_login_ip"] = self._clean(login_ip) or None
                 next_item["updated_at"] = now.isoformat()
@@ -738,6 +801,7 @@ class AuthService:
         if consume_access_code and next_item.get("role") == "user":
             next_item["key_enabled"] = False
             next_item["key_consumed_at"] = now.isoformat()
+            next_item.pop("raw_key", None)
         self._items[index] = next_item
         item_id = self._clean(next_item.get("id"))
         last_flush_at = self._last_used_flush_at.get(item_id)

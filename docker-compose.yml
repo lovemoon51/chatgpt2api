@@ -13,6 +13,8 @@ services:
     ports:
       - "3001:8000"
     volumes:
+      # 容器以 UID 1000 运行；启动前确保宿主机执行：
+      #   mkdir -p data && sudo chown -R 1000:1000 config.json data
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:

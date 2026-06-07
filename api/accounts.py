@@ -50,6 +50,10 @@ class UserKeyUpdateRequest(BaseModel):
     limits: UserKeyLimitsRequest | None = None
 
 
+class UnusedUserKeyDeleteRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+
+
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
 
@@ -190,6 +194,21 @@ def create_router() -> APIRouter:
             "item": first["item"],
             "key": first["key"],
             "keys": created,
+            "items": auth_service.list_keys(role="user"),
+        }
+
+    @router.get("/api/auth/users/unused-keys")
+    async def list_unused_user_keys(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"items": auth_service.list_unused_user_keys()}
+
+    @router.delete("/api/auth/users/unused-keys")
+    async def delete_unused_user_keys(body: UnusedUserKeyDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        result = auth_service.delete_unused_user_keys(body.ids)
+        return {
+            **result,
+            "unused_items": auth_service.list_unused_user_keys(),
             "items": auth_service.list_keys(role="user"),
         }
 

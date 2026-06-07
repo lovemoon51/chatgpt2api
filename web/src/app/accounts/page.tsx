@@ -51,6 +51,7 @@ import {
   type Account,
   type AccountStatus,
 } from "@/lib/api";
+import { formatDateTime as formatBackendDateTime, parseBackendDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
@@ -132,8 +133,8 @@ function formatRestoreAt(value?: string | null) {
     return { absolute: "—", relative: "" };
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const date = parseBackendDateTime(value);
+  if (!date) {
     return { absolute: value, relative: "" };
   }
 
@@ -143,10 +144,14 @@ function formatRestoreAt(value?: string | null) {
   const hours = totalHours % 24;
   const relative = diffMs > 0 ? `剩余 ${days}d ${hours}h` : "已到恢复时间";
 
-  const pad = (num: number) => String(num).padStart(2, "0");
-  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const absolute = formatBackendDateTime(value, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 
   return { absolute, relative };
 }
@@ -215,10 +220,15 @@ function hasLowImageQuota(account: Account) {
 
 function formatDateTime(value?: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (num: number) => String(num).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const date = parseBackendDateTime(value);
+  if (!date) return value;
+  return formatBackendDateTime(value, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function probeBadgeMeta(state?: RefreshProbeState) {

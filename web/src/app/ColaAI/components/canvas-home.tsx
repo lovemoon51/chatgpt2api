@@ -2,6 +2,7 @@
 
 import { Check, ArrowRight, LayoutTemplate, Layers3, Plus, Sparkles, Trash2 } from "lucide-react";
 
+import { parseBackendDateTime } from "@/lib/datetime";
 import { cn } from "@/lib/utils";
 import type { CanvasHomeEntry, CanvasHomeSummary, CanvasTemplateCard } from "./canvas-home-state";
 import { colaButtonClass, colaCardClass, colaFocusClass, colaPanelClass } from "./cola-ai-style";
@@ -24,8 +25,8 @@ function formatUpdatedAt(value: string | null) {
     return "刚刚准备好";
   }
 
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) {
+  const date = parseBackendDateTime(value);
+  if (!date) {
     return "最近编辑";
   }
 

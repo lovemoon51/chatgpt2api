@@ -115,4 +115,19 @@ describe("ColaAILandingHero", () => {
     expect(markup).not.toContain(">产品主视觉</span>");
     expect(markup).not.toContain(">最近作品</span>");
   });
+
+  test("avoids black first-paint media blocks while landing images resolve", () => {
+    const markup = renderToStaticMarkup(
+      <ColaAILandingHero
+        items={items}
+        stageState="idle"
+        onScrollToDiscover={() => undefined}
+      />,
+    );
+
+    expect(markup).not.toContain("bg-black");
+    expect(markup).toContain("landing-hero__media-placeholder");
+    expect(markup).toContain('loading="eager"');
+    expect(markup).toContain('fetchPriority="high"');
+  });
 });

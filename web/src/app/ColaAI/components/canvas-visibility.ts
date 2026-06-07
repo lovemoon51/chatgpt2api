@@ -24,10 +24,11 @@ export function getVisibleCanvasNodes(
   }
 
   const pinned = new Set(pinnedNodeIds);
-  const viewLeft = -viewport.x / viewport.k - padding;
-  const viewTop = -viewport.y / viewport.k - padding;
-  const viewRight = viewLeft + size.width / viewport.k + padding * 2;
-  const viewBottom = viewTop + size.height / viewport.k + padding * 2;
+  const scale = Number.isFinite(viewport.k) && viewport.k > 0 ? viewport.k : 1;
+  const viewLeft = -viewport.x / scale - padding;
+  const viewTop = -viewport.y / scale - padding;
+  const viewRight = viewLeft + size.width / scale + padding * 2;
+  const viewBottom = viewTop + size.height / scale + padding * 2;
 
   return nodes.filter((node) => (
     pinned.has(node.id) ||

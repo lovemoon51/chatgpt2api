@@ -72,12 +72,31 @@ describe("canvas visibility helpers", () => {
     expect(visibleNodes.map((node) => node.id)).toEqual(["visible-a", "visible-b", "offscreen"]);
   });
 
+  test("uses a safe viewport scale when filtering visible nodes", () => {
+    const visibleNodes = getVisibleCanvasNodes(
+      nodes,
+      { x: 0, y: 0, k: 0 },
+      { width: 900, height: 600 },
+      120,
+    );
+
+    expect(visibleNodes.map((node) => node.id)).toEqual(["visible-a", "visible-b"]);
+  });
+
   test("renders only connections whose endpoints are visible", () => {
     const visibleNodes = getVisibleCanvasNodes(nodes, viewport, { width: 900, height: 600 }, 120);
 
     expect(
       getVisibleCanvasConnections(connections, visibleNodes).map((connection) => connection.id),
     ).toEqual(["visible-connection"]);
+  });
+
+  test("renders selected offscreen connection only when both endpoints are pinned", () => {
+    const visibleNodes = getVisibleCanvasNodes(nodes, viewport, { width: 900, height: 600 }, 120, ["offscreen"]);
+
+    expect(
+      getVisibleCanvasConnections(connections, visibleNodes).map((connection) => connection.id),
+    ).toEqual(["visible-connection", "hidden-connection"]);
   });
 
   test("builds tight svg bounds around the rendered nodes", () => {

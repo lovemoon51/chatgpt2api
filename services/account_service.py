@@ -408,11 +408,23 @@ class AccountService:
         rotation = {token: index for index, token in enumerate(tokens[start:] + tokens[:start])}
         return sorted(
             tokens,
-            key=lambda token: (
-                int(self._accounts.get(token, {}).get("success") or 0),
-                str(self._accounts.get(token, {}).get("last_used_at") or ""),
-                rotation[token],
-            ),
+            key=lambda token: self._image_account_health_score(token, rotation[token]),
+        )
+
+    def _image_account_health_score(self, token: str, rotation_index: int) -> tuple[int, int, int, int, str, int]:
+        account = self._accounts.get(token, {})
+        success = max(0, int(account.get("success") or 0))
+        fail = max(0, int(account.get("fail") or 0))
+        inflight = max(0, int(self._image_inflight.get(token, 0)))
+        quota = max(0, int(account.get("quota") or 0))
+        quota_penalty = 0 if bool(account.get("image_quota_unknown")) or quota > 0 else 1
+        return (
+            inflight,
+            fail,
+            quota_penalty,
+            success,
+            str(account.get("last_used_at") or ""),
+            rotation_index,
         )
 
     def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:

@@ -31,9 +31,9 @@ import {
   getDroppedImageFile,
   handlePromptComposerKeyDown,
   imageResolutionCreditCost,
-  timestampFromIso,
   prependGenerateSession,
 } from "./cola-ai-workbench";
+import { timestampFromIso } from "./cola-ai-time";
 import { buildLandingHeroItems, landingHeroFallbackItems } from "./cola-ai-landing-hero-state";
 import type { ImageTask, PromptTemplate } from "@/lib/api";
 import type { GenerateTask } from "./generate-task-submission";

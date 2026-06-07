@@ -13,6 +13,7 @@ import { CanvasMinimapPanel } from "./canvas-minimap-panel";
 import { CanvasToolbar } from "./canvas-toolbar";
 import { getCanvasViewport } from "./canvas-viewport-store";
 import { collectCanvasContinuationSettings, collectCanvasGenerationSettings, getCanvasContinuationInputCounts, type CanvasReferenceImage } from "./canvas-workflow";
+import { getImageTaskPollingDelayMs } from "./image-task-polling";
 import { InfiniteCanvasSurface } from "./infinite-canvas-surface";
 import { configNodeHeight, configNodeWidth, useCanvasStore } from "./use-canvas-store";
 import type { CanvasInteractionMode, CanvasNodeData, CanvasNodeStatus, CanvasPoint, CanvasState, CanvasViewport } from "./canvas-types";
@@ -238,6 +239,11 @@ export function CanvasWorkspace({
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [activeTaskIds, setActiveTaskIds] = useState<string[]>([]);
+  const activeTaskIdsKey = useMemo(() => activeTaskIds.join(","), [activeTaskIds]);
+  const activeTaskPollingState = useMemo(
+    () => ({ ids: activeTaskIdsKey ? activeTaskIdsKey.split(",") : [] }),
+    [activeTaskIdsKey],
+  );
   const [settings, setSettings] = useState<GenerationSettings>({
     prompt: "霓虹城市夜景，电影感光影，高质量细节。",
     model: "gpt-image-2",
@@ -294,15 +300,30 @@ export function CanvasWorkspace({
   }, [panelTargetNode, settings, state]);
 
   useEffect(() => {
-    if (activeTaskIds.length === 0) {
+    if (activeTaskPollingState.ids.length === 0) {
       return;
     }
 
     let active = true;
+    let timer: number | null = null;
+    const taskIds = activeTaskPollingState.ids;
+
+    const scheduleNextPoll = (tasks: ImageTask[]) => {
+      if (!active) {
+        return;
+      }
+      const delayMs = getImageTaskPollingDelayMs({ activeTaskIds: taskIds, tasks });
+      if (delayMs <= 0) {
+        return;
+      }
+      timer = window.setTimeout(() => void pollTasks(), delayMs);
+    };
 
     async function pollTasks() {
+      let polledTasks: ImageTask[] = [];
       try {
-        const result = await fetchImageTasks(activeTaskIds);
+        const result = await fetchImageTasks(taskIds);
+        polledTasks = result.items;
         if (!active) {
           return;
         }
@@ -319,16 +340,19 @@ export function CanvasWorkspace({
         }
       } catch {
         // Keep polling. Existing task state remains visible in the canvas.
+      } finally {
+        scheduleNextPoll(polledTasks);
       }
     }
 
     void pollTasks();
-    const timer = window.setInterval(() => void pollTasks(), 2600);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [activeTaskIds, updateGenerationTaskNode]);
+  }, [activeTaskPollingState, updateGenerationTaskNode]);
 
   function createNodePosition(nodeSize: { width: number; height: number }) {
     const viewport = getCanvasViewport();

@@ -203,6 +203,69 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(token, "older-token")
             service.release_image_slot(token)
 
+    def test_get_available_access_token_demotes_failed_image_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["flaky-token", "healthy-token"])
+            service.update_account(
+                "flaky-token",
+                {
+                    "status": "正常",
+                    "quota": 25,
+                    "success": 0,
+                    "fail": 4,
+                    "last_used_at": "2026-05-24 10:00:00",
+                },
+            )
+            service.update_account(
+                "healthy-token",
+                {
+                    "status": "正常",
+                    "quota": 25,
+                    "success": 1,
+                    "fail": 0,
+                    "last_used_at": "2026-05-24 12:00:00",
+                },
+            )
+
+            token = service.get_available_access_token()
+
+            self.assertEqual(token, "healthy-token")
+            service.release_image_slot(token)
+
+    def test_get_available_access_token_prefers_idle_image_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["busy-token", "idle-token"])
+            service.update_account(
+                "busy-token",
+                {
+                    "status": "正常",
+                    "quota": 25,
+                    "success": 0,
+                    "fail": 0,
+                    "last_used_at": "2026-05-24 10:00:00",
+                },
+            )
+            service.update_account(
+                "idle-token",
+                {
+                    "status": "正常",
+                    "quota": 25,
+                    "success": 1,
+                    "fail": 0,
+                    "last_used_at": "2026-05-24 12:00:00",
+                },
+            )
+            first = service.get_available_access_token()
+
+            second = service.get_available_access_token()
+
+            self.assertEqual(first, "busy-token")
+            self.assertEqual(second, "idle-token")
+            service.release_image_slot(first)
+            service.release_image_slot(second)
+
     def test_get_available_access_token_can_still_verify_remote_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))

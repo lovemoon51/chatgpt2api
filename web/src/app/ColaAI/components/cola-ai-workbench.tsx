@@ -101,6 +101,7 @@ import {
   colaShellClass,
   colaSurfaceClass,
 } from "./cola-ai-style";
+import { timestampFromIso } from "./cola-ai-time";
 import {
   createBlankCanvasState,
   deleteCanvasLibraryRecord,
@@ -127,6 +128,7 @@ import {
   type GenerateSubmissionInput,
   type GenerateTask,
 } from "./generate-task-submission";
+import { getImageTaskPollingDelayMs } from "./image-task-polling";
 import { RovaMediaBackground } from "./rova-media-background";
 import type { CanvasState } from "./canvas-types";
 import type { CanvasReferenceImage } from "./canvas-workflow";
@@ -373,16 +375,6 @@ function averageDuration(values: Array<number | undefined>) {
   return Math.round(normalized.reduce((sum, value) => sum + value, 0) / normalized.length);
 }
 
-export function timestampFromIso(value?: string) {
-  if (!value) {
-    return undefined;
-  }
-  const normalized = value.trim();
-  const plainDateTimeMatch = normalized.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
-  const timestamp = new Date(plainDateTimeMatch ? `${plainDateTimeMatch[1]}T${plainDateTimeMatch[2]}Z` : normalized).getTime();
-  return Number.isFinite(timestamp) ? timestamp : undefined;
-}
-
 function getTaskTimingStats(task: GenerateTask) {
   const queueMs = task.queue_duration_ms ?? task.timings?.queue_wait_ms ?? task.timing_ms?.queue_wait_ms ?? task.timings?.queue ?? task.timing_ms?.queue;
   const upstreamMs =
@@ -560,6 +552,8 @@ export function handlePromptComposerKeyDown(event: PromptComposerKeyEvent, onGen
   event.preventDefault();
   onGenerate();
 }
+
+export { timestampFromIso } from "./cola-ai-time";
 
 export function clearReferencePreviewUrl(
   referencePreviewUrlRef: { current: string },
@@ -4936,6 +4930,11 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
     () => submittedTasks.filter((task) => !terminalTaskStatuses.has(task.status)).map((task) => task.id),
     [submittedTasks],
   );
+  const activeTaskIdsKey = useMemo(() => activeTaskIds.join(","), [activeTaskIds]);
+  const activeTaskPollingState = useMemo(
+    () => ({ ids: activeTaskIdsKey ? activeTaskIdsKey.split(",") : [] }),
+    [activeTaskIdsKey],
+  );
   const canvasHomeEntries = useMemo(() => {
     void canvasLibraryRevision;
     const storage = typeof window === "undefined"
@@ -5070,14 +5069,33 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
   }, [isPublicPreview]);
 
   useEffect(() => {
-    if (activeTaskIds.length === 0) {
+    if (activeTaskPollingState.ids.length === 0) {
       return;
     }
 
     let active = true;
+    let timer: number | null = null;
+    const taskIds = activeTaskPollingState.ids;
+
+    const scheduleNextPoll = (tasks: ImageTask[]) => {
+      if (!active) {
+        return;
+      }
+      const delayMs = getImageTaskPollingDelayMs({ activeTaskIds: taskIds, tasks });
+      if (delayMs <= 0) {
+        return;
+      }
+      timer = window.setTimeout(
+        () => void pollTasks(),
+        delayMs,
+      );
+    };
+
     const pollTasks = async () => {
+      let polledTasks: ImageTask[] = [];
       try {
-        const result = await fetchImageTasks(activeTaskIds);
+        const result = await fetchImageTasks(taskIds);
+        polledTasks = result.items;
         if (active) {
           const nextConversations = mergeGenerateTasksIntoImageConversations(
             generateConversationsRef.current,
@@ -5102,16 +5120,19 @@ export function ColaAIWorkbench({ session, initialMode = "discover" }: ColaAIWor
         if (active) {
           setGenerationError("任务状态同步失败，稍后会自动重试。");
         }
+      } finally {
+        scheduleNextPoll(polledTasks);
       }
     };
 
     void pollTasks();
-    const timer = window.setInterval(() => void pollTasks(), 2500);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [activeGenerateSessionId, activeTaskIds]);
+  }, [activeGenerateSessionId, activeTaskPollingState]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.scrollTo !== "function") {

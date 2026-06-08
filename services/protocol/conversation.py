@@ -157,6 +157,8 @@ def image_stream_error_message(message: str) -> str:
     if is_usage_limit_error(text):
         return "当前可用账号图片额度已用尽，账号已保留，等待额度恢复后会自动重新检查。"
     lower = text.lower()
+    if is_image_parameter_text_response(text):
+        return "上游返回了图片参数文本但没有生成图片，已自动换账号重试；如果仍失败，请换一种更明确的扩图描述后再试。"
     if is_checkout_required_error(text):
         return "上游返回 ChatGPT Plus 结账页，当前账号不能生成图片。请换可生成图片的账号，或给账号开通 Plus 后重试。"
     if is_retryable_image_connection_error(lower):
@@ -180,6 +182,26 @@ def no_image_result_message(timeout_secs: int | None = None) -> str:
         f"上游图片任务在 {timeout_secs or config.image_poll_timeout_secs} 秒内没有返回图片数据，"
         "可能仍在生成、被上游静默拒绝，或返回格式发生变化。请稍后重试，或在设置里调大图片轮询超时。"
     )
+
+
+def is_image_parameter_text_response(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*```$", "", text).strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    keys = {str(key) for key in payload}
+    image_param_keys = {"prompt", "size", "referenced_image_ids", "image", "n", "model", "quality"}
+    return "prompt" in keys and len(keys & image_param_keys) >= 2
 
 
 def emit_image_progress(
@@ -328,13 +350,32 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None) -> str:
+def build_image_prompt(prompt: str, size: str | None, *, has_reference_images: bool = False) -> str:
     base_prompt = str(prompt or "").strip()
-    prompt = f"请直接生成图片，不要只回复文字描述。画面需求：{base_prompt}" if base_prompt else "请直接生成图片。"
+    if has_reference_images:
+        prompt = (
+            "请基于参考图进行图片编辑，直接输出编辑后的图片，不要只回复文字描述，"
+            "不要输出 JSON、参数、代码块或说明文字。"
+            f"编辑需求：{base_prompt}"
+        ) if base_prompt else (
+            "请基于参考图进行图片编辑，直接输出编辑后的图片，不要只回复文字描述，"
+            "不要输出 JSON、参数、代码块或说明文字。"
+        )
+    else:
+        prompt = f"请直接生成图片，不要只回复文字描述。画面需求：{base_prompt}" if base_prompt else "请直接生成图片。"
     if not size:
         return prompt
     if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
         return f"{prompt.strip()}\n\n输出图片，宽高比为 {size}。"
+    if has_reference_images:
+        outpaint_hint = {
+            "1:1": "将参考图编辑为 1:1 正方形画布，保留原图主体与风格，必要时补全画布边缘内容。",
+            "16:9": "扩展画布到 16:9 横屏比例，保留原图主体与风格，在新增画布区域自然补全背景和细节。",
+            "9:16": "扩展画布到 9:16 竖屏比例，保留原图主体与风格，在新增画布区域自然补全背景和细节。",
+            "4:3": "扩展或裁定画布到 4:3 比例，保留原图主体与风格，让画面自然完整。",
+            "3:4": "扩展或裁定画布到 3:4 比例，保留原图主体与风格，让画面自然完整。",
+        }[size]
+        return f"{prompt.strip()}\n\n{outpaint_hint}"
     hint = {
         "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
         "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
@@ -683,7 +724,9 @@ def conversation_events(
     image_model = str(model or "").strip() in IMAGE_MODELS
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
-    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size)) if image_model else prompt
+    final_prompt = prompt_with_global_system(
+        build_image_prompt(prompt, size, has_reference_images=bool(images))
+    ) if image_model else prompt
     payloads = backend.stream_conversation(
         messages=normalized,
         model=model,
@@ -800,8 +843,12 @@ def stream_image_outputs(
     if message and not file_ids and not sediment_ids and last.get("blocked"):
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
+    if message and not file_ids and not sediment_ids and is_image_parameter_text_response(message):
+        raise TextOnlyImageResponseError(image_stream_error_message(message))
     if message and not file_ids and not sediment_ids and is_text_response:
-        raise TextOnlyImageResponseError(f"上游返回了文字而不是图片：{message[:240]}")
+        raise TextOnlyImageResponseError(image_stream_error_message(f"上游返回了文字而不是图片：{message[:240]}"))
+    if not file_ids and not sediment_ids and last.get("tool_invoked") is False:
+        raise TextOnlyImageResponseError("上游未启动图片生成工具，请换一种更明确的图片编辑描述后重试。")
 
     resolve_started = time.time()
     emit_image_progress(

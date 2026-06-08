@@ -25,6 +25,16 @@ function normalizeImageSize(size: string) {
   return size === "智能" ? undefined : size;
 }
 
+function inferImageSizeFromPrompt(prompt: string) {
+  const normalized = prompt.replace(/[：]/g, ":").replace(/\s+/g, "");
+  const match = normalized.match(/(?:16:9|9:16|4:3|3:4|1:1)/);
+  return match?.[0];
+}
+
+function resolveImageSize(size: string, prompt: string) {
+  return normalizeImageSize(size) ?? inferImageSizeFromPrompt(prompt);
+}
+
 function normalizeCanvasTaskResolution(resolution?: string): ImageResolution | undefined {
   if (resolution === "8k") {
     return "4k";
@@ -70,7 +80,7 @@ export async function createCanvasGenerationTasks(
   const prompt = settings.prompt.trim();
   const count = Math.max(1, Math.min(4, settings.count));
   const model = normalizeImageModel(settings.model);
-  const size = normalizeImageSize(settings.size);
+  const size = resolveImageSize(settings.size, prompt);
   const resolution = normalizeCanvasTaskResolution(settings.resolution);
   const createGeneration = deps.createGenerationTask ?? createImageGenerationTask;
   const createEdit = deps.createEditTask ?? createImageEditTask;

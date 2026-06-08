@@ -312,6 +312,45 @@ describe("canvas generation task routing", () => {
     ]);
   });
 
+  test("infers a 16:9 edit size from the prompt when canvas size is smart", async () => {
+    const referenceFile = new File(["image"], "参考图片.png", { type: "image/png" });
+    const editCalls: Array<{ size?: string }> = [];
+
+    await createCanvasGenerationTasks(
+      createSettings({
+        count: 1,
+        prompt: "基于参考图进行图片编辑扩展画布到 16:9",
+        size: "智能",
+        referenceImages: [
+          {
+            nodeId: "seed-image",
+            title: "参考图片",
+            imageUrl: "data:image/png;base64,aW1hZ2U=",
+          },
+        ],
+      }),
+      {
+        createTaskId: () => "edit-task-1",
+        fetchReferenceFile: async () => referenceFile,
+        createGenerationTask: async () => {
+          throw new Error("generation task should not be used");
+        },
+        createEditTask: async (_id, _files, _prompt, _model, size) => {
+          editCalls.push({ size });
+          return {
+            id: "edit-task-1",
+            status: "queued",
+            mode: "edit",
+            created_at: "",
+            updated_at: "",
+          };
+        },
+      },
+    );
+
+    expect(editCalls).toEqual([{ size: "16:9" }]);
+  });
+
   test("maps canvas 8k upscale edit requests to the highest backend-supported resolution", async () => {
     const referenceFile = new File(["image"], "参考图片.png", { type: "image/png" });
     const editCalls: Array<{ resolution?: string }> = [];

@@ -14,7 +14,7 @@ function normalizeImageModel(model: string): ImageModel | undefined {
   if (model === "gpt-image-2" || model === "codex-gpt-image-2" || model === "agnes-image-2.1-flash") {
     return model;
   }
-  return "gpt-image-2";
+  return undefined;
 }
 
 function normalizeVideoModel(model: string) {
@@ -23,16 +23,6 @@ function normalizeVideoModel(model: string) {
 
 function normalizeImageSize(size: string) {
   return size === "智能" ? undefined : size;
-}
-
-function inferImageSizeFromPrompt(prompt: string) {
-  const normalized = prompt.replace(/[：]/g, ":").replace(/\s+/g, "");
-  const match = normalized.match(/(?:16:9|9:16|4:3|3:4|1:1)/);
-  return match?.[0];
-}
-
-function resolveImageSize(size: string, prompt: string) {
-  return normalizeImageSize(size) ?? inferImageSizeFromPrompt(prompt);
 }
 
 function normalizeCanvasTaskResolution(resolution?: string): ImageResolution | undefined {
@@ -80,7 +70,7 @@ export async function createCanvasGenerationTasks(
   const prompt = settings.prompt.trim();
   const count = Math.max(1, Math.min(4, settings.count));
   const model = normalizeImageModel(settings.model);
-  const size = resolveImageSize(settings.size, prompt);
+  const size = normalizeImageSize(settings.size);
   const resolution = normalizeCanvasTaskResolution(settings.resolution);
   const createGeneration = deps.createGenerationTask ?? createImageGenerationTask;
   const createEdit = deps.createEditTask ?? createImageEditTask;

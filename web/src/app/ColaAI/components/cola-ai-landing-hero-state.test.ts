@@ -73,25 +73,11 @@ describe("cola-ai-landing-hero-state", () => {
       id: "public-discover-1",
       title: "公共角色海报",
       subtitle: "ColaAI 公共精选",
-      imageUrl: "/public-images/public-discover-1-thumb.png?signature=test",
-      imageFallbackUrl: "/public-images/public-discover-1.png?signature=test",
+      imageUrl: "/public-images/public-discover-1.png?signature=test",
+      imageFallbackUrl: "/public-images/public-discover-1-thumb.png?signature=test",
       alt: "公共角色海报 ColaAI 公共精选",
     });
     expect(items[1].id).toBe(landingHeroFallbackItems[0].id);
-  });
-
-  test("uses thumbnails as the landing hero primary source for faster first paint", () => {
-    const items = buildPublicDiscoverLandingHeroItems([
-      {
-        id: "public-discover-thumb",
-        title: "快速首屏图",
-        imageUrl: "/public-images/original-large.png?signature=test",
-        imageFallbackUrl: "/public-images/thumb-small.webp?signature=test",
-      },
-    ]);
-
-    expect(items[0].imageUrl).toBe("/public-images/thumb-small.webp?signature=test");
-    expect(items[0].imageFallbackUrl).toBe("/public-images/original-large.png?signature=test");
   });
 
   test("calculates staged scroll progress for the orbit handoff animation", () => {

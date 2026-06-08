@@ -236,14 +236,9 @@ class ImageOwnershipTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["title"], "public product poster")
         self.assertEqual(result["items"][0]["prompt"], "polished public product poster")
         self.assertIn("/public-images/2026/05/20/public-discover.png?", result["items"][0]["imageUrl"])
-        self.assertIn("/public-images/image-thumbnails/2026/05/20/public-discover.png?", result["items"][0]["thumbnail_url"])
-        self.assertEqual(result["items"][0]["imageFallbackUrl"], result["items"][0]["thumbnail_url"])
         parsed = urlparse(result["items"][0]["imageUrl"])
         params = parse_qs(parsed.query)
         self.assertTrue(verify_signed_url("2026/05/20/public-discover.png", int(params["expires"][0]), params["signature"][0]))
-        thumb_parsed = urlparse(result["items"][0]["thumbnail_url"])
-        thumb_params = parse_qs(thumb_parsed.query)
-        self.assertTrue(verify_signed_url("image-thumbnails/2026/05/20/public-discover.png", int(thumb_params["expires"][0]), thumb_params["signature"][0]))
 
     def test_public_discover_images_include_approved_public_template_previews_without_asset_tags(self) -> None:
         self.write_image("2026/05/20/template-approved.png", PNG_BYTES)
@@ -302,14 +297,9 @@ class ImageOwnershipTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["prompt"], "晶透玻璃质感的产品海报")
         self.assertEqual(result["items"][0]["tags"], ["product", "poster"])
         self.assertIn("/public-images/2026/05/20/template-approved.png?", result["items"][0]["imageUrl"])
-        self.assertIn("/public-images/image-thumbnails/2026/05/20/template-approved.png?", result["items"][0]["thumbnail_url"])
-        self.assertEqual(result["items"][0]["imageFallbackUrl"], result["items"][0]["thumbnail_url"])
         parsed = urlparse(result["items"][0]["imageUrl"])
         params = parse_qs(parsed.query)
         self.assertTrue(verify_signed_url("2026/05/20/template-approved.png", int(params["expires"][0]), params["signature"][0]))
-        thumb_parsed = urlparse(result["items"][0]["thumbnail_url"])
-        thumb_params = parse_qs(thumb_parsed.query)
-        self.assertTrue(verify_signed_url("image-thumbnails/2026/05/20/template-approved.png", int(thumb_params["expires"][0]), thumb_params["signature"][0]))
 
     def test_delete_images_marks_asset_deleted(self) -> None:
         self.write_image("2026/05/20/remove.png", PNG_BYTES)

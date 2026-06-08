@@ -29,7 +29,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { fetchDashboard, type DashboardMetricGroup, type DashboardResponse } from "@/lib/api";
-import { parseBackendDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
@@ -104,12 +103,11 @@ function formatDateTime(value?: string | null) {
   if (!value) {
     return "—";
   }
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return value;
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

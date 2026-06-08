@@ -1,5 +1,4 @@
 import type { ManagedImage } from "@/lib/api";
-import { getPreferredPreviewUrl, getPreviewFallbackUrl, type PreviewImageSource } from "@/lib/image-fetch";
 
 export type LandingHeroItem = {
   id: string;
@@ -29,7 +28,6 @@ type PublicDiscoverLandingImage = {
   prompt?: string;
   imageUrl: string;
   imageFallbackUrl?: string;
-  thumbnail_url?: string;
 };
 
 export const landingHeroFallbackItems: LandingHeroItem[] = [
@@ -82,16 +80,12 @@ export function buildLandingHeroItems(_images: ManagedImage[]): LandingHeroItem[
 function publicDiscoverImageToLandingItem(image: PublicDiscoverLandingImage, index: number): LandingHeroItem {
   const title = image.title.trim() || `公共精选 ${index + 1}`;
   const subtitle = image.subtitle?.trim() || "ColaAI 公共精选";
-  const previewSource: PreviewImageSource = {
-    url: image.imageUrl,
-    thumbnail_url: image.thumbnail_url || image.imageFallbackUrl,
-  };
   return {
     id: image.id || `public-discover-${index + 1}`,
     title,
     subtitle,
-    imageUrl: getPreferredPreviewUrl(previewSource, "preferThumbnail"),
-    imageFallbackUrl: getPreviewFallbackUrl(previewSource, "preferThumbnail"),
+    imageUrl: image.imageUrl,
+    imageFallbackUrl: image.imageFallbackUrl,
     alt: `${title} ${subtitle}`,
   };
 }

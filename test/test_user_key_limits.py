@@ -263,78 +263,6 @@ class UserKeyAuthServiceLimitTests(unittest.TestCase):
             self.assertFalse(auth_keys[0]["enabled"])
             self.assertTrue(auth_keys[0]["consumed_at"])
 
-    def test_unused_user_keys_keep_copyable_raw_key_until_consumed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
-            user, raw_user_key = service.create_key(role="user", name="Invite Guest", limits={"images_total": 5})
-
-            listed = service.list_unused_user_keys()
-            public_items = service.list_keys(role="user")
-            auth_keys = service.storage.load_auth_keys()
-
-            self.assertEqual(len(listed), 1)
-            self.assertEqual(listed[0]["id"], user["id"])
-            self.assertEqual(listed[0]["key"], raw_user_key)
-            self.assertTrue(listed[0]["copyable"])
-            self.assertEqual(auth_keys[0]["raw_key"], raw_user_key)
-            self.assertNotIn("key", public_items[0])
-            self.assertNotIn("raw_key", public_items[0])
-
-            self.assertIsNotNone(service.authenticate(raw_user_key))
-            self.assertEqual(service.list_unused_user_keys(), [])
-            self.assertNotIn("raw_key", service.storage.load_auth_keys()[0])
-
-    def test_legacy_unused_user_keys_can_be_listed_but_not_copied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            auth_keys_path = Path(tmp_dir) / "auth_keys.json"
-            raw_key = "legacy-unused-key"
-            legacy_item = {
-                "id": "legacy-unused-user",
-                "name": "Legacy Unused",
-                "role": "user",
-                "key_hash": hashlib.sha256(raw_key.encode("utf-8")).hexdigest(),
-                "enabled": True,
-                "created_at": "2026-06-01T00:00:00+00:00",
-                "last_used_at": None,
-                "consumed_at": None,
-            }
-            auth_keys_path.write_text(json.dumps({"items": [legacy_item]}, ensure_ascii=False), encoding="utf-8")
-            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", auth_keys_path))
-
-            listed = service.list_unused_user_keys()
-
-            self.assertEqual(len(listed), 1)
-            self.assertEqual(listed[0]["id"], "legacy-unused-user")
-            self.assertEqual(listed[0]["key"], "")
-            self.assertFalse(listed[0]["copyable"])
-
-    def test_delete_unused_user_keys_only_removes_unbound_access_codes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
-            unused, _unused_key = service.create_key(role="user", name="Unused", limits={"images_total": 5})
-            consumed, consumed_key = service.create_key(role="user", name="Consumed", limits={"images_total": 5})
-            self.assertIsNotNone(service.authenticate(consumed_key))
-
-            result = service.delete_unused_user_keys([unused["id"], consumed["id"]])
-
-            self.assertEqual(result["removed"], 1)
-            self.assertEqual(result["removed_ids"], [unused["id"]])
-            remaining_ids = {item["id"] for item in service.list_keys(role="user")}
-            self.assertNotIn(unused["id"], remaining_ids)
-            self.assertIn(consumed["id"], remaining_ids)
-
-    def test_unused_user_keys_exclude_bound_email_even_if_access_code_is_not_consumed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
-            bound, _raw_key = service.create_key(role="user", name="Bound User", limits={"images_total": 5})
-
-            service.update_key(bound["id"], {"email": "bound@example.com"}, role="user")
-
-            self.assertEqual(service.list_unused_user_keys(), [])
-            result = service.delete_unused_user_keys([bound["id"]])
-            self.assertEqual(result["removed"], 0)
-            self.assertIsNotNone(service.get_user(bound["id"]))
-
     def test_user_access_code_activation_binds_email_password_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
@@ -628,44 +556,6 @@ class UserKeyManagementApiTests(unittest.TestCase):
             self.assertNotIn("password_hash", payload["item"])
             self.assertNotIn("key_hash", payload["item"])
 
-    def test_unused_user_keys_api_lists_and_deletes_unbound_keys(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
-            unused, raw_unused_key = service.create_key(role="user", name="Unused API")
-            consumed, consumed_key = service.create_key(role="user", name="Consumed API")
-            self.assertIsNotNone(service.authenticate(consumed_key))
-            app = FastAPI()
-            app.include_router(accounts_module.create_router())
-
-            with (
-                mock.patch.object(accounts_module, "auth_service", service),
-                mock.patch.object(accounts_module, "require_admin", return_value={"id": "admin", "role": "admin"}),
-            ):
-                client = TestClient(app)
-                list_response = client.get("/api/auth/users/unused-keys", headers={"Authorization": "Bearer admin"})
-                delete_response = client.request(
-                    "DELETE",
-                    "/api/auth/users/unused-keys",
-                    headers={"Authorization": "Bearer admin"},
-                    json={"ids": [unused["id"], consumed["id"]]},
-                )
-
-            self.assertEqual(list_response.status_code, 200, list_response.text)
-            listed = list_response.json()["items"]
-            self.assertEqual(len(listed), 1)
-            self.assertEqual(listed[0]["id"], unused["id"])
-            self.assertEqual(listed[0]["key"], raw_unused_key)
-            self.assertTrue(listed[0]["copyable"])
-
-            self.assertEqual(delete_response.status_code, 200, delete_response.text)
-            payload = delete_response.json()
-            self.assertEqual(payload["removed"], 1)
-            self.assertEqual(payload["removed_ids"], [unused["id"]])
-            self.assertEqual(payload["unused_items"], [])
-            remaining_ids = {item["id"] for item in payload["items"]}
-            self.assertNotIn(unused["id"], remaining_ids)
-            self.assertIn(consumed["id"], remaining_ids)
-
 
 class UserKeyLimitApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -675,7 +565,7 @@ class UserKeyLimitApiTests(unittest.TestCase):
         self.client = TestClient(app)
         self.addCleanup(usage_limit_service.reset)
 
-        async def no_filter(_call, _text, **_kwargs):
+        async def no_filter(_call, _text):
             return None
 
         self.filter_patcher = mock.patch.object(ai_module, "filter_or_log", no_filter)
@@ -852,56 +742,6 @@ class UserKeyLimitApiTests(unittest.TestCase):
             reloaded = service.get_user(user["id"])
             self.assertEqual(reloaded["limits"]["images_used"], 2)
             self.assertEqual(reloaded["limits"]["images_remaining"], 1)
-
-    def test_image_edit_entry_skips_filter_for_outpaint_prompt(self) -> None:
-        filter_calls = []
-
-        async def record_filter(_call, text, **kwargs):
-            filter_calls.append((text, kwargs.get("skip_ai_review")))
-
-        with (
-            mock.patch.object(ai_module, "require_identity", return_value={"id": "admin", "name": "管理员", "role": "admin"}),
-            mock.patch.object(ai_module, "filter_or_log", side_effect=record_filter),
-            mock.patch.object(
-                ai_module.openai_v1_image_edit,
-                "handle",
-                return_value={"created": 1, "data": [{"b64_json": "ZmFrZQ=="}]},
-            ),
-        ):
-            response = self.client.post(
-                "/v1/images/edits",
-                headers={"Authorization": "Bearer chatgpt2api"},
-                data={"model": "gpt-image-2", "prompt": "扩展这张图", "n": "1", "size": "16:9", "resolution": "4K"},
-                files={"image": ("image.png", b"image", "image/png")},
-            )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(filter_calls, [("扩展这张图", True)])
-
-    def test_image_edit_entry_still_filters_non_outpaint_prompt(self) -> None:
-        filter_calls = []
-
-        async def record_filter(_call, text, **kwargs):
-            filter_calls.append((text, kwargs.get("skip_ai_review")))
-
-        with (
-            mock.patch.object(ai_module, "require_identity", return_value={"id": "admin", "name": "管理员", "role": "admin"}),
-            mock.patch.object(ai_module, "filter_or_log", side_effect=record_filter),
-            mock.patch.object(
-                ai_module.openai_v1_image_edit,
-                "handle",
-                return_value={"created": 1, "data": [{"b64_json": "ZmFrZQ=="}]},
-            ),
-        ):
-            response = self.client.post(
-                "/v1/images/edits",
-                headers={"Authorization": "Bearer chatgpt2api"},
-                data={"model": "gpt-image-2", "prompt": "把背景改成夜晚", "n": "1"},
-                files={"image": ("image.png", b"image", "image/png")},
-            )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(filter_calls, [("把背景改成夜晚", False)])
 
 
 if __name__ == "__main__":

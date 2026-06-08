@@ -27,7 +27,6 @@ import {
   type Account,
   type ImageTask,
 } from "@/lib/api";
-import { backendDateTimeMs, parseBackendDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
@@ -66,12 +65,11 @@ function buildConversationTitle(prompt: string) {
 }
 
 function formatConversationTime(value: string) {
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return "";
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -1181,7 +1179,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       const fallbackImage = fallbackTurn?.images.find((image) => image.id === imageId);
       const revealStartedAt =
         fallbackImage?.reveal_started_at || fallbackImage?.finished_at || loadedAt.toISOString();
-      const revealStartMs = backendDateTimeMs(revealStartedAt) ?? Number.NaN;
+      const revealStartMs = new Date(revealStartedAt).getTime();
       const revealDurationMs = Number.isFinite(revealStartMs)
         ? Math.max(0, loadedAt.getTime() - revealStartMs)
         : undefined;

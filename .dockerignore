@@ -7,8 +7,6 @@ __pycache__
 *.pyo
 *.pyd
 
-config.json
-
 web/.next
 web/node_modules
 

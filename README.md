@@ -29,13 +29,10 @@
 ```bash
 git clone https://github.com/lovemoon51/chatgpt2api.git
 cd chatgpt2api
-mkdir -p data
-sudo chown -R 1000:1000 config.json data
 docker compose up --build -d
 ```
 
 启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
-容器默认以 UID `1000` 的非 root 用户运行；如果 `config.json` 或 `data` 目录没有给 UID `1000` 写权限，后台保存设置、备份状态或 JSON 存储写入会失败。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
@@ -48,8 +45,6 @@ docker compose up --build -d
 
 ```bash
 docker compose -f docker-compose.runtime.yml pull
-mkdir -p data
-sudo chown -R 1000:1000 config.json data
 docker compose -f docker-compose.runtime.yml up -d
 ```
 

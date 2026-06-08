@@ -616,7 +616,7 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         incoming = dict(data or {})
-        for key in ("backup", "auto_register", "account_pool", "auth", "ai_review", "agnes_ai"):
+        for key in ("backup", "auto_register", "account_pool", "auth", "agnes_ai"):
             if key in incoming and isinstance(incoming.get(key), dict) and isinstance(next_data.get(key), dict):
                 incoming[key] = _merge_dicts(next_data.get(key), incoming.get(key))
         next_data.update(incoming)

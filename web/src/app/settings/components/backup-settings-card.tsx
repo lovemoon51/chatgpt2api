@@ -12,7 +12,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import { fetchBackupDetail, getBackupDownloadUrl, verifyBackup, type BackupDetail, type BackupInclude, type BackupVerificationReport } from "@/lib/api";
-import { parseBackendDateTime } from "@/lib/datetime";
 import { getStoredAuthKey } from "@/store/auth";
 import { useSettingsStore } from "../store";
 
@@ -20,12 +19,11 @@ function formatDateTime(value?: string | null) {
   if (!value) {
     return "—";
   }
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return value;
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

@@ -57,7 +57,6 @@ import {
   type OpenAIModel,
   type PromptTemplateApplyPayload,
 } from "@/lib/api";
-import { backendDateTimeMs, formatDateTime, parseBackendDateTime } from "@/lib/datetime";
 import { getFailureNextStep, getFriendlyErrorMessage } from "@/lib/error-messages";
 import { downloadImageUrl, fetchImageFile } from "@/lib/image-fetch";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -280,12 +279,11 @@ function chatMessagesForRequest(messages: ChatMessage[], text: string, images: S
 }
 
 function formatConversationTime(value: string) {
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return "";
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -341,7 +339,11 @@ function averageDuration(values: Array<number | undefined>) {
 }
 
 function timestampFromIso(value?: string) {
-  return backendDateTimeMs(value);
+  if (!value) {
+    return undefined;
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
 function getTurnTimingStats(turn: ImageTurn) {
@@ -2308,7 +2310,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                         const now = new Date();
                                         const reportKey = "reveal_duration_ms";
                                         const revealStartedAt = image.reveal_started_at || image.finished_at || now.toISOString();
-                                        const revealStartMs = backendDateTimeMs(revealStartedAt) ?? Number.NaN;
+                                        const revealStartMs = revealStartedAt ? new Date(revealStartedAt).getTime() : Number.NaN;
                                         const revealDurationMs = Number.isFinite(revealStartMs) ? Math.max(0, now.getTime() - revealStartMs) : undefined;
                                         const taskId = image.taskId;
                                         const shouldReportTiming =
@@ -2984,7 +2986,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className={cn("truncate text-sm font-medium", isDarkTheme ? "text-slate-100" : "text-slate-800")}>{item.name}</div>
-                          <div className={cn("mt-0.5 text-xs", isDarkTheme ? "text-slate-500" : "text-slate-400")}>{formatDateTime(item.created_at)}</div>
+                          <div className={cn("mt-0.5 text-xs", isDarkTheme ? "text-slate-500" : "text-slate-400")}>{item.created_at}</div>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
                           <button

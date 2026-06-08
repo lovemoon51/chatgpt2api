@@ -16,6 +16,7 @@ import tiktoken
 
 from services.account_service import account_service
 from services.config import config
+from services.image_intent import is_outpaint_prompt
 from services.image_service import record_image_owner
 from services.openai_backend_api import ChatGPTCheckoutRequiredError, OpenAIBackendAPI
 from services.protocol.agnes_ai_image import (
@@ -350,8 +351,16 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None, *, has_reference_images: bool = False) -> str:
+def build_image_prompt(
+        prompt: str,
+        size: str | None,
+        *,
+        resolution: str | None = None,
+        has_reference_images: bool = False,
+) -> str:
     base_prompt = str(prompt or "").strip()
+    is_outpaint = has_reference_images and is_outpaint_prompt(base_prompt)
+    resolution_hint = f"\n\n输出画质分辨率目标为 {str(resolution).strip().lower()}。" if resolution else ""
     if has_reference_images:
         prompt = (
             "请基于参考图进行图片编辑，直接输出编辑后的图片，不要只回复文字描述，"
@@ -364,6 +373,13 @@ def build_image_prompt(prompt: str, size: str | None, *, has_reference_images: b
     else:
         prompt = f"请直接生成图片，不要只回复文字描述。画面需求：{base_prompt}" if base_prompt else "请直接生成图片。"
     if not size:
+        if is_outpaint:
+            return (
+                f"{prompt.strip()}\n\n"
+                "这是扩图任务：保留原图主体、构图关系和视觉风格，自然向外扩展画布，"
+                "在新增区域补全连贯背景、光影和细节，不要裁掉原图重要内容。"
+                f"{resolution_hint}"
+            )
         return prompt
     if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
         return f"{prompt.strip()}\n\n输出图片，宽高比为 {size}。"
@@ -375,7 +391,7 @@ def build_image_prompt(prompt: str, size: str | None, *, has_reference_images: b
             "4:3": "扩展或裁定画布到 4:3 比例，保留原图主体与风格，让画面自然完整。",
             "3:4": "扩展或裁定画布到 3:4 比例，保留原图主体与风格，让画面自然完整。",
         }[size]
-        return f"{prompt.strip()}\n\n{outpaint_hint}"
+        return f"{prompt.strip()}\n\n{outpaint_hint}{resolution_hint}"
     hint = {
         "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
         "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
@@ -383,7 +399,7 @@ def build_image_prompt(prompt: str, size: str | None, *, has_reference_images: b
         "4:3": "输出为 4:3 比例，兼顾宽度与高度，适合展示画面细节。",
         "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
     }[size]
-    return f"{prompt.strip()}\n\n{hint}"
+    return f"{prompt.strip()}\n\n{hint}{resolution_hint}"
 
 
 def encoding_for_model(model: str):
@@ -719,13 +735,14 @@ def conversation_events(
     prompt: str = "",
     images: list[str] | None = None,
     size: str | None = None,
+    resolution: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = str(model or "").strip() in IMAGE_MODELS
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
     final_prompt = prompt_with_global_system(
-        build_image_prompt(prompt, size, has_reference_images=bool(images))
+        build_image_prompt(prompt, size, resolution=resolution, has_reference_images=bool(images))
     ) if image_model else prompt
     payloads = backend.stream_conversation(
         messages=normalized,
@@ -795,6 +812,7 @@ def stream_image_outputs(
             model=request.model,
             images=request.images or [],
             size=request.size,
+            resolution=request.resolution,
     ):
         if not first_event_seen:
             first_event_seen = True

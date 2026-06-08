@@ -43,13 +43,15 @@ def _review_rejection_message(result: str) -> str:
     return "AI 审核未通过，拒绝本次任务。请调整提示词，避免敏感、违法、侵权或过度真实人物/品牌相关内容后再提交。"
 
 
-def check_request(text: str) -> None:
+def check_request(text: str, *, skip_ai_review: bool = False) -> None:
     text = str(text or "")
     if not text:
         return
     for word in config.sensitive_words:
         if word in text:
             raise HTTPException(status_code=400, detail={"error": "检测到敏感词，拒绝本次任务"})
+    if skip_ai_review:
+        return
     review = config.ai_review
     if not review.get("enabled"):
         return

@@ -16,6 +16,7 @@ from api.support import (
     usage_limited_call,
 )
 from services.content_filter import check_request, request_text
+from services.image_intent import is_outpaint_prompt
 from services.log_service import LoggedCall
 from services.prompt_optimizer import PROMPT_OPTIMIZER_MODEL, optimize_image_prompt
 from services.protocol import (
@@ -105,9 +106,9 @@ def handle_prompt_optimize(payload: dict[str, str]) -> dict[str, str]:
     return {"optimized_prompt": optimize_image_prompt(prompt, model=model), "model": model}
 
 
-async def filter_or_log(call: LoggedCall, text: str) -> None:
+async def filter_or_log(call: LoggedCall, text: str, *, skip_ai_review: bool = False) -> None:
     try:
-        await run_in_threadpool(check_request, text)
+        await run_in_threadpool(check_request, text, skip_ai_review=skip_ai_review)
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
         raise
@@ -189,7 +190,7 @@ def create_router() -> APIRouter:
             raise openai_http_exception("n must be between 1 and 4", status_code=400, param="n", code="invalid_value")
         normalized_resolution = normalize_image_resolution(resolution, strict=False)
         with usage_limited_call(identity, "/v1/images/edits", model, "image", amount=image_credit_cost(normalized_resolution) * n) as release_limit:
-            await filter_or_log(call, prompt)
+            await filter_or_log(call, prompt, skip_ai_review=is_outpaint_prompt(prompt))
             uploads = [*(image or []), *(image_list or [])]
             if not uploads:
                 raise openai_http_exception(

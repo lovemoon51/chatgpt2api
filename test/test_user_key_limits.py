@@ -675,7 +675,7 @@ class UserKeyLimitApiTests(unittest.TestCase):
         self.client = TestClient(app)
         self.addCleanup(usage_limit_service.reset)
 
-        async def no_filter(_call, _text):
+        async def no_filter(_call, _text, **_kwargs):
             return None
 
         self.filter_patcher = mock.patch.object(ai_module, "filter_or_log", no_filter)
@@ -852,6 +852,56 @@ class UserKeyLimitApiTests(unittest.TestCase):
             reloaded = service.get_user(user["id"])
             self.assertEqual(reloaded["limits"]["images_used"], 2)
             self.assertEqual(reloaded["limits"]["images_remaining"], 1)
+
+    def test_image_edit_entry_skips_filter_for_outpaint_prompt(self) -> None:
+        filter_calls = []
+
+        async def record_filter(_call, text, **kwargs):
+            filter_calls.append((text, kwargs.get("skip_ai_review")))
+
+        with (
+            mock.patch.object(ai_module, "require_identity", return_value={"id": "admin", "name": "管理员", "role": "admin"}),
+            mock.patch.object(ai_module, "filter_or_log", side_effect=record_filter),
+            mock.patch.object(
+                ai_module.openai_v1_image_edit,
+                "handle",
+                return_value={"created": 1, "data": [{"b64_json": "ZmFrZQ=="}]},
+            ),
+        ):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer chatgpt2api"},
+                data={"model": "gpt-image-2", "prompt": "扩展这张图", "n": "1", "size": "16:9", "resolution": "4K"},
+                files={"image": ("image.png", b"image", "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(filter_calls, [("扩展这张图", True)])
+
+    def test_image_edit_entry_still_filters_non_outpaint_prompt(self) -> None:
+        filter_calls = []
+
+        async def record_filter(_call, text, **kwargs):
+            filter_calls.append((text, kwargs.get("skip_ai_review")))
+
+        with (
+            mock.patch.object(ai_module, "require_identity", return_value={"id": "admin", "name": "管理员", "role": "admin"}),
+            mock.patch.object(ai_module, "filter_or_log", side_effect=record_filter),
+            mock.patch.object(
+                ai_module.openai_v1_image_edit,
+                "handle",
+                return_value={"created": 1, "data": [{"b64_json": "ZmFrZQ=="}]},
+            ),
+        ):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer chatgpt2api"},
+                data={"model": "gpt-image-2", "prompt": "把背景改成夜晚", "n": "1"},
+                files={"image": ("image.png", b"image", "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(filter_calls, [("把背景改成夜晚", False)])
 
 
 if __name__ == "__main__":

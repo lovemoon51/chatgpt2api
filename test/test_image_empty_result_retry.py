@@ -852,6 +852,20 @@ class ImageEmptyResultRetryTests(unittest.TestCase):
         self.assertIn("不要只回复文字描述", prompt)
         self.assertIn("不要输出 JSON", prompt)
 
+    def test_reference_image_outpaint_prompt_without_ratio_still_forces_outpaint(self) -> None:
+        prompt = conversation.build_image_prompt("扩展这张图", None, has_reference_images=True)
+
+        self.assertIn("基于参考图进行图片编辑", prompt)
+        self.assertIn("扩图任务", prompt)
+        self.assertIn("自然向外扩展画布", prompt)
+        self.assertIn("不要输出 JSON", prompt)
+
+    def test_reference_image_outpaint_prompt_includes_resolution_quality(self) -> None:
+        prompt = conversation.build_image_prompt("扩展这张图", "16:9", resolution="4k", has_reference_images=True)
+
+        self.assertIn("扩展画布到 16:9", prompt)
+        self.assertIn("输出画质分辨率目标为 4k", prompt)
+
     def test_json_image_parameter_text_is_sanitized(self) -> None:
         message = (
             '{"prompt":"Extend the canvas of the uploaded image to a 16:9 aspect ratio",'

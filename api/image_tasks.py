@@ -14,6 +14,7 @@ from api.support import (
     resolve_image_base_url,
 )
 from services.content_filter import check_request
+from services.image_intent import is_outpaint_prompt
 from services.image_task_service import ImageTaskCancelError, ImageTaskNotFound, ImageTaskQueueFull, image_task_service
 from services.log_service import LoggedCall
 from services.usage_limit_service import UsageLimitError, usage_limit_service
@@ -56,9 +57,9 @@ def _acquire_image_usage_limit(identity: dict[str, object], model: str, *, amoun
     return release
 
 
-async def filter_or_log(call: LoggedCall, text: str) -> None:
+async def filter_or_log(call: LoggedCall, text: str, *, skip_ai_review: bool = False) -> None:
     try:
-        await run_in_threadpool(check_request, text)
+        await run_in_threadpool(check_request, text, skip_ai_review=skip_ai_review)
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
         raise
@@ -196,7 +197,11 @@ def create_router() -> APIRouter:
         try:
             normalized_resolution = normalize_image_resolution(resolution, strict=True)
             credit_amount = image_credit_cost(normalized_resolution, strict=True)
-            await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
+            await filter_or_log(
+                LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt),
+                prompt,
+                skip_ai_review=is_outpaint_prompt(prompt),
+            )
             uploads = [*(image or []), *(image_list or [])]
             if not uploads:
                 raise HTTPException(status_code=400, detail={"error": "image file is required"})

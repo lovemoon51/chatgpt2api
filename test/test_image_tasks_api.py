@@ -304,6 +304,51 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(len(self.fake_service.edit_calls), 1)
         self.assertIs(self.fake_service.edit_calls[0][1]["public"], True)
 
+    def test_create_edit_task_skips_ai_review_for_outpaint_prompt(self):
+        review_calls = []
+
+        async def record_filter(_call, text, **kwargs):
+            review_calls.append((text, kwargs.get("skip_ai_review")))
+
+        self.filter_patcher.stop()
+        try:
+            with mock.patch.object(image_tasks_module, "filter_or_log", side_effect=record_filter):
+                response = self.client.post(
+                    "/api/image-tasks/edits",
+                    headers=AUTH_HEADERS,
+                    data={"client_task_id": "edit-outpaint", "prompt": "扩展这张图", "model": "gpt-image-2", "size": "16:9", "resolution": "4K"},
+                    files=[("image", ("one.png", b"one", "image/png"))],
+                )
+        finally:
+            self.filter_patcher.start()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(review_calls, [("扩展这张图", True)])
+        self.assertEqual(len(self.fake_service.edit_calls), 1)
+        self.assertEqual(self.fake_service.edit_calls[0][1]["size"], "16:9")
+        self.assertEqual(self.fake_service.edit_calls[0][1]["resolution"], "4k")
+
+    def test_create_edit_task_still_reviews_non_outpaint_prompt(self):
+        review_calls = []
+
+        async def record_filter(_call, text, **kwargs):
+            review_calls.append((text, kwargs.get("skip_ai_review")))
+
+        self.filter_patcher.stop()
+        try:
+            with mock.patch.object(image_tasks_module, "filter_or_log", side_effect=record_filter):
+                response = self.client.post(
+                    "/api/image-tasks/edits",
+                    headers=AUTH_HEADERS,
+                    data={"client_task_id": "edit-normal", "prompt": "把背景改成夜晚", "model": "gpt-image-2"},
+                    files=[("image", ("one.png", b"one", "image/png"))],
+                )
+        finally:
+            self.filter_patcher.start()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(review_calls, [("把背景改成夜晚", False)])
+
     def test_create_video_task_passes_reference_urls(self):
         response = self.client.post(
             "/api/image-tasks/videos",

@@ -68,6 +68,39 @@ class ContentFilterTests(unittest.TestCase):
         self.assertIn("包含可能侵权的名人肖像请求", message)
         self.assertIn("改为描述原创虚构人物", message)
 
+    def test_check_request_can_skip_ai_review_but_keeps_sensitive_words(self) -> None:
+        from services import content_filter
+
+        post_calls = []
+
+        original_config = content_filter.config
+        original_post = content_filter.requests.post
+        try:
+            content_filter.config = type(
+                "DummyConfig",
+                (),
+                {
+                    "sensitive_words": ["禁止词"],
+                    "ai_review": {
+                        "enabled": True,
+                        "base_url": "https://review.example/v1",
+                        "api_key": "review-key",
+                        "model": "review-model",
+                        "prompt": "",
+                    },
+                },
+            )()
+            content_filter.requests.post = lambda *args, **kwargs: post_calls.append((args, kwargs))
+
+            content_filter.check_request("扩展这张图", skip_ai_review=True)
+            with self.assertRaises(HTTPException):
+                content_filter.check_request("扩展这张图 禁止词", skip_ai_review=True)
+        finally:
+            content_filter.config = original_config
+            content_filter.requests.post = original_post
+
+        self.assertEqual(post_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

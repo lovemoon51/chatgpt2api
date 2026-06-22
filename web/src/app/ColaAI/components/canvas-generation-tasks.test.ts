@@ -72,35 +72,6 @@ describe("canvas generation task routing", () => {
     expect(generationCalls).toEqual([{ model: "agnes-image-2.1-flash" }]);
   });
 
-  test("defaults image mode to GPT Image 2 when config model is auto", async () => {
-    const generationCalls: Array<{ model?: string }> = [];
-
-    await createCanvasGenerationTasks(
-      createSettings({
-        count: 1,
-        model: "auto",
-      }),
-      {
-        createTaskId: () => "auto-image-task-1",
-        createGenerationTask: async (_id, _prompt, model) => {
-          generationCalls.push({ model });
-          return {
-            id: "auto-image-task-1",
-            status: "queued",
-            mode: "generate",
-            created_at: "",
-            updated_at: "",
-          };
-        },
-        createEditTask: async () => {
-          throw new Error("edit task should not be used");
-        },
-      },
-    );
-
-    expect(generationCalls).toEqual([{ model: "gpt-image-2" }]);
-  });
-
   test("routes video mode to video task creation with reference URLs", async () => {
     const videoCalls: Array<{ id: string; prompt: string; model?: string; size?: string; referenceImageUrls: string[]; durationSeconds?: number; resolution?: string }> = [];
 

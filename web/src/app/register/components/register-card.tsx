@@ -11,7 +11,6 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { fetchRegisterClashOptions, selectRegisterClashProxy, type ClashGroup, type RegisterConfig } from "@/lib/api";
-import { parseBackendDateTime } from "@/lib/datetime";
 
 import { useSettingsStore } from "../../settings/store";
 import type { RegisterSseStatus } from "../page";
@@ -49,12 +48,11 @@ function formatDateTime(value?: string | null) {
   if (!value) {
     return "—";
   }
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return value;
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -585,9 +583,7 @@ export function RegisterCard({ sseStatus }: { sseStatus?: RegisterSseStatus }) {
               ) : (
                 logs.slice().reverse().map((item, index) => (
                   <div key={`${item.time}-${index}`} className={item.level === "red" ? "text-rose-600" : item.level === "green" ? "text-emerald-700" : item.level === "yellow" ? "text-amber-700" : "text-stone-700"}>
-                    <span className="text-stone-400">
-                      {parseBackendDateTime(item.time)?.toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) || item.time}
-                    </span>
+                    <span className="text-stone-400">{new Date(item.time).toLocaleTimeString()}</span>
                     <span className="pl-2">{item.text}</span>
                   </div>
                 ))

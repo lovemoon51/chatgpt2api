@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Copy, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Copy, KeyRound, LoaderCircle, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,19 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import {
-  createUserKey,
-  deleteUnusedUserKeys,
-  deleteUserKey,
-  fetchUnusedUserKeys,
-  fetchUserKeys,
-  updateUserKey,
-  type UnusedUserKey,
-  type UserKey,
-  type UserKeyCreateResult,
-  type UserKeyLimits,
-} from "@/lib/api";
-import { parseBackendDateTime } from "@/lib/datetime";
+import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey, type UserKeyCreateResult, type UserKeyLimits } from "@/lib/api";
 
 type LimitsForm = {
   imagesTotal: string;
@@ -110,12 +98,11 @@ function formatDateTime(value?: string | null) {
   if (!value) {
     return "—";
   }
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return value;
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -177,10 +164,6 @@ export function UserKeysCard() {
   const [balanceFilter, setBalanceFilter] = useState<BalanceFilter>("all");
   const [pageSize, setPageSize] = useState<(typeof pageSizeOptions)[number]>("10");
   const [currentPage, setCurrentPage] = useState(1);
-  const [unusedKeys, setUnusedKeys] = useState<UnusedUserKey[]>([]);
-  const [selectedUnusedIds, setSelectedUnusedIds] = useState<Set<string>>(() => new Set());
-  const [isLoadingUnusedKeys, setIsLoadingUnusedKeys] = useState(false);
-  const [isDeletingUnusedKeys, setIsDeletingUnusedKeys] = useState(false);
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
@@ -200,30 +183,12 @@ export function UserKeysCard() {
   const visibleStart = filteredItems.length === 0 ? 0 : pageStartIndex + 1;
   const visibleEnd = Math.min(pageStartIndex + paginatedItems.length, filteredItems.length);
   const hasActiveFilters = Boolean(searchQuery.trim()) || statusFilter !== "all" || balanceFilter !== "all";
-  const copyableUnusedKeys = useMemo(() => unusedKeys.filter((item) => item.copyable && item.key.trim()), [unusedKeys]);
-  const selectedUnusedCount = selectedUnusedIds.size;
-  const allUnusedSelected = unusedKeys.length > 0 && unusedKeys.every((item) => selectedUnusedIds.has(item.id));
-
-  const loadUnusedKeys = async () => {
-    setIsLoadingUnusedKeys(true);
-    try {
-      const data = await fetchUnusedUserKeys();
-      setUnusedKeys(data.items);
-      setSelectedUnusedIds((current) => new Set(data.items.filter((item) => current.has(item.id)).map((item) => item.id)));
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载未使用访问码失败");
-    } finally {
-      setIsLoadingUnusedKeys(false);
-    }
-  };
 
   const load = async () => {
     setIsLoading(true);
     try {
-      const [userData, unusedData] = await Promise.all([fetchUserKeys(), fetchUnusedUserKeys()]);
-      setItems(userData.items);
-      setUnusedKeys(unusedData.items);
-      setSelectedUnusedIds((current) => new Set(unusedData.items.filter((item) => current.has(item.id)).map((item) => item.id)));
+      const data = await fetchUserKeys();
+      setItems(data.items);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载访问码失败");
     } finally {
@@ -254,7 +219,6 @@ export function UserKeysCard() {
       const data = await createUserKey(name.trim(), formToLimits(limitsForm), createCount);
       setItems(data.items);
       setRevealedKeys(data.keys?.length ? data.keys : [{ item: data.item, key: data.key, name: data.item.name }]);
-      await loadUnusedKeys();
       setName("");
       setCount("1");
       setLimitsForm(emptyLimitsForm);
@@ -285,7 +249,6 @@ export function UserKeysCard() {
     try {
       const data = await updateUserKey(item.id, { enabled: !item.enabled });
       setItems(data.items);
-      await loadUnusedKeys();
       toast.success(item.enabled ? "访问码已禁用" : "访问码已启用");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新访问码失败");
@@ -303,7 +266,6 @@ export function UserKeysCard() {
     try {
       const data = await deleteUserKey(item.id);
       setItems(data.items);
-      await loadUnusedKeys();
       setDeletingItem(null);
       toast.success("访问码已删除");
     } catch (error) {
@@ -344,7 +306,6 @@ export function UserKeysCard() {
         ...(limitsChanged ? { limits: nextLimits } : {}),
       });
       setItems(data.items);
-      await loadUnusedKeys();
       setEditingItem(null);
       setEditKey("");
       toast.success(trimmedKey ? "访问码已更新" : "用户信息已更新");
@@ -378,62 +339,6 @@ export function UserKeysCard() {
       return;
     }
     await handleCopy(allKeys);
-  };
-
-  const handleCopyUnusedKeys = async () => {
-    const allKeys = copyableUnusedKeys.map((item) => item.key).join("\n");
-    if (!allKeys) {
-      toast.error("当前没有可复制的未使用访问码");
-      return;
-    }
-    await handleCopy(allKeys);
-  };
-
-  const toggleUnusedSelection = (id: string) => {
-    setSelectedUnusedIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const toggleAllUnusedSelection = () => {
-    setSelectedUnusedIds((current) => {
-      if (unusedKeys.length > 0 && unusedKeys.every((item) => current.has(item.id))) {
-        return new Set();
-      }
-      return new Set(unusedKeys.map((item) => item.id));
-    });
-  };
-
-  const handleDeleteUnusedKeys = async () => {
-    if (unusedKeys.length === 0 || isDeletingUnusedKeys) {
-      return;
-    }
-    const ids = selectedUnusedCount > 0 ? Array.from(selectedUnusedIds) : unusedKeys.map((item) => item.id);
-    const message =
-      selectedUnusedCount > 0
-        ? `确认删除选中的 ${selectedUnusedCount} 个未绑定访问码吗？`
-        : `确认删除全部 ${unusedKeys.length} 个未绑定访问码吗？`;
-    if (!window.confirm(message)) {
-      return;
-    }
-    setIsDeletingUnusedKeys(true);
-    try {
-      const data = await deleteUnusedUserKeys(ids);
-      setItems(data.items);
-      setUnusedKeys(data.unused_items);
-      setSelectedUnusedIds(new Set());
-      toast.success(data.removed > 0 ? `已删除 ${data.removed} 个未绑定访问码` : "没有可删除的未绑定访问码");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "删除未绑定访问码失败");
-    } finally {
-      setIsDeletingUnusedKeys(false);
-    }
   };
 
   const resetFilters = () => {
@@ -501,116 +406,6 @@ export function UserKeysCard() {
               </div>
             </div>
           ) : null}
-
-          <div className="rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-semibold text-stone-800">未使用访问码</h3>
-                  <Badge variant="secondary" className="rounded-md bg-white text-stone-600">
-                    {unusedKeys.length} 个未绑定
-                  </Badge>
-                  <Badge variant="secondary" className="rounded-md bg-white text-stone-600">
-                    {copyableUnusedKeys.length} 个可复制
-                  </Badge>
-                </div>
-                <p className="mt-1 text-xs leading-5 text-stone-500">
-                  只展示仍可激活、尚未登录或绑定邮箱的普通用户访问码；历史访问码因未保存明文，只能删除不能复制。
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
-                  onClick={() => void loadUnusedKeys()}
-                  disabled={isLoadingUnusedKeys}
-                >
-                  <RefreshCw className={isLoadingUnusedKeys ? "size-4 animate-spin" : "size-4"} />
-                  刷新
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
-                  onClick={() => void handleCopyUnusedKeys()}
-                  disabled={copyableUnusedKeys.length === 0}
-                >
-                  <Copy className="size-4" />
-                  复制可复制访问码
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 rounded-xl border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                  onClick={() => void handleDeleteUnusedKeys()}
-                  disabled={unusedKeys.length === 0 || isDeletingUnusedKeys}
-                >
-                  {isDeletingUnusedKeys ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  {selectedUnusedCount > 0 ? `删除选中 ${selectedUnusedCount} 个` : "删除全部未绑定"}
-                </Button>
-              </div>
-            </div>
-
-            {isLoadingUnusedKeys && unusedKeys.length === 0 ? (
-              <div className="flex items-center justify-center py-6">
-                <LoaderCircle className="size-5 animate-spin text-stone-400" />
-              </div>
-            ) : unusedKeys.length === 0 ? (
-              <div className="mt-4 rounded-xl bg-white px-4 py-6 text-center text-sm text-stone-500">
-                暂无未使用访问码。
-              </div>
-            ) : (
-              <div className="mt-4 space-y-3">
-                <label className="flex w-fit items-center gap-2 text-xs font-medium text-stone-600">
-                  <input type="checkbox" className="size-4 rounded border-stone-300" checked={allUnusedSelected} onChange={toggleAllUnusedSelection} />
-                  全选未绑定访问码
-                </label>
-                <div className="grid gap-2">
-                  {unusedKeys.map((item) => (
-                    <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-white px-3 py-3 md:flex-row md:items-center md:justify-between">
-                      <div className="flex min-w-0 items-start gap-3">
-                        <input
-                          type="checkbox"
-                          className="mt-1 size-4 rounded border-stone-300"
-                          checked={selectedUnusedIds.has(item.id)}
-                          onChange={() => toggleUnusedSelection(item.id)}
-                        />
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="truncate text-sm font-medium text-stone-800">{item.name || item.id}</span>
-                            <Badge variant={item.copyable ? "success" : "secondary"} className="rounded-md">
-                              {item.copyable ? "可复制" : "历史访问码不可复制"}
-                            </Badge>
-                          </div>
-                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
-                            <span>ID {item.id}</span>
-                            <span>创建时间 {formatDateTime(item.created_at || item.key_created_at)}</span>
-                            <span>剩余积分 {formatBalance(item.limits)}</span>
-                          </div>
-                          {item.copyable ? (
-                            <code className="block break-all font-mono text-[13px] text-stone-700">{item.key}</code>
-                          ) : (
-                            <div className="text-xs text-stone-500">旧数据没有保存原始访问码；可以直接删除并重新生成。</div>
-                          )}
-                        </div>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-9 shrink-0 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
-                        onClick={() => void handleCopy(item.key)}
-                        disabled={!item.copyable}
-                      >
-                        <Copy className="size-4" />
-                        复制
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
 
           {isLoading ? (
             <div className="flex items-center justify-center py-10">

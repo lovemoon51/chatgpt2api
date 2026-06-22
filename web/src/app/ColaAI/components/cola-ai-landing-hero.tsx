@@ -37,31 +37,24 @@ function LandingHeroCard({
       data-cola-card-id={item.id}
       className={cn("landing-hero__card overflow-hidden text-left", role === "orbit" ? "" : colaCardClass, orbitClassName)}
     >
-      <LandingHeroMedia item={item} priority={role === "primary"} />
+      <div className="landing-hero__media relative overflow-hidden bg-black">
+        {item.imageUrl ? (
+          <AuthenticatedImage
+            src={item.imageUrl}
+            fallbackSrc={item.imageFallbackUrl}
+            alt={item.alt}
+            loadingMotion="static"
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div
+            aria-hidden="true"
+            data-cola-visual="landing-fallback-art"
+            className="h-full w-full bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.26),transparent_42%),linear-gradient(135deg,rgba(255,255,255,0.95),rgba(240,249,255,0.9)_54%,rgba(236,253,245,0.86))]"
+          />
+        )}
+      </div>
     </article>
-  );
-}
-
-function LandingHeroMedia({ item, priority = false }: { item: LandingHeroItem; priority?: boolean }) {
-  return (
-    <div className="landing-hero__media relative overflow-hidden bg-slate-100">
-      <div
-        aria-hidden="true"
-        className="landing-hero__media-placeholder absolute inset-0 bg-[radial-gradient(circle_at_22%_18%,rgba(125,211,252,0.34),transparent_34%),radial-gradient(circle_at_74%_12%,rgba(196,181,253,0.26),transparent_34%),linear-gradient(135deg,rgba(248,250,252,0.98),rgba(236,253,245,0.9)_48%,rgba(239,246,255,0.96))]"
-      />
-      {item.imageUrl ? (
-        <AuthenticatedImage
-          src={item.imageUrl}
-          fallbackSrc={item.imageFallbackUrl}
-          alt={item.alt}
-          loading={priority ? "eager" : "lazy"}
-          fetchPriority={priority ? "high" : "auto"}
-          decoding="async"
-          loadingMotion="static"
-          className="absolute inset-0 h-full w-full object-cover"
-        />
-      ) : null}
-    </div>
   );
 }
 
@@ -126,7 +119,23 @@ export function ColaAILandingHero({
               data-cola-visual="landing-core-media"
               className="core_video landing-hero__core"
             >
-              <LandingHeroMedia item={core} priority />
+              <div className="landing-hero__media relative h-full w-full overflow-hidden bg-black">
+                {core.imageUrl ? (
+                  <AuthenticatedImage
+                    src={core.imageUrl}
+                    fallbackSrc={core.imageFallbackUrl}
+                    alt={core.alt}
+                    loadingMotion="static"
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div
+                    aria-hidden="true"
+                    data-cola-visual="landing-fallback-art"
+                    className="h-full w-full bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.26),transparent_42%),linear-gradient(135deg,rgba(255,255,255,0.95),rgba(240,249,255,0.9)_54%,rgba(236,253,245,0.86))]"
+                  />
+                )}
+              </div>
             </article>
           ) : null}
 

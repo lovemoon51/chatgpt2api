@@ -309,14 +309,8 @@ def list_remote_accounts(server: dict) -> list[dict]:
                 if not isinstance(account, dict):
                     continue
                 credentials = account.get("credentials") if isinstance(account.get("credentials"), dict) else {}
-                credentials_status = (
-                    account.get("credentials_status")
-                    if isinstance(account.get("credentials_status"), dict)
-                    else {}
-                )
                 access_token = _extract_access_token(credentials)
-                has_access_token = bool(access_token) or bool(credentials_status.get("has_access_token"))
-                if not has_access_token:
+                if not access_token:
                     continue
                 account_id = account.get("id")
                 items.append({
@@ -326,10 +320,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
                     "plan_type": _clean(credentials.get("plan_type")),
                     "status": _clean(account.get("status")),
                     "expires_at": _clean(credentials.get("expires_at")),
-                    "has_access_token": has_access_token,
-                    "has_refresh_token": bool(_clean(credentials.get("refresh_token"))) or bool(
-                        credentials_status.get("has_refresh_token")
-                    ),
+                    "has_refresh_token": bool(_clean(credentials.get("refresh_token"))),
                 })
 
             if page * 200 >= total or len(data) < 200:
@@ -404,9 +395,8 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     session = Session(verify=True)
     try:
         response = session.get(
-            f"{base_url.rstrip('/')}/api/v1/admin/accounts/data",
+            f"{base_url.rstrip('/')}/api/v1/admin/accounts/{account_id}",
             headers=headers,
-            params={"ids": account_id, "include_proxies": "false"},
             timeout=30,
         )
         if not response.ok:
@@ -415,7 +405,9 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     finally:
         session.close()
 
-    account = _extract_export_account(payload)
+    account = _unwrap_envelope(payload)
+    if not isinstance(account, dict):
+        account = payload if isinstance(payload, dict) else {}
     credentials = account.get("credentials") if isinstance(account.get("credentials"), dict) else {}
     access_token = _extract_access_token(credentials)
     if not access_token:
@@ -424,17 +416,6 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
         "email": _clean(credentials.get("email")),
         "plan_type": _clean(credentials.get("plan_type")),
     }
-
-
-def _extract_export_account(payload: object) -> dict:
-    body = _unwrap_envelope(payload)
-    if isinstance(body, dict):
-        accounts = body.get("accounts")
-        if isinstance(accounts, list) and accounts:
-            first = accounts[0]
-            return first if isinstance(first, dict) else {}
-        return body
-    return {}
 
 
 class Sub2APIImportService:

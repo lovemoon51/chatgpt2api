@@ -3,7 +3,6 @@
 import localforage from "localforage";
 
 import type { ImageModel } from "@/lib/api";
-import { backendDateTimeMs } from "@/lib/datetime";
 
 export type ImageConversationMode = "generate" | "edit";
 
@@ -245,7 +244,8 @@ function sortImageConversations(conversations: ImageConversation[]): ImageConver
 }
 
 function getTimestamp(value: string) {
-  return backendDateTimeMs(value) ?? 0;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
 }
 
 function pickLatestConversation(current: ImageConversation, next: ImageConversation) {

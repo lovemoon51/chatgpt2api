@@ -14,7 +14,7 @@ function normalizeImageModel(model: string): ImageModel | undefined {
   if (model === "gpt-image-2" || model === "codex-gpt-image-2" || model === "agnes-image-2.1-flash") {
     return model;
   }
-  return "gpt-image-2";
+  return undefined;
 }
 
 function normalizeVideoModel(model: string) {

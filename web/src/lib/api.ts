@@ -504,18 +504,6 @@ export type UserKeyCreateResult = {
   name?: string;
 };
 
-export type UnusedUserKey = {
-  id: string;
-  key_id?: string | null;
-  name: string;
-  email?: string;
-  created_at?: string | null;
-  key_created_at?: string | null;
-  limits?: UserKeyLimits | null;
-  key: string;
-  copyable: boolean;
-};
-
 export type UserCheckInResponse = {
   awarded: boolean;
   bonus_images: number;
@@ -1415,10 +1403,6 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function fetchUnusedUserKeys() {
-  return httpRequest<{ items: UnusedUserKey[] }>("/api/auth/users/unused-keys");
-}
-
 export async function createUserKey(name: string, limits?: UserKeyLimits, count?: number) {
   return httpRequest<{ item: UserKey; key: string; keys: UserKeyCreateResult[]; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
@@ -1439,13 +1423,6 @@ export async function updateUserKey(
 export async function deleteUserKey(keyId: string) {
   return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "DELETE",
-  });
-}
-
-export async function deleteUnusedUserKeys(ids: string[] = []) {
-  return httpRequest<{ removed: number; removed_ids: string[]; unused_items: UnusedUserKey[]; items: UserKey[] }>("/api/auth/users/unused-keys", {
-    method: "DELETE",
-    body: { ids },
   });
 }
 

@@ -1,4 +1,3 @@
-import { backendDateTimeMs } from "@/lib/datetime";
 import type { CanvasNodeData, CanvasState, CanvasStorageLike } from "./canvas-types";
 import {
   COLA_CANVAS_STORAGE_KEY,
@@ -109,7 +108,8 @@ function createCanvasRecordId() {
 }
 
 function normalizeTimestamp(value: string | null | undefined) {
-  return backendDateTimeMs(value) ?? 0;
+  const timestamp = value ? new Date(value).getTime() : Number.NaN;
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function sortCanvasRecords(records: CanvasLibraryRecord[]) {

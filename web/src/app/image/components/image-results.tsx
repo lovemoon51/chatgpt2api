@@ -5,7 +5,6 @@ import { Download, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
-import { parseBackendDateTime } from "@/lib/datetime";
 import { downloadImageUrl } from "@/lib/image-fetch";
 import { cn } from "@/lib/utils";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
@@ -49,12 +48,11 @@ function formatPhaseTime(value?: string) {
   if (!value) {
     return "";
   }
-  const date = parseBackendDateTime(value);
-  if (!date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
     return "";
   }
   return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",

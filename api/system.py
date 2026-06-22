@@ -26,7 +26,6 @@ from services.image_service import (
     get_thumbnail_response,
     list_images,
     list_public_discover_images,
-    thumbnail_source_path,
 )
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
@@ -479,10 +478,6 @@ def create_router(app_version: str) -> APIRouter:
 
         if not verify_signed_url(image_path, expires, signature):
             raise HTTPException(status_code=403, detail="invalid or expired signature")
-
-        thumbnail_source = thumbnail_source_path(image_path)
-        if thumbnail_source:
-            return get_thumbnail_response(thumbnail_source, identity=None)
 
         # 签名验证通过，返回图片（无需身份验证）
         return get_image_download_response(image_path, identity=None)

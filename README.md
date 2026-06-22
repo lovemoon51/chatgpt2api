@@ -1,7 +1,7 @@
 <h1 align="center">ChatGPT2API</h1>
 
 
-<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 文本对话、图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容 API / 代理，并集成新版普通用户创作台、在线画图、图片库、任务队列、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
 
 > [!WARNING]
 > 免责声明：
@@ -13,47 +13,51 @@
 > - 严禁将本项目用于生成、传播或协助生成违法、暴力、色情、未成年人相关内容，或用于诈骗、欺诈、骚扰等非法或不当用途。
 > - 使用者应自行承担全部风险，包括但不限于账号被限制、临时封禁或永久封禁以及因违规使用等所导致的法律责任。
 > - 使用本项目即视为你已充分理解并同意本免责声明全部内容；如因滥用、违规或违法使用造成任何后果，均由使用者自行承担。
-
-> [!IMPORTANT]
-> 本项目基于对 ChatGPT 官网相关能力的逆向研究实现，存在账号受限、临时封禁或永久封禁的风险。请勿使用你自己的重要账号、常用账号或高价值账号进行测试。
-
-> [!CAUTION]
-> 旧版本存在已知漏洞，请尽快升级到最新版本。公网部署时请尽量不要放置敏感信息，并自行做好访问控制与隔离。
+> - 本项目基于对 ChatGPT 官网相关能力的逆向研究实现，存在账号受限、临时封禁或永久封禁的风险。请勿使用你自己的重要账号、常用账号或高价值账号进行测试。
 
 ## 快速开始
 
 ### Docker 运行
 
-默认 Compose 会从当前项目源码构建镜像，适合本地改过代码后运行当前版本：
-
 ```bash
-git clone https://github.com/lovemoon51/chatgpt2api.git
+git clone git@github.com:basketikun/chatgpt2api.git
 cd chatgpt2api
-docker compose up --build -d
+docker compose up -d
 ```
 
 启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
-- 健康检查：`http://localhost:3000/healthz`
 - 数据目录：`./data`
 
-容器内服务监听 `8000` 端口，默认 Compose 会映射到宿主机 `3000`；镜像内置 `HEALTHCHECK` 会通过 `/healthz` 检查存储后端是否可用。
+### WARP / FlareSolverr 稳定代理部署
 
-如果只想运行已发布镜像，不从当前源码构建，可以使用运行时 Compose 文件：
+如果注册或图片链路经常遇到 Cloudflare 拦截，可以启用附带的 WARP + Privoxy + FlareSolverr 方案：
 
 ```bash
-docker compose -f docker-compose.runtime.yml pull
-docker compose -f docker-compose.runtime.yml up -d
+cp .env.example .env
+docker compose -f docker-compose.warp.yml up -d --build
 ```
+
+该 compose 会启动：
+
+- `warp-proxy`：提供 WARP SOCKS5 出口。
+- `privoxy`：把 WARP SOCKS5 转成 HTTP 代理。
+- `flaresolverr`：刷新 Cloudflare clearance。
+- `init-config`：幂等写入 `proxy_runtime` 默认配置。
+- `app`：启动 ChatGPT2API 主服务。
+
+默认只让上游 OpenAI / ChatGPT 请求走稳定代理，账号邮箱、CPA 等辅助链路不会被强制接管。账号自身配置的代理优先级最高，其次是稳定代理运行时，再其次是显式代理和旧版全局代理。
+
+可在 `.env` 中调整端口和代理运行时参数，也可在后台设置页的「稳定代理运行时」面板手动保存、测试代理和测试 clearance。
 
 ### 本地开发
 
 启动后端：
 
 ```bash
-git clone https://github.com/lovemoon51/chatgpt2api.git
+git clone git@github.com:basketikun/chatgpt2api.git
 cd chatgpt2api
 uv sync
 uv run main.py
@@ -67,34 +71,14 @@ bun install
 bun run dev
 ```
 
-本地开发时：
-
-- 后端：`http://127.0.0.1:8000`
-- 前端：`http://127.0.0.1:3000`
-- 前端开发环境会把接口请求指向 `http://127.0.0.1:8000`
-
-常用工程化检查：
+后续更新新版本：
 
 ```bash
-# 后端核心 CI 测试
-CHATGPT2API_AUTH_KEY=dev-test-key uv run python -m unittest test.test_config test.test_backup_integrity test.test_system_status_api
+docker pull ghcr.io/basketikun/chatgpt2api:latest
+docker-compose down
+docker-compose up -d
 
-# 后端全量测试（部分用例可能需要额外环境或更长时间）
-CHATGPT2API_AUTH_KEY=dev-test-key uv run python -m unittest discover -s test -p "test*.py"
-
-# 前端类型检查、Lint 和生产构建
-cd web
-bun run typecheck
-bun run lint
-bun run build
 ```
-
-### 测试分层
-
-- Unit test：位于 `test/`，覆盖配置解析、服务层逻辑、协议转换和错误格式等纯逻辑路径，默认不依赖真实账号、真实密钥或外部网络。
-- Integration test：同样位于 `test/`，通过 FastAPI `TestClient`、mock 后端或临时存储验证 API 路由、OpenAI 兼容接口、账号池和图片任务等跨模块行为。
-- Manual storage test：用于本地手动验证存储后端读写和迁移，先准备隔离的临时目录/测试数据库，再运行 `python scripts/test_storage.py` 或 `python scripts/migrate_storage.py`。不要指向生产 `data/`、生产 PostgreSQL 或真实 Git 存储仓库。
-- Frontend check：在 `web/` 下运行 `bun run typecheck`、`bun run lint`、`bun run build`，CI 会对 push 和 PR 执行这些门禁。
 
 ### 存储后端配置
 
@@ -113,144 +97,65 @@ environment:
   - DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
-### 健康检查与备份恢复演练
-
-- 健康检查端点是 `/healthz`。本地后端可用 `curl http://127.0.0.1:8000/healthz`，Docker Compose 默认端口可用 `curl http://127.0.0.1:3000/healthz`。
-- 备份配置建议使用 Cloudflare R2 专用最小权限 Access Key，并开启备份加密口令；不要把真实 `auth-key`、R2 Secret、上游账号 token 或数据库密码提交到仓库。
-- 可从 `config.example.json` 复制出本地 `config.json`，再手动填入真实值；示例文件只保留占位符。
-- 备份恢复演练先下载备份包到本地隔离目录，再运行 dry-run：
-
-```bash
-python scripts/backup_restore_dry_run.py /path/to/backup.tar.gz
-```
-
-该脚本只读取指定备份包，并解压到系统临时目录校验文件路径、JSON/JSONL 可读性和基础内容；默认会删除临时目录，不会覆盖生产 `data/`。需要人工查看解压结果时可加 `--keep-temp`，确认后再手动清理输出目录。加密备份请先在隔离环境解密成临时文件后再演练。
-
-### 安全配置建议
-
-- 优先通过环境变量 `CHATGPT2API_AUTH_KEY`、`DATABASE_URL`、`GIT_TOKEN` 等注入敏感配置，避免把真实密钥写入仓库文件。
-- 公网部署时把 Web 面板放在反向代理、VPN 或可信网络后面，并限制管理端入口访问来源。
-- 账号池、备份包、日志和图片缓存都可能包含敏感数据，迁移、排障和演练时使用临时目录，完成后及时清理。
-- 开启自动备份后定期做 dry-run 恢复演练，并记录备份时间、包大小、校验结果和演练人员。
-
 ## 功能
-
-### 新版普通用户创作台
-
-- 新增 `/studio/` 普通用户创作台，面向普通用户提供更接近聊天产品的创作入口
-- 支持「对话 / 作画」双模式切换：文本模型从 `/v1/models` 动态读取，图片模型保留 `auto`、`gpt-image-2`、`codex-gpt-image-2`
-- 支持上传图片和粘贴图片作为参考图，作画模式下可继续编辑生成结果
-- 支持模型下拉、图片参数面板、任务队列、图片库等轻量弹层，点击外部自动收起
-- 支持亮色 / 深色模式切换，并在浏览器本地保存偏好
-- 支持移动端侧栏历史记录，点击外部可自动隐藏
-- 普通用户可以查看图片库和任务队列；管理员仍可进入完整后台
-
-### 后台管理界面
-
-- 管理员后台保留账号池、注册机、图片管理、日志管理和设置等完整管理入口
-- 账号池支持一键刷新全部账号、刷新选中账号、导出全部 Token、导出 CPA ZIP、手动修改状态和移除异常账号
-- 导入账号支持 `access_token`、Session JSON、本地 CPA JSON 文件、远程 CPA 服务器和 Sub2API 服务器
-- 注册机支持保存注册配置、启动 / 停止注册任务、查看 SSE 实时日志和运行结果统计
-- 设置页支持 CPA 连接管理：添加 CLIProxyAPI 连接后，点击「同步」读取远程账号列表，勾选后由后端后台下载 `access_token` 并导入本地号池
-- 设置页支持 Sub2API 连接管理：可通过管理员账号或 Admin API Key 保存连接，点击「同步」读取 OpenAI OAuth 账号并批量导入本地号池
-- 日志管理按图片调用、文本生成、账号管理分组展示，支持日期筛选、查询、批量选择和删除
-- 用户 Key 管理可为普通用户创建独立密钥，普通用户默认只能进入 `/studio/` 创作台
 
 ### API 兼容能力
 
 - 兼容 `POST /v1/images/generations` 图片生成接口
 - 兼容 `POST /v1/images/edits` 图片编辑接口
-- 兼容文本对话与图片场景的 `POST /v1/chat/completions`
-- 兼容文本对话与图片场景的 `POST /v1/responses`
-- 可作为 ChatGPT Web 上游中转站使用：本地号池里的 `access_token` 会直接驱动 `/backend-api/conversation`
-- 内置 `/chat/` SSE 对话测试页，可直接验证 Base URL、API Key、模型和流式输出是否可用
-- `GET /v1/models` 优先用本地号池账号探测 ChatGPT Web 可用模型，并补充本项目的图片模型别名
+- 兼容面向图片场景的 `POST /v1/chat/completions`
+- 兼容面向图片场景的 `POST /v1/responses`
+- `GET /v1/models` 返回 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、
+  `gpt-5-mini`
 - 支持通过 `n` 返回多张生成结果
+- 支持生成可编辑 PPT 文件
+- 支持生成可编辑 PSD 文件
 - 支持 Codex 中的画图接口逆向，仅 `Plus` / `Team` / `Pro` 订阅可用，模型别名为 `codex-gpt-image-2`，如有需要可自行在其他场景映射回
   `gpt-image-2`，用于和官网画图区分；也就意味着同一账号会同时有官网和 Codex 两份生图额度
-- 注意：注册所得账号是 ChatGPT Web / Platform token，不等于 Codex OAuth 账号，不能直接当作 Codex OAuth 账号使用。
 
 ### 在线画图功能
 
-- 内置在线画图工作台与新版 `/studio/` 创作台，支持生成、图片编辑与多图组图编辑
+- 内置在线画图工作台，支持生成、图片编辑与多图组图编辑
 - 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` 模型选择
 - 编辑模式支持参考图上传
 - 前端支持多图生成交互
 - 本地保存图片会话历史，支持回看、删除和清空
 - 支持服务端缓存图片URL
-- 支持图片库浏览、复制地址、下载和灯箱预览
-- 支持任务队列查看、任务进度、失败重试和跳转到对应会话
+- 图片生成进度追踪，超时后可继续等待
+- 图片懒加载与滚动位置记忆，优化大量图片场景性能
 
 ### 号池管理功能
 
-- 自动刷新账号邮箱、类型、额度和恢复时间
-- 轮询可用账号执行文本对话
+- 自动刷新账号邮箱、类型、额度和恢复时间（异步进度追踪）
 - 轮询可用账号执行图片生成与图片编辑
 - 遇到 Token 失效类错误时自动剔除无效 Token
 - 定时检查限流账号并自动刷新
+- 支持密码重新登录恢复异常账号，刷新后可自动重登
 - 支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
+- 支持 WARP / FlareSolverr 稳定代理运行时
 - 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 
 ### 实验性 / 规划中
 
-- `/v1/complete` 文本补全与流式输出已实现，但仍在测试，目前会出现对话重复的问题，请谨慎测试使用
 - 详细状态说明见：[功能清单](./docs/feature-status.en.md)
 
-## Screenshots
+## 效果展示
 
-新版普通用户创作台：
-
-![Studio workspace](assets/studio_clean_workspace.png)
-
-模型选择：
-
-![Studio model selector](assets/studio_model_selector.png)
-
-图片参数面板：
-
-![Studio params panel](assets/studio_params_panel.png)
-
-任务队列：
-
-![Studio task queue](assets/studio_task_queue.png)
-
-后台账号池：
-
-![Admin accounts](assets/admin_accounts.png)
-
-注册任务管理：
-
-![Admin register](assets/admin_register.png)
-
-日志管理：
-
-![Admin logs](assets/admin_logs.png)
-
-设置与后台配置（CPA / Sub2API 同步入口在设置页下方）：
-
-![Admin settings](assets/admin_settings_top.png)
-
-文生图界面：
-
-![image](assets/image.png)
-
-编辑图：
-
-![image](assets/image_edit.png)
-
-Cherry Studio 中使用，支持作为绘图接口接入：
-
-![image](assets/chery_studio.png)
-
-号池管理：
-
-![image](assets/account_pool.png)
-
-New Api 接入：
-
-![image](assets/new_api.png)
+<table width="100%">
+  <tr>
+    <td width="50%"><img src="https://i.ibb.co/Jj8nfwwP/image.png" alt="image" border="0"></td>
+    <td width="50%"><img src="https://i.ibb.co/pqf235v/image-edit.png" alt="image edit" border="0"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="https://i.ibb.co/tPcqtVfd/chery-studio.png" alt="chery studio" border="0"></td>
+    <td width="50%"><img src="https://i.ibb.co/PsT9YHBV/account-pool.png" alt="account pool" border="0"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="https://i.ibb.co/rRWLG08q/new-api.png" alt="new api" border="0"></td>
+  </tr>
+</table>
 
 ## API
 
@@ -260,72 +165,11 @@ New Api 接入：
 Authorization: Bearer <auth-key>
 ```
 
-外部客户端按 OpenAI-compatible 方式接入：
-
-| 字段 | 填法 |
-|:--|:--|
-| Base URL | 项目地址后加 `/v1`，例如 `http://127.0.0.1:3000/v1` |
-| API Key | 本项目登录密钥，或「设置 → 用户 Key」里创建的用户密钥 |
-| Model | 文本建议先填 `auto`，实际可用模型以 `/v1/models` 和 `/chat/` 测试页结果为准 |
-
-也可以直接打开 `/chat/` 页面做 SSE 流式对话测试。
-
-Anthropic Messages 兼容接口可按 Anthropic-compatible 方式接入：
-
-| 字段 | 填法 |
-|:--|:--|
-| Base URL | 项目地址，例如 `http://127.0.0.1:3000`，接口路径为 `POST /v1/messages` |
-| API Key | 本项目登录密钥，或「设置 → 用户 Key」里创建的用户密钥 |
-| Header | 使用 `x-api-key: <auth-key>`，也兼容 `Authorization: Bearer <auth-key>` |
-| Version | 可传 `anthropic-version`，当前主要兼容 Anthropic Messages 消息格式，不做完整版本语义实现 |
-
-<details>
-<summary><code>POST /v1/messages</code></summary>
-<br>
-
-Anthropic Messages 基础兼容接口，用于按 Anthropic 消息格式调用文本对话能力。
-
-```bash
-curl http://localhost:8000/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: <auth-key>" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{
-    "model": "auto",
-    "max_tokens": 1024,
-    "messages": [
-      {
-        "role": "user",
-        "content": "你好，简单介绍一下你自己"
-      }
-    ]
-  }'
-```
-
-<details>
-<summary>字段说明</summary>
-<br>
-
-| 字段 | 说明 |
-|:--|:--|
-| `model` | 文本模型，建议先填 `auto`，实际可用模型以 `/v1/models` 和 `/chat/` 测试页结果为准 |
-| `messages` | Anthropic Messages 消息数组，当前主要兼容文本消息格式 |
-| `max_tokens` | 可传入，按当前后端文本链路能力处理 |
-| `tools` | 已做基础适配，工具调用会转换为当前文本链路可处理的 XML 形式 |
-| `stream` | 支持按当前文本链路进行流式返回 |
-| `anthropic-version` | 可作为请求头传入，但当前主要兼容消息格式，不保证完整 Anthropic 版本语义 |
-
-图片输入、复杂多模态内容块和完整 Anthropic API 语义仍以当前实现为准，请先用 `/v1/messages` 和 `/chat/` 实测目标客户端工作流。
-
-<br>
-</details>
-</details>
-
 <details>
 <summary><code>GET /v1/models</code></summary>
 <br>
 
-返回当前暴露的模型列表。服务端会优先使用本地号池里的可用文本账号探测 ChatGPT Web 模型；如果号池为空或探测失败，则回落到匿名模型列表。
+返回当前暴露的图片模型列表。
 
 ```bash
 curl http://localhost:8000/v1/models \
@@ -338,8 +182,8 @@ curl http://localhost:8000/v1/models \
 
 | 字段   | 说明                                                                                                         |
 |:-----|:-----------------------------------------------------------------------------------------------------------|
-| 返回模型 | 以当前号池账号从 ChatGPT Web 返回的模型为准，并追加 `gpt-image-2`、`codex-gpt-image-2` 等本项目图片模型别名 |
-| 接入场景 | 可作为 OpenAI-compatible ChatGPT Web relay 接入 Cherry Studio、New API 等上游或客户端                      |
+| 返回模型 | `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` |
+| 接入场景 | 可接入 Cherry Studio、New API 等上游或客户端                                                                          |
 
 <br>
 </details>
@@ -382,7 +226,7 @@ curl http://localhost:8000/v1/images/generations \
 <summary><code>POST /v1/images/edits</code></summary>
 <br>
 
-OpenAI 兼容图片编辑接口，用于上传图片并生成编辑结果。
+OpenAI 兼容图片编辑接口，可上传图片文件，也可按官方 JSON 格式传入图片链接并生成编辑结果。
 
 ```bash
 curl http://localhost:8000/v1/images/edits \
@@ -393,16 +237,33 @@ curl http://localhost:8000/v1/images/edits \
   -F "image=@./input.png"
 ```
 
+也可以直接传图片 URL：
+
+```bash
+curl http://localhost:8000/v1/images/edits \
+  -H "Authorization: Bearer <auth-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "把这张图改成赛博朋克夜景风格",
+    "images": [
+      {"image_url": "https://example.com/input.png"}
+    ]
+  }'
+```
+
 <details>
 <summary>字段说明</summary>
 <br>
 
-| 字段       | 说明                                  |
-|:---------|:------------------------------------|
-| `model`  | 图片模型， `gpt-image-2`                 |
-| `prompt` | 图片编辑提示词                             |
-| `n`      | 生成数量，当前后端限制为 `1-4`                  |
-| `image`  | 需要编辑的图片文件，使用 multipart/form-data 上传 |
+| 字段          | 说明                                            |
+|:------------|:----------------------------------------------|
+| `model`     | 图片模型， `gpt-image-2`                           |
+| `prompt`    | 图片编辑提示词                                       |
+| `n`         | 生成数量，当前后端限制为 `1-4`                            |
+| `image`     | 需要编辑的图片文件，使用 multipart/form-data 上传           |
+| `images`    | JSON 图片引用数组，支持 `{"image_url": "https://..."}` |
+| `image_url` | 表单模式下也可直接传图片链接，支持重复字段传多张图                     |
 
 <br>
 </details>
@@ -412,7 +273,7 @@ curl http://localhost:8000/v1/images/edits \
 <summary><code>POST /v1/chat/completions</code></summary>
 <br>
 
-面向图片场景的 Chat Completions 兼容接口，不是完整通用聊天代理。
+面向文本、网页搜索与图片场景的 Chat Completions 兼容接口，不是完整通用聊天代理。
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -434,12 +295,14 @@ curl http://localhost:8000/v1/chat/completions \
 <summary>字段说明</summary>
 <br>
 
-| 字段         | 说明                |
-|:-----------|:------------------|
-| `model`    | 图片模型，默认按图片生成场景处理  |
-| `messages` | 消息数组，需要是图片相关请求内容  |
-| `n`        | 生成数量，按当前实现解析为图片数量 |
-| `stream`   | 已实现，但仍在测试         |
+| 字段                   | 说明                                                                           |
+|:---------------------|:-----------------------------------------------------------------------------|
+| `model`              | 文本、搜索或图片模型；搜索模型会触发网页搜索兼容逻辑                                                   |
+| `messages`           | 消息数组，支持文本、搜索和图片请求内容                                                          |
+| `n`                  | 图片生成数量，按当前实现解析为图片数量                                                          |
+| `stream`             | 文本、搜索和图片场景均支持，仍在测试                                                           |
+| `tools`              | 文本场景支持 `web_search` / `web_search_preview` / `web_search_preview_2025_03_11` |
+| `web_search_options` | 传入时会触发网页搜索兼容逻辑                                                               |
 
 <br>
 </details>
@@ -449,7 +312,7 @@ curl http://localhost:8000/v1/chat/completions \
 <summary><code>POST /v1/responses</code></summary>
 <br>
 
-面向图片生成工具调用的 Responses API 兼容接口，不是完整通用 Responses API 代理。
+面向文本、网页搜索和图片生成工具调用的 Responses API 兼容接口，不是完整通用 Responses API 代理。
 
 ```bash
 curl http://localhost:8000/v1/responses \
@@ -470,12 +333,12 @@ curl http://localhost:8000/v1/responses \
 <summary>字段说明</summary>
 <br>
 
-| 字段       | 说明                            |
-|:---------|:------------------------------|
-| `model`  | 响应中会回显该模型字段，但图片生成当前仍走图片生成兼容逻辑 |
-| `input`  | 输入内容，需要能解析出图片生成提示词            |
-| `tools`  | 必须包含 `image_generation` 工具请求  |
-| `stream` | 已实现，但仍在测试                     |
+| 字段       | 说明                                                                                      |
+|:---------|:----------------------------------------------------------------------------------------|
+| `model`  | 响应中会回显该模型字段，搜索和图片生成会走对应兼容逻辑                                                             |
+| `input`  | 输入内容；搜索使用最后一条用户文本，图片生成需能解析出提示词                                                          |
+| `tools`  | 支持 `image_generation`、`web_search`、`web_search_preview`、`web_search_preview_2025_03_11` |
+| `stream` | 已实现，但仍在测试                                                                               |
 
 <br>
 </details>
@@ -489,10 +352,10 @@ curl http://localhost:8000/v1/responses \
 
 感谢所有为本项目做出贡献的开发者：
 
-<a href="https://github.com/lovemoon51/chatgpt2api/graphs/contributors">
-  <img alt="Contributors" src="https://contrib.rocks/image?repo=lovemoon51/chatgpt2api" />
+<a href="https://github.com/basketikun/chatgpt2api/graphs/contributors">
+  <img alt="Contributors" src="https://contrib.rocks/image?repo=basketikun/chatgpt2api" />
 </a>
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=lovemoon51/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=lovemoon51%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=basketikun/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=basketikun%2Fchatgpt2api&type=date&legend=top-left)

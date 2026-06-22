@@ -14,3 +14,5 @@ services:
       - ./config.json:/app/config.json
     environment:
       STORAGE_BACKEND: json
+      # POSTGRES_SYNC_DATABASE_URL: postgresql://user:password@host:5432/dbname
+      # IMAGE_METADATA_DATABASE_URL: postgresql://user:password@host:5432/dbname

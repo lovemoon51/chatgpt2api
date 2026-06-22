@@ -203,7 +203,7 @@ function MessageBubble({ message, onCopy }: { message: ChatMessage; onCopy: (val
 }
 
 export default function ChatPage() {
-  const { isCheckingAuth, session } = useAuthGuard();
+  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("auto");

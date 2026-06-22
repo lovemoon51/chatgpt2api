@@ -399,6 +399,123 @@ class SystemStatusApiTests(unittest.TestCase):
         self.assertEqual(captured["tag"], "pet,orange")
         self.assertEqual(captured["sort"], "+size")
 
+    def test_public_discover_images_endpoint_is_anonymous(self):
+        captured: dict[str, object] = {}
+
+        def fake_public_discover_images(*args, **kwargs):
+            captured["args"] = args
+            captured.update(kwargs)
+            return {
+                "items": [
+                    {
+                        "id": "2026/05/20/public.png",
+                        "title": "公共精选图",
+                        "subtitle": "1024 x 1024",
+                        "prompt": "公共提示词",
+                        "imageUrl": "http://testserver/public-images/2026/05/20/public.png?expires=1&signature=test",
+                        "imageFallbackUrl": "http://testserver/public-images/2026/05/20/public.png?expires=1&signature=test",
+                    }
+                ],
+                "groups": [],
+                "page": 1,
+                "page_size": 12,
+                "pages": 1,
+                "total": 1,
+                "has_more": False,
+            }
+
+        with (
+            mock.patch.object(system_module, "resolve_image_base_url", lambda _request: "http://testserver"),
+            mock.patch.object(system_module, "list_public_discover_images", side_effect=fake_public_discover_images),
+        ):
+            response = self.client.get("/api/public/discover/images?page_size=12")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(captured["args"][0], "http://testserver")
+        self.assertEqual(captured["page_size"], 12)
+        self.assertEqual(response.json()["items"][0]["title"], "公共精选图")
+
+    def test_publish_filtered_images_adds_public_discover_tags_to_all_matches(self):
+        captured: dict[str, object] = {}
+        tag_updates: dict[str, list[str]] = {}
+
+        def fake_list_images(*_args, **kwargs):
+            captured.update(kwargs)
+            return {
+                "items": [
+                    {"rel": "2026/05/20/cat.png", "tags": ["pet"]},
+                    {"path": "2026/05/20/dog.png", "tags": ["public", "pet"]},
+                ],
+                "groups": [],
+                "page": 1,
+                "page_size": 2,
+                "pages": 1,
+                "total": 2,
+            }
+
+        def fake_set_tags(path: str, tags: list[str]):
+            tag_updates[path] = tags
+            return tags
+
+        with (
+            mock.patch.object(system_module, "require_admin", lambda _authorization: {"role": "admin"}),
+            mock.patch.object(system_module, "resolve_image_base_url", lambda _request: "http://testserver"),
+            mock.patch.object(system_module, "list_images", side_effect=fake_list_images),
+            mock.patch.object(system_module, "set_tags", side_effect=fake_set_tags),
+        ):
+            response = self.client.post(
+                "/api/images/public-visibility",
+                json={"public": True, "q": "pet", "tags": ["animal"], "start_date": "2026-05-01", "end_date": "2026-05-31"},
+                headers=AUTH_HEADERS,
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(captured["search"], "pet")
+        self.assertEqual(captured["tag"], "animal")
+        self.assertEqual(captured["start_date"], "2026-05-01")
+        self.assertEqual(captured["end_date"], "2026-05-31")
+        self.assertEqual(captured["page_size"], 0)
+        self.assertEqual(tag_updates["2026/05/20/cat.png"], ["pet", "public", "discover"])
+        self.assertEqual(tag_updates["2026/05/20/dog.png"], ["public", "pet", "discover"])
+        self.assertEqual(response.json()["updated"], 2)
+
+    def test_unpublish_filtered_images_removes_public_discover_tags_from_all_matches(self):
+        tag_updates: dict[str, list[str]] = {}
+
+        def fake_list_images(*_args, **_kwargs):
+            return {
+                "items": [
+                    {"rel": "2026/05/20/cat.png", "tags": ["pet", "public", "discover"]},
+                    {"rel": "2026/05/20/private.png", "tags": ["pet"]},
+                ],
+                "groups": [],
+                "page": 1,
+                "page_size": 2,
+                "pages": 1,
+                "total": 2,
+            }
+
+        def fake_set_tags(path: str, tags: list[str]):
+            tag_updates[path] = tags
+            return tags
+
+        with (
+            mock.patch.object(system_module, "require_admin", lambda _authorization: {"role": "admin"}),
+            mock.patch.object(system_module, "resolve_image_base_url", lambda _request: "http://testserver"),
+            mock.patch.object(system_module, "list_images", side_effect=fake_list_images),
+            mock.patch.object(system_module, "set_tags", side_effect=fake_set_tags),
+        ):
+            response = self.client.post(
+                "/api/images/public-visibility",
+                json={"public": False, "q": "pet"},
+                headers=AUTH_HEADERS,
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(tag_updates["2026/05/20/cat.png"], ["pet"])
+        self.assertEqual(tag_updates["2026/05/20/private.png"], ["pet"])
+        self.assertEqual(response.json()["updated"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

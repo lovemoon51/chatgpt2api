@@ -29,6 +29,10 @@ export function shouldFetchImageWithAuth(rawUrl: string) {
   if (!rawUrl || rawUrl.startsWith("data:") || rawUrl.startsWith("blob:")) {
     return false;
   }
+  // 如果是公开签名 URL，不需要认证
+  if (rawUrl.includes("/public-images/") && rawUrl.includes("signature=")) {
+    return false;
+  }
   try {
     const parsed = new URL(rawUrl, typeof window === "undefined" ? getApiBaseUrl() : window.location.href);
     return protectedImagePath(parsed.pathname);
@@ -116,4 +120,57 @@ export async function downloadImageUrl(rawUrl: string, fileName: string) {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * 获取图片的最佳 URL
+ *
+ * 优先使用 signed_url（公开访问，无需认证），
+ * 如果没有则使用 url（需要认证下载）
+ */
+export function getBestImageUrl(imageData: { signed_url?: string; url?: string; b64_json?: string }): string {
+  // 优先使用签名 URL（公开访问，快速）
+  if (imageData.signed_url) {
+    return imageData.signed_url;
+  }
+
+  // 其次使用 base64（无需下载）
+  if (imageData.b64_json) {
+    return `data:image/png;base64,${imageData.b64_json}`;
+  }
+
+  // 最后使用需要认证的 URL（需要下载）
+  return imageData.url || "";
+}
+
+export type PreviewPriority = "preferOriginal" | "preferThumbnail";
+
+export type PreviewImageSource = {
+  signed_url?: string;
+  url?: string;
+  b64_json?: string;
+  thumbnail_url?: string;
+};
+
+function toPreviewCandidates(imageData: PreviewImageSource, priority: PreviewPriority) {
+  const originalCandidates = [
+    imageData.signed_url,
+    imageData.url,
+    imageData.b64_json ? `data:image/png;base64,${imageData.b64_json}` : "",
+  ];
+
+  if (priority === "preferThumbnail") {
+    return [imageData.thumbnail_url, ...originalCandidates];
+  }
+
+  return [...originalCandidates, imageData.thumbnail_url];
+}
+
+export function getPreferredPreviewUrl(imageData: PreviewImageSource, priority: PreviewPriority): string {
+  return toPreviewCandidates(imageData, priority).find((candidate) => Boolean(candidate)) || "";
+}
+
+export function getPreviewFallbackUrl(imageData: PreviewImageSource, priority: PreviewPriority): string | undefined {
+  const primary = getPreferredPreviewUrl(imageData, priority);
+  return toPreviewCandidates(imageData, priority).find((candidate) => Boolean(candidate) && candidate !== primary);
 }

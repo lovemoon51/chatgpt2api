@@ -6,7 +6,13 @@ export type AuthRole = "admin" | "user";
 
 export type StoredAuthLimits = {
   requestsPerDay?: number | null;
+  creditsTotal?: number | null;
+  creditsUsed?: number | null;
+  creditsRemaining?: number | null;
   imagesPerDay?: number | null;
+  imagesTotal?: number | null;
+  imagesUsed?: number | null;
+  imagesRemaining?: number | null;
   concurrency?: number | null;
   models?: string[];
 };
@@ -16,7 +22,17 @@ export type StoredAuthSession = {
   role: AuthRole;
   subjectId: string;
   name: string;
+  email?: string;
   limits?: StoredAuthLimits | null;
+};
+
+type LoginResponseLike = {
+  role?: unknown;
+  subject_id?: unknown;
+  name?: unknown;
+  email?: unknown;
+  access_token?: unknown;
+  limits?: unknown;
 };
 
 export const AUTH_KEY_STORAGE_KEY = "chatgpt2api_auth_key";
@@ -44,6 +60,7 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
     role,
     subjectId: String(candidate.subjectId || "").trim(),
     name: String(candidate.name || "").trim(),
+    email: String(candidate.email || "").trim() || undefined,
     limits: normalizeLimits(candidate.limits),
   };
 }
@@ -66,13 +83,34 @@ function normalizeLimits(value: unknown): StoredAuthLimits | null {
   const candidate = value as Partial<StoredAuthLimits>;
   const limits: StoredAuthLimits = {};
   const requestsPerDay = normalizeLimitNumber(candidate.requestsPerDay);
+  const creditsTotal = normalizeLimitNumber(candidate.creditsTotal);
+  const creditsUsed = normalizeLimitNumber(candidate.creditsUsed);
+  const creditsRemaining = normalizeLimitNumber(candidate.creditsRemaining);
   const imagesPerDay = normalizeLimitNumber(candidate.imagesPerDay);
+  const imagesTotal = normalizeLimitNumber(candidate.imagesTotal);
+  const imagesUsed = normalizeLimitNumber(candidate.imagesUsed);
+  const imagesRemaining = normalizeLimitNumber(candidate.imagesRemaining);
   const concurrency = normalizeLimitNumber(candidate.concurrency);
   if (requestsPerDay !== undefined) {
     limits.requestsPerDay = requestsPerDay;
   }
   if (imagesPerDay !== undefined) {
     limits.imagesPerDay = imagesPerDay;
+  }
+  const totalCredits = creditsTotal !== undefined ? creditsTotal : imagesTotal;
+  const usedCredits = creditsUsed !== undefined ? creditsUsed : imagesUsed;
+  const remainingCredits = creditsRemaining !== undefined ? creditsRemaining : imagesRemaining;
+  if (totalCredits !== undefined) {
+    limits.creditsTotal = totalCredits;
+    limits.imagesTotal = totalCredits;
+  }
+  if (usedCredits !== undefined) {
+    limits.creditsUsed = usedCredits;
+    limits.imagesUsed = usedCredits;
+  }
+  if (remainingCredits !== undefined) {
+    limits.creditsRemaining = remainingCredits;
+    limits.imagesRemaining = remainingCredits;
   }
   if (concurrency !== undefined) {
     limits.concurrency = concurrency;
@@ -85,7 +123,29 @@ function normalizeLimits(value: unknown): StoredAuthLimits | null {
 }
 
 export function getDefaultRouteForRole(role: AuthRole) {
-  return role === "admin" ? "/accounts" : "/studio";
+  return role === "admin" ? "/accounts" : "/ColaAI";
+}
+
+export function createStoredAuthSessionFromLoginResponse(loginValue: string, data: LoginResponseLike): StoredAuthSession {
+  return {
+    key: String(data.access_token || loginValue || "").trim(),
+    role: data.role === "admin" ? "admin" : "user",
+    subjectId: String(data.subject_id || "").trim(),
+    name: String(data.name || "").trim(),
+    email: String(data.email || "").trim() || undefined,
+    limits: normalizeLimits({
+      requestsPerDay: (data.limits as { requests_per_day?: unknown } | null | undefined)?.requests_per_day,
+      imagesPerDay: (data.limits as { images_per_day?: unknown } | null | undefined)?.images_per_day,
+      creditsTotal: (data.limits as { images_total?: unknown } | null | undefined)?.images_total,
+      creditsUsed: (data.limits as { images_used?: unknown } | null | undefined)?.images_used,
+      creditsRemaining: (data.limits as { images_remaining?: unknown } | null | undefined)?.images_remaining,
+      imagesTotal: (data.limits as { images_total?: unknown } | null | undefined)?.images_total,
+      imagesUsed: (data.limits as { images_used?: unknown } | null | undefined)?.images_used,
+      imagesRemaining: (data.limits as { images_remaining?: unknown } | null | undefined)?.images_remaining,
+      concurrency: (data.limits as { concurrency?: unknown } | null | undefined)?.concurrency,
+      models: (data.limits as { models?: unknown } | null | undefined)?.models,
+    }),
+  };
 }
 
 export async function getStoredAuthKey() {

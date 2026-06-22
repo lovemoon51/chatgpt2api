@@ -39,7 +39,7 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
       }
 
       if (roleList.length > 0 && !roleList.includes(storedSession.role)) {
-        setSession(storedSession);
+        setSession(null);
         setIsCheckingAuth(false);
         router.replace(getDefaultRouteForRole(storedSession.role));
         return;

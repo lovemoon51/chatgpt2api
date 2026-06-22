@@ -30,6 +30,15 @@ class AuthKeyModel(Base):
     data = Column(Text, nullable=False)
 
 
+class UserModel(Base):
+    """普通用户数据模型"""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), unique=True, nullable=False, index=True)
+    data = Column(Text, nullable=False)
+
+
 class DatabaseStorageBackend(StorageBackend):
     """数据库存储后端（支持 SQLite、PostgreSQL、MySQL 等）"""
 
@@ -71,7 +80,15 @@ class DatabaseStorageBackend(StorageBackend):
         """保存鉴权密钥数据到数据库"""
         self._save_rows(AuthKeyModel, auth_keys, "id", "key_id")
 
-    def _load_rows(self, model: type[AccountModel] | type[AuthKeyModel]) -> list[dict[str, Any]]:
+    def load_users(self) -> list[dict[str, Any]]:
+        """从数据库加载普通用户数据"""
+        return self._load_rows(UserModel)
+
+    def save_users(self, users: list[dict[str, Any]]) -> None:
+        """保存普通用户数据到数据库"""
+        self._save_rows(UserModel, users, "id", "user_id")
+
+    def _load_rows(self, model: type[AccountModel] | type[AuthKeyModel] | type[UserModel]) -> list[dict[str, Any]]:
         session = self.Session()
         try:
             items = []
@@ -88,7 +105,7 @@ class DatabaseStorageBackend(StorageBackend):
 
     def _save_rows(
         self,
-        model: type[AccountModel] | type[AuthKeyModel],
+        model: type[AccountModel] | type[AuthKeyModel] | type[UserModel],
         items: list[dict[str, Any]],
         source_key: str,
         target_key: str | None = None,
@@ -124,12 +141,14 @@ class DatabaseStorageBackend(StorageBackend):
                 session.execute(text("SELECT 1"))
                 count = session.query(AccountModel).count()
                 auth_key_count = session.query(AuthKeyModel).count()
+                user_count = session.query(UserModel).count()
                 return {
                     "status": "healthy",
                     "backend": "database",
                     "database_url": self._mask_password(self.database_url),
                     "account_count": count,
                     "auth_key_count": auth_key_count,
+                    "user_count": user_count,
                 }
             finally:
                 session.close()

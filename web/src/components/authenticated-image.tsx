@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 type AuthenticatedImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & {
   src: string;
   fallbackSrc?: string;
+  loadingMotion?: "animated" | "static";
 };
 
 type ResolvedImageSource = {
@@ -52,10 +53,12 @@ function ImageLoadingPlaceholder({
   onClick,
   onDoubleClick,
   title,
-}: Pick<AuthenticatedImageProps, "className" | "alt" | "style" | "onClick" | "onDoubleClick" | "title">) {
+  loadingMotion = "animated",
+}: Pick<AuthenticatedImageProps, "className" | "alt" | "style" | "onClick" | "onDoubleClick" | "title" | "loadingMotion">) {
   const label = typeof alt === "string" && alt ? `${alt} 加载中` : "图片加载中";
   const classNameText = typeof className === "string" ? className : "";
   const hasStableFrame = /(?:^|\s)(?:aspect-|size-|min-h-|h-(?!auto|full)\S+)/.test(classNameText);
+  const isStatic = loadingMotion === "static";
   const handleClick: MouseEventHandler<HTMLSpanElement> = (event) => {
     onClick?.(event as unknown as Parameters<NonNullable<typeof onClick>>[0]);
   };
@@ -77,19 +80,26 @@ function ImageLoadingPlaceholder({
       role="img"
       style={style}
       title={title}
+      data-auth-image-motion={loadingMotion}
     >
-      <span className="auth-image-loader__mist" aria-hidden="true" />
-      <span className="auth-image-loader__grid" aria-hidden="true">
-        {Array.from({ length: 16 }, (_, index) => (
-          <span key={index} style={{ "--cell-index": index } as CSSProperties} />
-        ))}
-      </span>
-      <span className="auth-image-loader__cursor" aria-hidden="true" />
+      {isStatic ? (
+        <span className="absolute inset-0 bg-[linear-gradient(135deg,rgba(226,232,240,0.82),rgba(248,250,252,0.96))]" aria-hidden="true" />
+      ) : (
+        <>
+          <span className="auth-image-loader__mist" aria-hidden="true" />
+          <span className="auth-image-loader__grid" aria-hidden="true">
+            {Array.from({ length: 16 }, (_, index) => (
+              <span key={index} style={{ "--cell-index": index } as CSSProperties} />
+            ))}
+          </span>
+          <span className="auth-image-loader__cursor" aria-hidden="true" />
+        </>
+      )}
     </span>
   );
 }
 
-export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ...props }: AuthenticatedImageProps) {
+export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, loadingMotion, ...props }: AuthenticatedImageProps) {
   const candidates = useMemo(
     () => [src, fallbackSrc].filter((item): item is string => Boolean(item)),
     [src, fallbackSrc],
@@ -151,6 +161,7 @@ export function AuthenticatedImage({ src, fallbackSrc, className, alt, style, ..
         onDoubleClick={props.onDoubleClick}
         style={style}
         title={props.title}
+        loadingMotion={loadingMotion}
       />
     );
   }

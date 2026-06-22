@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { AppShell } from "@/components/app-shell";
+import { stripInjectedTextShadowScript } from "@/lib/hydration-guards";
 
 export const metadata: Metadata = {
   title: "ChatGPT 号池管理",
@@ -23,6 +24,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: stripInjectedTextShadowScript,
+          }}
+        />
+      </head>
       <body
         className="antialiased"
         style={{

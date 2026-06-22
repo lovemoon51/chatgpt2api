@@ -9,6 +9,7 @@ from typing import Any
 from PIL import Image
 
 from services.config import DATA_DIR, config
+from services.image_metadata_storage import get_image_metadata_storage
 
 IMAGE_ASSETS_FILE = DATA_DIR / "image_assets.json"
 _assets_lock = RLock()
@@ -92,6 +93,25 @@ def _clean_item(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _load_locked() -> dict[str, dict[str, Any]]:
+    storage = get_image_metadata_storage()
+    if storage is not None:
+        raw_assets = storage.load_map("image_assets")
+        assets: dict[str, dict[str, Any]] = {}
+        for item in raw_assets.values():
+            if isinstance(item, dict):
+                cleaned = _clean_item(item)
+                if cleaned is not None:
+                    assets[str(cleaned["path"])] = cleaned
+        if assets:
+            return assets
+        legacy_assets = _load_json_locked()
+        if legacy_assets:
+            storage.save_map("image_assets", legacy_assets)
+        return legacy_assets
+    return _load_json_locked()
+
+
+def _load_json_locked() -> dict[str, dict[str, Any]]:
     try:
         raw = json.loads(IMAGE_ASSETS_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -112,6 +132,9 @@ def _load_locked() -> dict[str, dict[str, Any]]:
 
 
 def _save_locked(assets: dict[str, dict[str, Any]]) -> None:
+    storage = get_image_metadata_storage()
+    if storage is not None:
+        storage.save_map("image_assets", assets)
     IMAGE_ASSETS_FILE.parent.mkdir(parents=True, exist_ok=True)
     items = sorted(assets.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
     tmp_path = IMAGE_ASSETS_FILE.with_suffix(IMAGE_ASSETS_FILE.suffix + ".tmp")

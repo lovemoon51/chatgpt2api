@@ -13,6 +13,7 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
+from services.image_metadata_storage import get_image_metadata_storage
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol.conversation import no_image_result_message
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
@@ -217,7 +218,9 @@ def _percentile(values: list[int], percentile: int) -> int | None:
     return round(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction)
 
 
-def _public_task(task: dict[str, Any]) -> dict[str, Any]:
+def _public_task(task: dict[str, Any], base_url: str = "") -> dict[str, Any]:
+    from services.signed_url_service import generate_signed_image_url
+
     phase = _clean(task.get("phase")) or _phase_from_status(task.get("status"))
     timings = _task_timings(task)
     item = {
@@ -229,6 +232,7 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "mode": task.get("mode"),
         "model": task.get("model"),
         "size": task.get("size"),
+        "resolution": task.get("resolution"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
         "timings": timings,
@@ -237,8 +241,36 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     for key in ("queued_at", "started_at", "finished_at", "duration_ms", "queue_duration_ms"):
         if task.get(key) is not None:
             item[key] = task.get(key)
+
+    # 处理图片数据，添加签名 URL
     if task.get("data") is not None:
-        item["data"] = task.get("data")
+        data_with_signed_urls = []
+        for data_item in task.get("data"):
+            if not isinstance(data_item, dict):
+                data_with_signed_urls.append(data_item)
+                continue
+
+            # 复制原始数据
+            enhanced_item = dict(data_item)
+
+            # 如果有 URL，生成签名 URL
+            if base_url and data_item.get("url"):
+                try:
+                    # 提取图片路径（移除 /images/ 前缀）
+                    image_url = str(data_item.get("url"))
+                    if image_url.startswith("/images/"):
+                        image_path = image_url[len("/images/"):]
+                        # 生成 1 小时有效期的签名 URL
+                        signed_url = generate_signed_image_url(image_path, base_url, expires_in=3600)
+                        enhanced_item["signed_url"] = signed_url
+                except Exception:
+                    # 如果生成签名 URL 失败，忽略错误，继续使用原始 URL
+                    pass
+
+            data_with_signed_urls.append(enhanced_item)
+
+        item["data"] = data_with_signed_urls
+
     metadata = _clean_metadata(task.get("metadata"))
     if metadata:
         item["metadata"] = metadata
@@ -287,6 +319,8 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
+        resolution: str | None = None,
+        public: bool = False,
         base_url: str,
         release_usage_limit: Callable[[], None] | None = None,
         acquire_usage_limit: Callable[[], Callable[[], None]] | None = None,
@@ -296,10 +330,12 @@ class ImageTaskService:
             "model": model,
             "n": 1,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
             "owner_identity": dict(identity),
             "source_task_id": client_task_id,
+            "public": bool(public),
         }
         return self._submit(
             identity,
@@ -318,6 +354,8 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
+        resolution: str | None = None,
+        public: bool = False,
         base_url: str,
         images: list[tuple[bytes, str, str]],
         release_usage_limit: Callable[[], None] | None = None,
@@ -329,10 +367,12 @@ class ImageTaskService:
             "model": model,
             "n": 1,
             "size": size,
+            "resolution": resolution,
             "response_format": "url",
             "base_url": base_url,
             "owner_identity": dict(identity),
             "source_task_id": client_task_id,
+            "public": bool(public),
         }
         return self._submit(
             identity,
@@ -343,7 +383,7 @@ class ImageTaskService:
             acquire_usage_limit=acquire_usage_limit,
         )
 
-    def list_tasks(self, identity: dict[str, object], task_ids: list[str]) -> dict[str, Any]:
+    def list_tasks(self, identity: dict[str, object], task_ids: list[str], base_url: str = "") -> dict[str, Any]:
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
         with self._lock:
@@ -356,10 +396,10 @@ class ImageTaskService:
                 if task is None:
                     missing_ids.append(task_id)
                 else:
-                    items.append(_public_task(task))
+                    items.append(_public_task(task, base_url))
             if not requested_ids:
                 items = [
-                    _public_task(task)
+                    _public_task(task, base_url)
                     for task in self._tasks.values()
                     if task.get("owner_id") == owner
                 ]
@@ -572,6 +612,7 @@ class ImageTaskService:
             "mode": mode,
             "model": _clean(payload.get("model"), "gpt-image-2"),
             "size": _clean(payload.get("size")),
+            "resolution": _clean(payload.get("resolution")),
             "created_at": now,
             "updated_at": now,
             "queued_at": now,
@@ -918,6 +959,18 @@ class ImageTaskService:
             self._save_locked()
 
     def _load_locked(self) -> dict[str, dict[str, Any]]:
+        storage = get_image_metadata_storage()
+        if storage is not None:
+            tasks = self._clean_task_items(storage.load_map("image_tasks").values())
+            if tasks:
+                return tasks
+            legacy_tasks = self._load_json_locked()
+            if legacy_tasks:
+                storage.save_map("image_tasks", legacy_tasks)
+            return legacy_tasks
+        return self._load_json_locked()
+
+    def _load_json_locked(self) -> dict[str, dict[str, Any]]:
         if not self.path.exists():
             return {}
         try:
@@ -927,6 +980,9 @@ class ImageTaskService:
         raw_items = raw.get("tasks") if isinstance(raw, dict) else raw
         if not isinstance(raw_items, list):
             return {}
+        return self._clean_task_items(raw_items)
+
+    def _clean_task_items(self, raw_items: object) -> dict[str, dict[str, Any]]:
         tasks: dict[str, dict[str, Any]] = {}
         for item in raw_items:
             if not isinstance(item, dict):
@@ -946,6 +1002,7 @@ class ImageTaskService:
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
+                "resolution": _clean(item.get("resolution")),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
@@ -978,6 +1035,9 @@ class ImageTaskService:
 
     def _save_locked(self) -> None:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        storage = get_image_metadata_storage()
+        if storage is not None:
+            storage.save_map("image_tasks", {key: self._tasks[key] for key in self._tasks})
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp_path.replace(self.path)

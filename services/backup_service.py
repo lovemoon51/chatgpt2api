@@ -851,8 +851,8 @@ class BackupService:
         metadata: dict[str, object] = {}
         if isinstance(parsed, dict):
             metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else parsed
-            if "items" not in parsed and "accounts" not in parsed and "auth_keys" not in parsed:
-                warnings.append(_report_item("warning", "json_backup_content_unknown", "JSON 备份未发现 items、accounts 或 auth_keys 字段", path="backup.json"))
+            if "items" not in parsed and "accounts" not in parsed and "auth_keys" not in parsed and "users" not in parsed:
+                warnings.append(_report_item("warning", "json_backup_content_unknown", "JSON 备份未发现 items、accounts、auth_keys 或 users 字段", path="backup.json"))
         files = [{
             "name": "backup.json",
             "size": len(payload),
@@ -937,7 +937,7 @@ class BackupService:
     ) -> None:
         if path in {"data/register.json", "data/cpa_config.json", "data/sub2api_config.json", "data/image_tasks.json"} and not isinstance(parsed, dict):
             errors.append(_report_item("error", "json_shape_invalid", "该配置文件顶层必须是 JSON 对象", path=path))
-        if path in {"snapshots/accounts.json", "snapshots/auth_keys.json"} and not isinstance(parsed, list):
+        if path in {"snapshots/accounts.json", "snapshots/auth_keys.json", "snapshots/users.json"} and not isinstance(parsed, list):
             errors.append(_report_item("error", "snapshot_shape_invalid", "逻辑快照顶层必须是 JSON 数组", path=path))
         if path == "config.json" and not isinstance(parsed, dict):
             errors.append(_report_item("error", "config_shape_invalid", "config.json 顶层必须是 JSON 对象", path=path))
@@ -960,6 +960,8 @@ class BackupService:
             warnings.append(_report_item("warning", "accounts_snapshot_missing", "备份不含账号逻辑快照，跨存储后端恢复能力会受限"))
         if "snapshots/auth_keys.json" not in member_names:
             warnings.append(_report_item("warning", "auth_keys_snapshot_missing", "备份不含用户密钥逻辑快照，恢复后可能需要重新配置用户密钥"))
+        if "snapshots/users.json" not in member_names:
+            warnings.append(_report_item("warning", "users_snapshot_missing", "备份不含普通用户逻辑快照，恢复后可能需要重新同步普通用户资料"))
 
     def _verification_report(
         self,
@@ -1028,10 +1030,16 @@ class BackupService:
                     _json_bytes(config.get_storage_backend().load_accounts()),
                 )
             if include.get("auth_keys_snapshot"):
+                storage = config.get_storage_backend()
                 self._add_bytes_to_archive(
                     archive,
                     "snapshots/auth_keys.json",
-                    _json_bytes(config.get_storage_backend().load_auth_keys()),
+                    _json_bytes(storage.load_auth_keys()),
+                )
+                self._add_bytes_to_archive(
+                    archive,
+                    "snapshots/users.json",
+                    _json_bytes(storage.load_users()),
                 )
             if include.get("images"):
                 self._add_file_to_archive(archive, TAGS_FILE, "data/image_tags.json")

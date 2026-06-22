@@ -37,6 +37,9 @@ import { AuthenticatedImage } from "@/components/authenticated-image";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ImageReferencePreviewStrip } from "@/app/image/components/image-reference-preview";
+import { PromptMarketModal } from "@/app/studio/components/prompt-market-modal";
+import type { PromptTemplateSeed } from "@/app/studio/components/prompt-market-utils";
 import webConfig from "@/constants/common-env";
 import {
   cancelImageTask,
@@ -52,6 +55,7 @@ import {
   type ManagedImage,
   type ImageTask,
   type OpenAIModel,
+  type PromptTemplateApplyPayload,
 } from "@/lib/api";
 import { getFailureNextStep, getFriendlyErrorMessage } from "@/lib/error-messages";
 import { downloadImageUrl, fetchImageFile } from "@/lib/image-fetch";
@@ -759,6 +763,8 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const [imageLibraryItems, setImageLibraryItems] = useState<ManagedImage[]>([]);
   const [isLoadingImageLibrary, setIsLoadingImageLibrary] = useState(false);
   const [hasLoadedImageLibrary, setHasLoadedImageLibrary] = useState(false);
+  const [promptMarketOpen, setPromptMarketOpen] = useState(false);
+  const [promptTemplateSeed, setPromptTemplateSeed] = useState<PromptTemplateSeed | null>(null);
   const [taskQueueOpen, setTaskQueueOpen] = useState(false);
   const [revealedImageIds, setRevealedImageIds] = useState<Set<string>>(() => new Set());
   const [elapsedNowMs, setElapsedNowMs] = useState(() => Date.now());
@@ -1114,6 +1120,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     setIsParamsOpen(false);
     setTaskQueueOpen(false);
     setImageLibraryOpen(false);
+    setPromptMarketOpen(false);
     setLightboxOpen(false);
   }, []);
 
@@ -1718,6 +1725,55 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     }
   };
 
+  const openPromptMarket = () => {
+    setPromptTemplateSeed(null);
+    setIsModelMenuOpen(false);
+    setIsParamsOpen(false);
+    setTaskQueueOpen(false);
+    setImageLibraryOpen(false);
+    setStudioMode("image");
+    setPromptMarketOpen(true);
+  };
+
+  const handleApplyPromptTemplate = (payload: PromptTemplateApplyPayload) => {
+    setStudioMode("image");
+    setPrompt(payload.prompt);
+    setSelectedImageModel(payload.model || "auto");
+    setImageSize(payload.size || "1:1");
+    setImageCount(clampImageCount(String(payload.count || 1)));
+    setCompositionMode(payload.size ? "ratio" : "auto");
+    setPromptMarketOpen(false);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+    toast.success("已套用模板，可继续调整后发送");
+  };
+
+  const openPromptTemplateSeed = (turn: ImageTurn, image: StoredImage) => {
+    const previewUrl = getStoredImageSrc(image);
+    if (!previewUrl) {
+      toast.error("这张结果图无法保存为模板");
+      return;
+    }
+    setPromptTemplateSeed({
+      title: buildConversationTitle(turn.prompt),
+      description: "",
+      prompt: turn.prompt,
+      model: turn.model || "gpt-image-2",
+      size: turn.size || "1:1",
+      count: Math.max(1, turn.count || turn.images.length || 1),
+      tags: [],
+      previewImage: {
+        url: previewUrl,
+        source_image_id: image.id,
+      },
+    });
+    setIsModelMenuOpen(false);
+    setIsParamsOpen(false);
+    setTaskQueueOpen(false);
+    setImageLibraryOpen(false);
+    setStudioMode("image");
+    setPromptMarketOpen(true);
+  };
+
   const handleDeleteConversation = async (conversationId: string) => {
     const nextConversations = conversationsRef.current.filter((item) => item.id !== conversationId);
     conversationsRef.current = nextConversations;
@@ -1785,7 +1841,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
               </div>
               <div>
                 <div className="text-base font-bold tracking-tight text-slate-950 dark:text-slate-100">chatgpt2api</div>
-                <div className="text-xs text-slate-400 dark:text-slate-500">普通用户创作台</div>
+                <div className="text-xs text-slate-400 dark:text-slate-500">后台创作台</div>
               </div>
             </div>
             <button
@@ -2138,8 +2194,20 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                     const src = image.status === "success" ? getStoredImageSrc(image) : "";
                     return src ? [{ id: image.id, src }] : [];
                   });
+                  const referenceLightboxImages = turn.referenceImages.map((image, index) => ({
+                    id: `${turn.id}-reference-${index}`,
+                    src: image.dataUrl,
+                  }));
                   return (
                     <div key={turn.id} className="space-y-5">
+                      {turn.referenceImages.length > 0 ? (
+                        <ImageReferencePreviewStrip
+                          images={turn.referenceImages}
+                          lightboxImages={referenceLightboxImages}
+                          onOpenLightbox={openLightbox}
+                        />
+                      ) : null}
+
                       <div className="ml-auto max-w-[760px] rounded-[24px] bg-white p-5 shadow-[0_18px_55px_-38px_rgba(15,23,42,0.5)] dark:bg-slate-900 dark:shadow-black/20">
                         <div className="mb-4 flex flex-wrap items-center gap-2 border-b border-slate-100 pb-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
                           <span className="rounded-full bg-slate-100 px-3 py-1 dark:bg-slate-800 dark:text-slate-300">第 {turnIndex + 1} 轮</span>
@@ -2332,8 +2400,20 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                                       <Button
                                         variant="outline"
                                         size="sm"
+                                        className="h-8 w-8 rounded-full border-slate-200 bg-white p-0 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                        onClick={() => openPromptTemplateSeed(turn, image)}
+                                        aria-label="保存为模板"
+                                        title="保存为模板"
+                                      >
+                                        <ClipboardList className="size-3.5" />
+                                      </Button>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
                                         className="h-8 rounded-full border-slate-200 bg-white text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                                         onClick={() => void handleContinueEdit(image)}
+                                        aria-label="加入编辑"
+                                        title="加入编辑"
                                       >
                                         <Paintbrush className="size-3.5" />
                                         编辑
@@ -2651,6 +2731,9 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
                   <button
                     type="button"
                     className="inline-flex h-10 items-center gap-2 rounded-full bg-white px-4 text-sm font-medium text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-50 hover:text-slate-950 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700 dark:hover:bg-slate-700 dark:hover:text-white max-[520px]:px-3"
+                    onClick={openPromptMarket}
+                    aria-label="打开提示词库"
+                    title="打开提示词库"
                   >
                     <Store className="size-4" />
                     <span className="hidden sm:inline">市场</span>
@@ -2740,6 +2823,20 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
         open={lightboxOpen}
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
+      />
+      <PromptMarketModal
+        open={promptMarketOpen}
+        onOpenChange={(open) => {
+          setPromptMarketOpen(open);
+          if (!open) {
+            setPromptTemplateSeed(null);
+          }
+        }}
+        isAdmin={session.role === "admin"}
+        darkMode={isDarkTheme}
+        createSeed={promptTemplateSeed}
+        onCreateSeedConsumed={() => setPromptTemplateSeed(null)}
+        onApplyTemplate={handleApplyPromptTemplate}
       />
       <Dialog open={promptOptimizeDialogOpen} onOpenChange={setPromptOptimizeDialogOpen}>
         <DialogContent
@@ -2928,7 +3025,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
 }
 
 export default function StudioPage() {
-  const { isCheckingAuth, session } = useAuthGuard();
+  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
 
   if (isCheckingAuth || !session) {
     return (

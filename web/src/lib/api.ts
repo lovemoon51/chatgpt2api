@@ -5,6 +5,7 @@ import { httpRequest, request } from "@/lib/request";
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
+export type ImageResolution = "1k" | "2k" | "4k";
 export type AuthRole = "admin" | "user";
 
 export type OpenAIModel = {
@@ -261,6 +262,9 @@ export type ManagedImageListFilters = {
   search?: string;
   tags?: string[];
   tag?: string;
+  owner?: string;
+  mode?: string;
+  model?: string;
   sort?: string;
   order?: "asc" | "desc" | string;
   page?: number;
@@ -276,6 +280,34 @@ export type ManagedImageListResponse = {
   pages?: number;
 };
 
+export type ManagedImagesPublicVisibilityResponse = {
+  ok: boolean;
+  updated: number;
+  public: boolean;
+};
+
+export type PublicDiscoverImage = {
+  id: string;
+  title: string;
+  subtitle: string;
+  prompt: string;
+  imageUrl: string;
+  imageFallbackUrl?: string;
+  path?: string;
+  created_at?: string;
+  tags?: string[];
+};
+
+export type PublicDiscoverImageListResponse = {
+  items: PublicDiscoverImage[];
+  groups: Array<{ date: string; items: PublicDiscoverImage[] }>;
+  total?: number;
+  page?: number;
+  page_size?: number;
+  pages?: number;
+  has_more?: boolean;
+};
+
 export type SystemLog = {
   id: string;
   time: string;
@@ -287,7 +319,7 @@ export type SystemLog = {
 
 export type ImageResponse = {
   created: number;
-  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data: Array<{ b64_json?: string; url?: string; signed_url?: string; revised_prompt?: string }>;
 };
 
 export type ImageTask = {
@@ -301,6 +333,7 @@ export type ImageTask = {
   mode: "generate" | "edit";
   model?: ImageModel;
   size?: string;
+  resolution?: ImageResolution | string;
   created_at: string;
   updated_at: string;
   queued_at?: string;
@@ -312,7 +345,7 @@ export type ImageTask = {
   duration_ms?: number;
   queue_duration_ms?: number;
   total_duration_ms?: number;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data?: Array<{ b64_json?: string; url?: string; signed_url?: string; revised_prompt?: string }>;
   error?: string;
 };
 
@@ -327,31 +360,139 @@ export type ImageTaskTimingPayload = {
   phase?: string;
 };
 
+export type PromptTemplateVisibility = "private" | "public";
+export type PromptTemplateReviewStatus = "draft" | "pending" | "approved" | "rejected";
+export type PromptTemplateScope = "public" | "private" | "favorites" | "submissions" | "review";
+
+export type PromptTemplatePreviewImage = {
+  url: string;
+  thumbnail_url?: string;
+  source_image_id?: string;
+};
+
+export type PromptTemplate = {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  model: string;
+  size: string;
+  count: number;
+  tags: string[];
+  preview_image: PromptTemplatePreviewImage;
+  owner_id: string;
+  owner_name: string;
+  visibility: PromptTemplateVisibility;
+  review_status: PromptTemplateReviewStatus;
+  review_reason?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  created_at: string;
+  updated_at: string;
+  is_favorited?: boolean;
+};
+
+export type PromptTemplateInput = {
+  title: string;
+  description?: string;
+  prompt: string;
+  model?: string;
+  size?: string;
+  count?: number;
+  tags?: string[];
+  preview_image?: PromptTemplatePreviewImage;
+  visibility?: PromptTemplateVisibility;
+};
+
+export type PromptTemplateReviewInput = {
+  action: "approve" | "reject";
+  reason?: string;
+};
+
+export type PromptTemplateApplyPayload = {
+  prompt: string;
+  model: string;
+  size: string;
+  count: number;
+};
+
+export type PromptTemplateListFilters = {
+  scope?: PromptTemplateScope;
+  q?: string;
+  tag?: string;
+  status?: PromptTemplateReviewStatus | "";
+};
+
+export type PromptTemplateStats = {
+  public: number;
+  private: number;
+  favorites: number;
+  submissions: number;
+  review?: number;
+};
+
+type PromptTemplateListResponse = {
+  items: PromptTemplate[];
+};
+
+type PromptTemplateMutationResponse = {
+  item: PromptTemplate;
+};
+
 export type LoginResponse = {
   ok: boolean;
   version: string;
   role: AuthRole;
   subject_id: string;
   name: string;
+  email?: string;
   access_token?: string;
   limits?: UserKeyLimits | null;
+};
+
+export type ActivateUserInput = {
+  email: string;
+  password: string;
+  accessCode: string;
+  name?: string;
 };
 
 export type UserKey = {
   id: string;
   name: string;
+  email?: string;
   role: "user";
   enabled: boolean;
   created_at: string | null;
+  updated_at?: string | null;
   last_used_at: string | null;
+  last_login_ip?: string | null;
+  key_consumed_at?: string | null;
+  last_checkin_date?: string | null;
   limits?: UserKeyLimits | null;
 };
 
 export type UserKeyLimits = {
   requests_per_day?: number | null;
   images_per_day?: number | null;
+  images_total?: number | null;
+  images_used?: number | null;
+  images_remaining?: number | null;
   concurrency?: number | null;
   models?: string[];
+};
+
+export type UserKeyCreateResult = {
+  item: UserKey;
+  key: string;
+  name?: string;
+};
+
+export type UserCheckInResponse = {
+  awarded: boolean;
+  bonus_images: number;
+  bonus_credits?: number;
+  user: UserKey;
 };
 
 export type DashboardMetricGroup = {
@@ -612,6 +753,28 @@ export async function login(loginValue: string) {
   });
 }
 
+export async function loginWithPassword(email: string, password: string) {
+  const normalizedEmail = String(email || "").trim();
+  return httpRequest<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: { email: normalizedEmail, password },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function activateUser({ email, password, accessCode, name = "" }: ActivateUserInput) {
+  return httpRequest<LoginResponse>("/auth/activate", {
+    method: "POST",
+    body: {
+      email: String(email || "").trim(),
+      password,
+      access_code: accessCode,
+      name: String(name || "").trim(),
+    },
+    redirectOnUnauthorized: false,
+  });
+}
+
 export async function fetchModels() {
   return httpRequest<ModelListResponse>("/v1/models");
 }
@@ -865,7 +1028,50 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string) {
+export type ImageDescriptionResult = {
+  description?: string;
+  tags?: string[];
+  prompt?: string;
+  analysis?: {
+    subject?: string;
+    scene?: string;
+    lighting?: string;
+    style?: string;
+    composition?: string;
+    [key: string]: string | undefined;
+  };
+};
+
+export async function createImageDescriptionTask(
+  clientTaskId: string,
+  file: File,
+  prompt?: string,
+  model?: ImageModel,
+) {
+  const formData = new FormData();
+  formData.append("image", file);
+  formData.append("client_task_id", clientTaskId);
+  if (prompt) {
+    formData.append("prompt", prompt);
+  }
+  if (model) {
+    formData.append("model", model);
+  }
+
+  return httpRequest<ImageTask>("/api/image-tasks/descriptions", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function createImageGenerationTask(
+  clientTaskId: string,
+  prompt: string,
+  model?: ImageModel,
+  size?: string,
+  isPublic = false,
+  resolution?: ImageResolution | string,
+) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -873,6 +1079,8 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       prompt,
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
+      ...(resolution ? { resolution } : {}),
+      public: isPublic,
     },
   });
 }
@@ -883,6 +1091,8 @@ export async function createImageEditTask(
   prompt: string,
   model?: ImageModel,
   size?: string,
+  isPublic = false,
+  resolution?: ImageResolution | string,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -898,6 +1108,10 @@ export async function createImageEditTask(
   if (size) {
     formData.append("size", size);
   }
+  if (resolution) {
+    formData.append("resolution", resolution);
+  }
+  formData.append("public", String(isPublic));
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",
@@ -927,6 +1141,60 @@ export async function reportImageTaskTiming(taskId: string, payload: ImageTaskTi
       body: payload,
     },
   );
+}
+
+export async function fetchPromptTemplates(filters: PromptTemplateListFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.scope) params.set("scope", filters.scope);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.status) params.set("status", filters.status);
+  return httpRequest<PromptTemplateListResponse>(
+    `/api/prompt-templates${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+}
+
+export async function fetchPromptTemplateStats() {
+  return httpRequest<PromptTemplateStats>("/api/prompt-templates/stats");
+}
+
+export async function createPromptTemplate(payload: PromptTemplateInput) {
+  return httpRequest<PromptTemplateMutationResponse>("/api/prompt-templates", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function updatePromptTemplate(id: string, payload: Partial<PromptTemplateInput>) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: payload,
+  });
+}
+
+export async function deletePromptTemplate(id: string) {
+  return httpRequest<{ ok: boolean }>(`/api/prompt-templates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function favoritePromptTemplate(id: string) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}/favorite`, {
+    method: "POST",
+  });
+}
+
+export async function unfavoritePromptTemplate(id: string) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}/favorite`, {
+    method: "DELETE",
+  });
+}
+
+export async function reviewPromptTemplate(id: string, payload: PromptTemplateReviewInput) {
+  return httpRequest<PromptTemplateMutationResponse>(`/api/prompt-templates/${encodeURIComponent(id)}/review`, {
+    method: "POST",
+    body: payload,
+  });
 }
 
 export async function fetchSettingsConfig() {
@@ -999,6 +1267,33 @@ export async function fetchManagedImages(filters: ManagedImageListFilters) {
   );
 }
 
+export async function fetchPublicDiscoverImages(filters: Pick<ManagedImageListFilters, "page" | "page_size"> = {}) {
+  const params = new URLSearchParams();
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  return httpRequest<PublicDiscoverImageListResponse>(
+    `/api/public/discover/images${params.toString() ? `?${params.toString()}` : ""}`,
+    { redirectOnUnauthorized: false },
+  );
+}
+
+export async function updateManagedImagesPublicVisibility(isPublic: boolean, filters: ManagedImageListFilters) {
+  return httpRequest<ManagedImagesPublicVisibilityResponse>("/api/images/public-visibility", {
+    method: "POST",
+    body: {
+      public: isPublic,
+      start_date: filters.start_date,
+      end_date: filters.end_date,
+      q: filters.q || filters.search,
+      tags: filters.tags,
+      tag: filters.tag,
+      owner: filters.owner,
+      mode: filters.mode,
+      model: filters.model,
+    },
+  });
+}
+
 export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
@@ -1065,16 +1360,16 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string, limits?: UserKeyLimits) {
-  return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
+export async function createUserKey(name: string, limits?: UserKeyLimits, count?: number) {
+  return httpRequest<{ item: UserKey; key: string; keys: UserKeyCreateResult[]; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name, ...(limits ? { limits } : {}) },
+    body: { name, ...(typeof count === "number" ? { count } : {}), ...(limits ? { limits } : {}) },
   });
 }
 
 export async function updateUserKey(
   keyId: string,
-  updates: { enabled?: boolean; name?: string; key?: string; limits?: UserKeyLimits },
+  updates: { enabled?: boolean; email?: string; name?: string; key?: string; limits?: UserKeyLimits },
 ) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
@@ -1085,6 +1380,13 @@ export async function updateUserKey(
 export async function deleteUserKey(keyId: string) {
   return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "DELETE",
+  });
+}
+
+export async function checkInUser() {
+  return httpRequest<UserCheckInResponse>("/api/auth/checkin", {
+    method: "POST",
+    body: {},
   });
 }
 

@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
 
 from services import image_asset_service
 from services import image_service
 from services.protocol import conversation
+from services.signed_url_service import verify_signed_url
 
 
 ADMIN = {"id": "admin", "name": "管理员", "role": "admin"}
@@ -190,6 +192,114 @@ class ImageOwnershipTests(unittest.TestCase):
         filtered = image_service.list_images("http://testserver", identity=ADMIN, tag="pet,orange")
 
         self.assertEqual([item["rel"] for item in filtered["items"]], ["2026/05/20/cat.png"])
+
+    def test_public_discover_images_only_include_dual_tagged_assets_with_signed_urls(self) -> None:
+        self.write_image("2026/05/20/public-discover.png", PNG_BYTES)
+        self.write_image("2026/05/20/public-only.png", PNG_BYTES)
+        self.write_image("2026/05/20/discover-only.png", PNG_BYTES)
+        self.write_image("2026/05/20/private.png", PNG_BYTES)
+        self.tags["2026/05/20/public-discover.png"] = ["public", "discover", "poster"]
+        self.tags["2026/05/20/public-only.png"] = ["public"]
+        self.tags["2026/05/20/discover-only.png"] = ["discover"]
+        self.tags["2026/05/20/private.png"] = ["poster"]
+        image_asset_service.upsert_asset(
+            "2026/05/20/public-discover.png",
+            file_path=self.images_dir / "2026/05/20/public-discover.png",
+            owner_identity=USER,
+            prompt="public product poster",
+            revised_prompt="polished public product poster",
+            tags=self.tags["2026/05/20/public-discover.png"],
+        )
+        image_asset_service.upsert_asset(
+            "2026/05/20/public-only.png",
+            file_path=self.images_dir / "2026/05/20/public-only.png",
+            owner_identity=USER,
+            tags=self.tags["2026/05/20/public-only.png"],
+        )
+        image_asset_service.upsert_asset(
+            "2026/05/20/discover-only.png",
+            file_path=self.images_dir / "2026/05/20/discover-only.png",
+            owner_identity=OTHER_USER,
+            tags=self.tags["2026/05/20/discover-only.png"],
+        )
+        image_asset_service.upsert_asset(
+            "2026/05/20/private.png",
+            file_path=self.images_dir / "2026/05/20/private.png",
+            owner_identity=OTHER_USER,
+            tags=self.tags["2026/05/20/private.png"],
+        )
+
+        result = image_service.list_public_discover_images("http://testserver", page_size=12)
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["id"], "2026/05/20/public-discover.png")
+        self.assertEqual(result["items"][0]["title"], "public product poster")
+        self.assertEqual(result["items"][0]["prompt"], "polished public product poster")
+        self.assertIn("/public-images/2026/05/20/public-discover.png?", result["items"][0]["imageUrl"])
+        parsed = urlparse(result["items"][0]["imageUrl"])
+        params = parse_qs(parsed.query)
+        self.assertTrue(verify_signed_url("2026/05/20/public-discover.png", int(params["expires"][0]), params["signature"][0]))
+
+    def test_public_discover_images_include_approved_public_template_previews_without_asset_tags(self) -> None:
+        self.write_image("2026/05/20/template-approved.png", PNG_BYTES)
+        self.write_image("2026/05/20/template-pending.png", PNG_BYTES)
+        self.write_image("2026/05/20/template-private.png", PNG_BYTES)
+        fake_prompt_template_service = SimpleNamespace(
+            list=lambda identity, **filters: {
+                "items": [
+                    {
+                        "id": "template-approved",
+                        "title": "水晶质感产品海报",
+                        "description": "适合食品新品首发",
+                        "prompt": "晶透玻璃质感的产品海报",
+                        "tags": ["product", "poster"],
+                        "preview_image": {"url": "/images/2026/05/20/template-approved.png"},
+                        "visibility": "public",
+                        "review_status": "approved",
+                        "created_at": "2026-05-20T10:00:00+00:00",
+                        "updated_at": "2026-05-20T10:00:00+00:00",
+                    },
+                    {
+                        "id": "template-pending",
+                        "title": "待审核模板",
+                        "prompt": "pending template",
+                        "preview_image": {"url": "/images/2026/05/20/template-pending.png"},
+                        "visibility": "public",
+                        "review_status": "pending",
+                    },
+                    {
+                        "id": "template-private",
+                        "title": "私有模板",
+                        "prompt": "private template",
+                        "preview_image": {"url": "/images/2026/05/20/template-private.png"},
+                        "visibility": "private",
+                        "review_status": "approved",
+                    },
+                    {
+                        "id": "template-external",
+                        "title": "外链模板",
+                        "prompt": "external template",
+                        "preview_image": {"url": "https://example.com/external.png"},
+                        "visibility": "public",
+                        "review_status": "approved",
+                    },
+                ]
+            }
+        )
+
+        with mock.patch("services.prompt_template_service.prompt_template_service", fake_prompt_template_service):
+            result = image_service.list_public_discover_images("http://testserver", page_size=12)
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["id"], "2026/05/20/template-approved.png")
+        self.assertEqual(result["items"][0]["title"], "水晶质感产品海报")
+        self.assertEqual(result["items"][0]["subtitle"], "1 x 1")
+        self.assertEqual(result["items"][0]["prompt"], "晶透玻璃质感的产品海报")
+        self.assertEqual(result["items"][0]["tags"], ["product", "poster"])
+        self.assertIn("/public-images/2026/05/20/template-approved.png?", result["items"][0]["imageUrl"])
+        parsed = urlparse(result["items"][0]["imageUrl"])
+        params = parse_qs(parsed.query)
+        self.assertTrue(verify_signed_url("2026/05/20/template-approved.png", int(params["expires"][0]), params["signature"][0]))
 
     def test_delete_images_marks_asset_deleted(self) -> None:
         self.write_image("2026/05/20/remove.png", PNG_BYTES)

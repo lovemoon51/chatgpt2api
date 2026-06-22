@@ -17,6 +17,7 @@ from urllib.parse import quote, urlencode
 from curl_cffi import requests
 
 from services.config import BASE_DIR, CONFIG_FILE, DATA_DIR, config, load_backup_state, save_backup_state
+from services.image_storage_service import IMAGE_INDEX_FILE
 from services.image_tags_service import TAGS_FILE
 from services.system_status_service import worker_error, worker_heartbeat, worker_started, worker_stopped
 
@@ -1019,6 +1020,7 @@ class BackupService:
                 self._add_file_to_archive(archive, DATA_DIR / "logs.jsonl", "data/logs.jsonl")
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
+                self._add_file_to_archive(archive, IMAGE_INDEX_FILE, "data/image_index.json")
             if include.get("accounts_snapshot"):
                 self._add_bytes_to_archive(
                     archive,

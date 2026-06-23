@@ -823,17 +823,25 @@ class AuthService:
             for index, item in enumerate(self._items):
                 if not bool(item.get("enabled", True)):
                     continue
-                if item.get("role") == "user" and (
+                # 检查是否是已绑定邮箱的用户（可重复使用的密钥）
+                is_activated_user = (
+                    item.get("role") == "user"
+                    and bool(_normalize_email(item.get("email")))
+                )
+                # 对于未激活的访问码，检查是否已被消费
+                if item.get("role") == "user" and not is_activated_user and (
                     not bool(item.get("key_enabled", True)) or self._clean(item.get("key_consumed_at"))
                 ):
                     continue
                 stored_hash = self._clean(item.get("key_hash"))
                 if not stored_hash or not hmac.compare_digest(stored_hash, candidate_hash):
                     continue
+                # 只有未激活的访问码才在首次使用时消费，已激活的用户密钥可重复使用
+                should_consume = item.get("role") == "user" and not is_activated_user
                 return self._mark_used_locked(
                     item,
                     index,
-                    consume_access_code=item.get("role") == "user",
+                    consume_access_code=should_consume,
                     login_ip=login_ip,
                 )
         return None

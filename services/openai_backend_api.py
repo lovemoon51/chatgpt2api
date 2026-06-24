@@ -43,6 +43,12 @@ DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+
+# 图片文件 ID 正则表达式
+FILE_SERVICE_ID_RE = re.compile(r"file-service://([A-Za-z0-9_-]+)")
+REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
+SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
+
 PLUS_PROMO_PHRASES = (
     "你已获得 1 个月的 Plus 套餐优惠促销代码",
     "plus 套餐优惠促销代码",
@@ -750,33 +756,70 @@ class OpenAIBackendAPI:
         ensure_ok(response, path)
         return _json_response(response, path)
 
+    @staticmethod
+    def _add_unique(values: list[str], candidates: list[str]) -> None:
+        """将候选值添加到列表，去重。"""
+        for candidate in candidates:
+            if candidate and candidate not in values:
+                values.append(candidate)
+
+    @classmethod
+    def _extract_image_reference_ids(cls, payload: Any) -> tuple[list[str], list[str]]:
+        """递归提取 payload 中的图片文件 ID 和 sediment ID。"""
+        file_ids: list[str] = []
+        sediment_ids: list[str] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, str):
+                # 只提取真正的图片文件 ID（file_00000000... 格式）和 file-service:// URI
+                cls._add_unique(file_ids, FILE_SERVICE_ID_RE.findall(value))
+                cls._add_unique(file_ids, REAL_IMAGE_FILE_ID_RE.findall(value))
+                cls._add_unique(sediment_ids, SEDIMENT_ID_RE.findall(value))
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return file_ids, sediment_ids
+
+    @classmethod
+    def _has_image_asset_pointer(cls, payload: Any) -> bool:
+        """递归检查 payload 中是否包含图片资产指针。"""
+        if isinstance(payload, dict):
+            if str(payload.get("content_type") or "") == "image_asset_pointer":
+                return True
+            asset_pointer = str(payload.get("asset_pointer") or "")
+            if asset_pointer.startswith(("file-service://", "sediment://")):
+                return True
+            return any(cls._has_image_asset_pointer(item) for item in payload.values())
+        if isinstance(payload, list):
+            return any(cls._has_image_asset_pointer(item) for item in payload)
+        return False
+
     def _extract_image_tool_records(self, data: Dict[str, Any]) -> list[Dict[str, Any]]:
         """从 conversation 明细里提取图片工具输出记录。"""
         mapping = data.get("mapping") or {}
-        file_pat = re.compile(r"file-service://([A-Za-z0-9_-]+)")
-        sed_pat = re.compile(r"sediment://([A-Za-z0-9_-]+)")
         records = []
         for message_id, node in mapping.items():
             message = (node or {}).get("message") or {}
             author = message.get("author") or {}
             metadata = message.get("metadata") or {}
             content = message.get("content") or {}
-            if author.get("role") != "tool":
+            role = str(author.get("role") or "").strip().lower()
+            if role not in {"tool", "assistant"}:
                 continue
-            if metadata.get("async_task_type") != "image_gen":
+            is_image_gen = metadata.get("async_task_type") == "image_gen"
+            has_asset_pointer = self._has_image_asset_pointer(content) or self._has_image_asset_pointer(metadata)
+            if role == "assistant" and not (is_image_gen or has_asset_pointer):
                 continue
-            if content.get("content_type") != "multimodal_text":
+            file_ids, sediment_ids = self._extract_image_reference_ids({"content": content, "metadata": metadata})
+            if not is_image_gen and not has_asset_pointer and not file_ids and not sediment_ids:
                 continue
-            file_ids, sediment_ids = [], []
-            for part in content.get("parts") or []:
-                text = (part.get("asset_pointer") or "") if isinstance(part, dict) else (
-                    part if isinstance(part, str) else "")
-                for hit in file_pat.findall(text):
-                    if hit not in file_ids:
-                        file_ids.append(hit)
-                for hit in sed_pat.findall(text):
-                    if hit not in sediment_ids:
-                        sediment_ids.append(hit)
             records.append(
                 {"message_id": message_id, "create_time": message.get("create_time") or 0, "file_ids": file_ids,
                  "sediment_ids": sediment_ids})

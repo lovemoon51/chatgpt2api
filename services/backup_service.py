@@ -10,7 +10,7 @@ import subprocess
 import tarfile
 import threading
 import zipfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -22,7 +22,7 @@ from services.system_status_service import worker_error, worker_heartbeat, worke
 
 
 def _utc_now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _iso_now() -> str:

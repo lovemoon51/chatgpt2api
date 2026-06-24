@@ -735,6 +735,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
   const taskQueueButtonRef = useRef<HTMLButtonElement>(null);
   const taskQueueBellRef = useRef<HTMLButtonElement>(null);
   const dragDepthRef = useRef(0);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const [prompt, setPrompt] = useState("");
   const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
@@ -873,6 +874,31 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
       return next.size === current.size ? current : next;
     });
   }, [conversations]);
+
+  const scrollToBottom = useCallback(() => {
+    if (!messagesContainerRef.current) {
+      return;
+    }
+    const container = messagesContainerRef.current;
+    // 延迟滚动以确保内容已渲染
+    setTimeout(() => {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 100);
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatMessages.length, conversations.length, scrollToBottom]);
+
+  useEffect(() => {
+    if (!selectedConversation) {
+      return;
+    }
+    scrollToBottom();
+  }, [selectedConversation?.turns.length, selectedConversation?.turns[selectedConversation.turns.length - 1]?.status, scrollToBottom]);
 
   useEffect(() => {
     return () => {
@@ -1129,8 +1155,19 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     setLightboxOpen(false);
   }, []);
 
-  const handleCreateDraft = () => {
-    setSelectedConversationId(null);
+  const handleCreateDraft = async () => {
+    const conversationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const newConversation: ImageConversation = {
+      id: conversationId,
+      title: "新对话",
+      createdAt: now,
+      updatedAt: now,
+      turns: [],
+    };
+
+    await persistConversation(newConversation);
+    setSelectedConversationId(conversationId);
     setIsSidebarOpen(false);
     closeStudioOverlays();
     if (studioMode === "chat") {
@@ -1617,7 +1654,12 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     };
 
     const nextConversation: ImageConversation = targetConversation
-      ? { ...targetConversation, updatedAt: now, turns: [...targetConversation.turns, draftTurn] }
+      ? {
+          ...targetConversation,
+          title: targetConversation.title === "新对话" ? buildConversationTitle(trimmedPrompt) : targetConversation.title,
+          updatedAt: now,
+          turns: [...targetConversation.turns, draftTurn],
+        }
       : {
           id: conversationId,
           title: buildConversationTitle(trimmedPrompt),
@@ -1631,6 +1673,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
     await persistConversation(nextConversation);
     void runConversationQueue(conversationId);
     toast.success(targetConversation ? "已发送到当前对话" : "已创建新对话");
+    scrollToBottom();
   };
 
   const handleRetryTurn = useCallback(
@@ -2169,7 +2212,7 @@ function StudioPageContent({ session }: { session: StoredAuthSession }) {
             </div>
           </div>
 
-          <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
+          <div ref={messagesContainerRef} className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
             <div className="mx-auto flex w-full max-w-[1060px] flex-col gap-7">
               {!isImageMode ? (
                 chatMessages.length > 0 ? (

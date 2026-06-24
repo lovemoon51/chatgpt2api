@@ -638,49 +638,49 @@ const fallbackCreations: CreationItem[] = [
     title: "光影角色海报",
     subtitle: "GPT-IMAGE-2",
     prompt: "夜色城堡前的幻想角色海报，柔和月光，电影级光影，细节丰富。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1024&h=1024&fit=crop",
   },
   {
     id: "product",
     title: "夏日产品主视觉",
     subtitle: "2:3",
     prompt: "清爽夏日汽水产品海报，冰块、水珠、阳光折射，高级商业摄影。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1546548970-71785318a17b?w=800&h=1200&fit=crop",
   },
   {
     id: "card",
     title: "镭射收藏卡牌",
     subtitle: "公开",
     prompt: "东方幻想角色镭射收藏卡牌，稀有卡面，金属边框，技能说明布局。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1024&h=1024&fit=crop",
   },
   {
     id: "cover",
     title: "小红书封面",
     subtitle: "智能",
     prompt: "小红书封面设计，标题突出，清新明亮，适合 AI 绘图教程内容。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1557683316-973673baf926?w=1024&h=1024&fit=crop",
   },
   {
     id: "architecture",
     title: "建筑拆解图",
     subtitle: "16:9",
     prompt: "经典建筑拆解信息图，中式美学标注，清晰结构分层，细节注释。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1511818966892-d7d671e672a2?w=1600&h=900&fit=crop",
   },
   {
     id: "icon-grid",
     title: "游戏图标矩阵",
     subtitle: "1:1",
     prompt: "复古幻想 RPG 物品图标矩阵，统一像素艺术风格，标签清晰。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=1024&h=1024&fit=crop",
   },
   {
     id: "fashion",
     title: "AI 服装灵感板",
     subtitle: "4:3",
     prompt: "一张 AI Fashion Inspiration Board，三套完整造型，专业提案板排版。",
-    imageUrl: "",
+    imageUrl: "https://images.unsplash.com/photo-1483985988355-763728e1935b?w=1200&h=900&fit=crop",
   },
   {
     id: "branding",
@@ -2959,6 +2959,7 @@ export function GenerateConversationStage({
   const [liveNowMs, setLiveNowMs] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
+  const generateRecordScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!isStageActive) {
@@ -2996,6 +2997,30 @@ export function GenerateConversationStage({
     setLightboxOpen(true);
   };
 
+  const scrollGenerateRecordToBottom = useCallback(() => {
+    if (!generateRecordScrollRef.current) {
+      return;
+    }
+    const container = generateRecordScrollRef.current;
+    setTimeout(() => {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 100);
+  }, []);
+
+  useEffect(() => {
+    scrollGenerateRecordToBottom();
+  }, [visibleTasks.length, scrollGenerateRecordToBottom]);
+
+  useEffect(() => {
+    if (visibleTasks.length === 0) {
+      return;
+    }
+    scrollGenerateRecordToBottom();
+  }, [visibleTasks[visibleTasks.length - 1]?.status, scrollGenerateRecordToBottom, visibleTasks.length]);
+
   return (
     <>
     <section
@@ -3020,6 +3045,7 @@ export function GenerateConversationStage({
             className="mx-auto flex max-h-full min-h-0 w-full max-w-[1040px] flex-1 overflow-hidden rounded-[32px] bg-white/70 p-3 shadow-[0_24px_80px_-58px_rgba(15,23,42,0.72)] ring-1 ring-emerald-100/62 backdrop-blur-xl max-[560px]:w-full max-[560px]:rounded-[18px] max-[560px]:px-2 max-[560px]:py-2"
           >
           <div
+            ref={generateRecordScrollRef}
             data-cola-panel="generate-record-scroll"
             data-cola-behavior="internal-record-scroll"
             className="hide-scrollbar flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain px-5 py-4 pb-12 max-[560px]:gap-5 max-[560px]:px-3"
